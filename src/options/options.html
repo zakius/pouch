@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pouch Settings</title>
+    <link rel="stylesheet" href="options.css">
+</head>
+
+<body>
+    <div class="container">
+        <div class="settings-section">
+            <h2>Backend Settings</h2>
+            <div class="form-group">
+                <label for="backend-select">Service</label>
+                <select id="backend-select" class="form-control">
+
+                </select>
+            </div>
+
+            <!-- Dynamic configuration container -->
+            <div id="config-container"></div>
+        </div>
+
+        <div class="settings-section">
+            <h2>URL Normalization</h2>
+            <div class="form-group-checkbox">
+                <input type="checkbox" id="normalize-on-save">
+                <label for="normalize-on-save">Normalize URLs when saving</label>
+                <div class="tooltip-container">
+                    <button type="button" class="tooltip-icon" aria-describedby="tooltip-normalize-on-save">?</button>
+                <span id="tooltip-normalize-on-save" class="tooltip-text">
+                    Cleans up URLs by removing tracking parameters and converting them to a canonical format (e.g.,
+                    YouTube Shorts to regular videos) before saving. Helps avoid duplicates.
+                </span>
+                </div>
+            </div>
+            <div class="form-group-checkbox">
+                <input type="checkbox" id="normalize-on-compare">
+                <label for="normalize-on-compare">Normalize URLs on comparison</label>
+                <div class="tooltip-container">
+                    <button type="button" class="tooltip-icon" aria-describedby="tooltip-normalize-on-compare">?</button>
+                <span id="tooltip-normalize-on-compare" class="tooltip-text">
+                    Normalizes the current page's URL before checking if it's saved. Use this if you enabled
+                    "Normalize on save" after already saving some articles, to find those older, non-normalized
+                    links.
+                </span>
+                </div>
+            </div>
+        </div>
+
+        <div class="form-group-checkbox">
+            <input type="checkbox" id="enable-verbose-logging">
+            <label for="enable-verbose-logging">Enable verbose logging</label>
+        </div>
+
+        <div class="form-group form-actions">
+            <button id="save" class="button primary">Save Settings</button>
+            <button id="test-connection" class="button">Test Connection</button>
+            <div id="status" class="status"></div>
+        </div>
+    </div>
+    <script src="options.js" type="module"></script>
+</body>
+
+</html>

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <!-- Bookmark outline -->
+    <path d="M22 8H10C8.9 8 8 8.9 8 10V26L16 20L24 26V10C24 8.9 23.1 8 22 8Z"
+          stroke="#2B2B2B"
+          stroke-width="2"
+          fill="none"/>
+
+    <!-- Checkmark -->
+    <path d="M12 16L15 19L20 14"
+          stroke="#2B2B2B"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"/>
+</svg>

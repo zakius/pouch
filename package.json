@@ -1,0 +1,28 @@
+{
+	"name": "pouch-extension",
+	"version": "1.0.0",
+	"description": "Browser extension for Pouch",
+	"type": "module",
+	"scripts": {
+		"lint": "bunx biome check --write src",
+		"type-check": "tsgo --project tsconfig.json --noEmit",
+		"build:firefox": "bun run build.ts firefox",
+		"build:chromium": "bun run build.ts chromium",
+		"build:chromium-mv2": "bun run build.ts chromium-mv2",
+		"watch:firefox": "bun run build.ts firefox --watch",
+		"watch:chromium": "bun run build.ts chromium --watch",
+		"release": "bun run build.ts firefox && bun run build.ts chromium",
+		"release:sign": "bun run build.ts firefox --sign && bun run build.ts chromium"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.0.5",
+		"@types/firefox-webext-browser": "^120.0.4",
+		"@types/node": "^22.15.32",
+		"@typescript/native-preview": "^7.0.0-dev.20250624.1",
+		"bun-types": "latest",
+		"web-ext": "^8.8.0"
+	},
+	"dependencies": {
+		"zod": "^3.25.67"
+	}
+}

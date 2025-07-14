@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <!-- Bookmark outline with glow -->
+    <path d="M22 8H10C8.9 8 8 8.9 8 10V26L16 20L24 26V10C24 8.9 23.1 8 22 8Z"
+          stroke="#FFD700"
+          stroke-width="2.5"
+          fill="none"/>
+
+    <!-- Plus sign with glow -->
+    <path d="M16 12V20M12 16H20"
+          stroke="#FFD700"
+          stroke-width="2.5"
+          stroke-linecap="round"/>
+</svg>

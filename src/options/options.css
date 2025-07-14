@@ -1,0 +1,308 @@
+/* Options page styles */
+:root {
+	--primary-color: #3498db;
+	--primary-hover: #2980b9;
+	--secondary-color: #757575;
+	--success-color: #2ecc71;
+	--error-color: #e74c3c;
+	--background-color: #f5f5f5;
+	--text-color: #333;
+	--border-color: #ddd;
+	--shadow-color: rgba(0, 0, 0, 0.1);
+}
+
+* {
+	margin: 0;
+	padding: 0;
+	box-sizing: border-box;
+}
+
+body {
+	width: 100%;
+	min-width: 100%;
+	box-sizing: border-box;
+	font-family:
+		-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu,
+		Cantarell, sans-serif;
+	margin: 0;
+	padding: 20px;
+	background-color: var(--background-color);
+	color: var(--text-color);
+	line-height: 1.5;
+}
+
+.container {
+	width: 100%;
+	min-width: 100%;
+	box-sizing: border-box;
+	max-width: 960px;
+	margin: 0 auto;
+	background: white;
+	padding: 20px;
+	border-radius: 8px;
+	box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+header {
+	margin-bottom: 2rem;
+}
+
+h1 {
+	margin: 0 0 20px;
+	color: var(--text-color);
+	font-size: 24px;
+}
+
+h2 {
+	margin: 20px 0 10px;
+	font-size: 18px;
+	color: var(--text-color);
+}
+
+.settings-section {
+	margin-bottom: 20px;
+	padding: 15px;
+	border: 1px solid var(--border-color);
+	border-radius: 4px;
+}
+
+.form-group {
+	margin-bottom: 15px;
+}
+
+label {
+	display: block;
+	margin-bottom: 5px;
+	font-weight: 500;
+}
+
+.form-control {
+	width: 100%;
+	padding: 8px;
+	border: 1px solid var(--border-color);
+	border-radius: 4px;
+	font-size: 14px;
+}
+
+.form-control:focus {
+	outline: none;
+	border-color: var(--primary-color);
+	box-shadow: 0 0 0 2px rgba(52, 152, 219, 0.2);
+}
+
+.help-text {
+	font-size: 0.875rem;
+	color: var(--secondary-color);
+	margin-top: 0.25rem;
+}
+
+.form-actions {
+	display: flex;
+	gap: 15px;
+}
+
+.button {
+	padding: 8px 16px;
+	border: 1px solid transparent;
+	border-radius: 4px;
+	font-size: 14px;
+	line-height: 1.5;
+	cursor: pointer;
+	transition: background-color 0.2s;
+}
+
+.button.primary {
+	background-color: var(--primary-color);
+	color: white;
+}
+
+.button.primary:hover {
+	background-color: #2980b9;
+}
+
+.secondary-button {
+	background-color: var(--secondary-color);
+	color: white;
+}
+
+.secondary-button:hover {
+	background-color: #616161;
+}
+
+.status {
+	display: flex;
+	align-items: center;
+	padding: 8px 16px;
+	border: 1px solid transparent;
+	border-radius: 4px;
+	font-size: 14px;
+	line-height: 1.5;
+	white-space: nowrap;
+	opacity: 0;
+	transition:
+		opacity 0.3s ease-in-out,
+		background-color 0.3s ease-in-out,
+		color 0.3s ease-in-out;
+}
+
+.status.show {
+	opacity: 1;
+}
+
+.status.error {
+	background-color: #fde8e8;
+	color: var(--error-color);
+	border: 1px solid var(--error-color);
+}
+
+.status.error::before {
+	content: "✖ ";
+	font-weight: bold;
+}
+
+.status.success {
+	background-color: #e8f8e8;
+	color: var(--success-color);
+	border: 1px solid var(--success-color);
+}
+
+.status.success::before {
+	content: "✔ ";
+}
+
+.backend-config {
+	margin-top: 20px;
+	padding: 15px;
+	border: 1px solid var(--border-color);
+	border-radius: 4px;
+	background-color: #fafafa;
+}
+
+.help-section {
+	margin-top: 2rem;
+	padding: 1.5rem;
+	background-color: #f5f5f5;
+	border-radius: 8px;
+}
+
+.help-section ol {
+	margin-left: 1.5rem;
+}
+
+.help-section li {
+	margin-bottom: 0.5rem;
+}
+
+.help-section code {
+	background-color: #e0e0e0;
+	padding: 0.2rem 0.4rem;
+	border-radius: 4px;
+	font-family: monospace;
+}
+
+/* Responsive design */
+@media (max-width: 600px) {
+	.container {
+		padding: 1rem;
+	}
+
+	.form-actions {
+		flex-direction: column;
+	}
+
+	.button {
+		width: 100%;
+	}
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--background-color: #1a1a1a;
+		--text-color: #fff;
+		--border-color: #333;
+	}
+
+	.container {
+		background: #2d2d2d;
+	}
+
+	.backend-config {
+		background-color: #333;
+	}
+
+	.form-control {
+		background-color: #2d2d2d;
+		color: #fff;
+		border-color: #444;
+	}
+
+	.form-control:focus {
+		border-color: var(--primary-color);
+	}
+}
+
+.form-group-checkbox {
+	display: flex;
+	align-items: center;
+	margin-bottom: 15px;
+}
+
+.form-group-checkbox input[type="checkbox"] {
+	margin-right: 10px;
+}
+
+.form-group-checkbox label {
+	margin-bottom: 0;
+}
+
+.description {
+	font-size: 0.8em;
+	color: #6c757d;
+	margin-left: 25px;
+	margin-top: 5px;
+}
+
+.tooltip-container {
+	position: relative;
+	display: inline-block;
+	margin-left: 8px;
+}
+
+.tooltip-icon {
+	cursor: pointer;
+	font-size: 0.9em;
+	color: #007bff;
+	border: 1px solid #007bff;
+	background-color: transparent;
+	border-radius: 50%;
+	width: 16px;
+	height: 16px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	font-weight: bold;
+	padding: 0;
+}
+
+.tooltip-text {
+	visibility: hidden;
+	width: 250px;
+	background-color: #555;
+	color: #fff;
+	text-align: center;
+	border-radius: 6px;
+	padding: 5px;
+	position: absolute;
+	z-index: 1;
+	bottom: 125%;
+	left: 50%;
+	margin-left: -125px;
+	opacity: 0;
+	transition: opacity 0.3s;
+}
+
+.tooltip-icon:focus + .tooltip-text,
+.tooltip-container:hover .tooltip-text {
+	visibility: visible;
+	opacity: 1;
+}
