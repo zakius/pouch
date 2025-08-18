@@ -2,15 +2,71 @@ import { z } from "zod";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
 import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
+
 export const raindropConfigSchema = z.object({
 	apiKey: z.string(),
 });
+
 export const raindropSettingsSchema = baseSettingsSchema.extend({
 	backend: z.literal("raindrop"),
 	apiConfig: raindropConfigSchema,
 });
+
 export type RaindropSettings = z.infer<typeof raindropSettingsSchema>;
 export type RaindropConfig = z.infer<typeof raindropConfigSchema>;
+
+// Zod schemas for API responses based on official documentation
+const raindropItemSchema = z.object({
+	_id: z.number(),
+	title: z.string(),
+	link: z.string(),
+	created: z.string(),
+	cover: z.string().optional(),
+	tags: z.array(z.string()),
+	// Additional fields that may be present
+	excerpt: z.string().optional(),
+	type: z.string().optional(),
+	domain: z.string().optional(),
+	lastUpdate: z.string().optional(),
+	important: z.boolean().optional(),
+	collection: z
+		.object({
+			$id: z.number(),
+		})
+		.optional(),
+});
+
+// Error response schemas based on official documentation
+const raindropErrorSchema = z.object({
+	result: z.literal(false),
+	error: z.union([z.number(), z.string()]).optional(),
+	errorMessage: z.string().optional(),
+});
+
+const raindropSuccessResponseSchema = z.object({
+	result: z.literal(true),
+});
+
+const raindropSaveResponseSchema = z.union([
+	raindropSuccessResponseSchema.extend({
+		item: raindropItemSchema,
+	}),
+	raindropErrorSchema,
+]);
+
+const raindropDeleteResponseSchema = z.union([
+	raindropSuccessResponseSchema,
+	raindropErrorSchema,
+]);
+
+const raindropSyncResponseSchema = z.union([
+	raindropSuccessResponseSchema.extend({
+		items: z.array(raindropItemSchema),
+		count: z.number().optional(),
+	}),
+	raindropErrorSchema,
+]);
+
 interface RaindropItem {
 	_id: number;
 	title: string;
@@ -18,7 +74,16 @@ interface RaindropItem {
 	created: string;
 	cover?: string;
 	tags: string[];
+	excerpt?: string;
+	type?: string;
+	domain?: string;
+	lastUpdate?: string;
+	important?: boolean;
+	collection?: {
+		$id: number;
+	};
 }
+
 export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings> {
 	public readonly displayName = "Raindrop.io";
 	private apiUrl = "https://api.raindrop.io/rest/v1";
@@ -58,10 +123,13 @@ export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings> {
 			}),
 		});
 		const data = await response.json();
-		if (!data.result) {
-			throw new Error("Failed to save article: API returned an error");
+		const validatedData = raindropSaveResponseSchema.parse(data);
+		if (!validatedData.result) {
+			throw new Error(
+				`Failed to save article: ${validatedData.errorMessage || "API returned an error"}`,
+			);
 		}
-		return this.mapArticle(data.item);
+		return this.mapArticle(validatedData.item);
 	}
 	async deleteArticle(id: number): Promise<void> {
 		const response = await this._fetchWithRateLimit(
@@ -74,8 +142,11 @@ export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings> {
 			},
 		);
 		const data = await response.json();
-		if (!data.result) {
-			throw new Error("Failed to delete article: API returned an error");
+		const validatedData = raindropDeleteResponseSchema.parse(data);
+		if (!validatedData.result) {
+			throw new Error(
+				`Failed to delete article: ${validatedData.errorMessage || "API returned an error"}`,
+			);
 		}
 	}
 	async sync(): Promise<Article[]> {
@@ -93,15 +164,18 @@ export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings> {
 				},
 			);
 			const data = await response.json();
-			if (!data.result) {
-				throw new Error("Failed to get articles: API returned an error");
+			const validatedData = raindropSyncResponseSchema.parse(data);
+			if (!validatedData.result) {
+				throw new Error(
+					`Failed to get articles: ${validatedData.errorMessage || "API returned an error"}`,
+				);
 			}
-			const articles = data.items.map((item: RaindropItem) =>
+			const articles = validatedData.items.map((item: RaindropItem) =>
 				this.mapArticle(item),
 			);
 			allArticles = allArticles.concat(articles);
 			if (page === 0) {
-				totalPages = Math.ceil(data.count / perPage);
+				totalPages = Math.ceil((validatedData.count || 0) / perPage);
 			}
 			page++;
 		} while (page < totalPages);

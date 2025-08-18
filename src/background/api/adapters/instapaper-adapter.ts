@@ -2,32 +2,100 @@ import { z } from "zod";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
 import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
+
 export const instapaperConfigSchema = z.object({
 	consumerKey: z.string(),
 	consumerSecret: z.string(),
 	username: z.string(),
 	password: z.string().optional(),
 });
+
 export const instapaperSettingsSchema = baseSettingsSchema.extend({
 	backend: z.literal("instapaper"),
 	apiConfig: instapaperConfigSchema,
 });
+
 export type InstapaperSettings = z.infer<typeof instapaperSettingsSchema>;
 export type InstapaperConfig = z.infer<typeof instapaperConfigSchema>;
+
+// Zod schemas for API responses based on official documentation
+const instapaperTagSchema = z.object({
+	id: z.number(),
+	name: z.string(),
+});
+
+const instapaperBookmarkSchema = z.object({
+	type: z.literal("bookmark"),
+	bookmark_id: z.number(),
+	url: z.string(),
+	title: z.string(),
+	description: z.string().optional(),
+	tags: z.array(instapaperTagSchema).optional(),
+	time: z.number().optional(),
+	image_url: z.string().optional(),
+	// Additional fields that may be present
+	progress: z.number().optional(),
+	progress_timestamp: z.number().optional(),
+	private_source: z.string().optional(),
+});
+
+const instapaperUserSchema = z.object({
+	type: z.literal("user"),
+	user_id: z.number(),
+	username: z.string(),
+});
+
+const instapaperErrorSchema = z.object({
+	type: z.literal("error"),
+	error_code: z.number(),
+	message: z.string(),
+});
+
+const instapaperMetaSchema = z
+	.object({
+		type: z.literal("meta"),
+	})
+	.passthrough();
+
+// Union type for all possible API response items
+const instapaperResponseItemSchema = z.union([
+	instapaperBookmarkSchema,
+	instapaperUserSchema,
+	instapaperErrorSchema,
+	instapaperMetaSchema,
+]);
+
+// Save response is an array of items
+const instapaperSaveResponseSchema = z.array(instapaperResponseItemSchema);
+
+// Sync response has a specific structure
+const instapaperSyncResponseSchema = z.object({
+	user: instapaperUserSchema,
+	bookmarks: z.array(instapaperBookmarkSchema),
+	highlights: z.array(z.unknown()).optional(), // We don't use highlights
+	delete_ids: z.array(z.number()).optional(),
+});
+
 interface InstapaperBookmark {
 	type: "bookmark";
 	bookmark_id: number;
-	title: string;
 	url: string;
-	time: number;
-	image_url?: string;
+	title: string;
+	description?: string;
 	tags?: { id: number; name: string }[];
+	time?: number;
+	image_url?: string;
+	progress?: number;
+	progress_timestamp?: number;
+	private_source?: string;
 }
+
 interface InstapaperError {
 	type: "error";
 	error_code: number;
 	message: string;
 }
+
 export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings> {
 	public readonly displayName = "Instapaper";
 	private apiUrl = "https://www.instapaper.com";
@@ -76,16 +144,31 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings> {
 	}
 	async saveArticle(article: SavingArticle): Promise<Article> {
 		const params = { url: article.url, title: article.title };
-		const data = (await this._makeSignedRequest(
-			"/api/1/bookmarks/add",
-			params,
-		)) as (InstapaperBookmark | InstapaperError)[];
-		const savedBookmark = data.find(
+		const data = await this._makeSignedRequest("/api/1/bookmarks/add", params);
+		const validatedData = instapaperSaveResponseSchema.parse(data);
+
+		// Find the bookmark in the response
+		const savedBookmark = validatedData.find(
 			(item): item is InstapaperBookmark => item.type === "bookmark",
 		);
-		if (!savedBookmark) {
-			throw new Error("Failed to save article to Instapaper");
+
+		// Check for errors
+		const error = validatedData.find(
+			(item): item is InstapaperError => item.type === "error",
+		);
+
+		if (error) {
+			throw new Error(
+				`Failed to save article: ${error.message} (Error ${error.error_code})`,
+			);
 		}
+
+		if (!savedBookmark) {
+			throw new Error(
+				"Failed to save article to Instapaper: No bookmark returned",
+			);
+		}
+
 		return this.mapArticle(savedBookmark);
 	}
 	async deleteArticle(id: number): Promise<void> {
@@ -103,12 +186,14 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings> {
 			if (have) {
 				params.have = have;
 			}
-			const data = (await this._makeSignedRequest(
+			const data = await this._makeSignedRequest(
 				"/api/1/bookmarks/list",
 				params,
-			)) as { bookmarks: InstapaperBookmark[] };
-			if (data.bookmarks) {
-				receivedBookmarks = data.bookmarks;
+			);
+			const validatedData = instapaperSyncResponseSchema.parse(data);
+
+			if (validatedData.bookmarks) {
+				receivedBookmarks = validatedData.bookmarks;
 				const articles = receivedBookmarks.map((item) => this.mapArticle(item));
 				allArticles.push(...articles);
 			} else {
@@ -127,7 +212,9 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings> {
 			id: item.bookmark_id,
 			title: item.title,
 			url: item.url,
-			created_at: new Date(item.time * 1000).toISOString(),
+			created_at: item.time
+				? new Date(item.time * 1000).toISOString()
+				: new Date().toISOString(),
 		};
 	}
 	private async _makeSignedRequest(

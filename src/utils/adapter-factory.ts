@@ -2,29 +2,38 @@ import { InstapaperAdapter } from "../background/api/adapters/instapaper-adapter
 import { KarakeepAdapter } from "../background/api/adapters/karakeep-adapter";
 import { LinkwardenAdapter } from "../background/api/adapters/linkwarden-adapter";
 import { RaindropAdapter } from "../background/api/adapters/raindrop-adapter";
-import { ReadeckAdapter } from "../background/api/adapters/readeck-adapter";
-import { ShioriAdapter } from "../background/api/adapters/shiori-adapter";
 import { SyncAdapter } from "../background/api/adapters/sync-adapter";
 import { WallabagAdapter } from "../background/api/adapters/wallabag-adapter";
 import type { ReadItLaterAPI } from "../background/api/read-it-later-adapter";
 
+// Map backend names to their corresponding adapter classes
 const adapters = {
 	wallabag: WallabagAdapter,
-	shiori: ShioriAdapter,
 	instapaper: InstapaperAdapter,
 	raindrop: RaindropAdapter,
 	karakeep: KarakeepAdapter,
 	linkwarden: LinkwardenAdapter,
-	readeck: ReadeckAdapter,
 	sync: SyncAdapter,
 };
+
+// Cache for instantiated adapters to avoid recreating them
+const adapterCache = new Map<keyof typeof adapters, ReadItLaterAPI>();
+
 export const availableBackends = Object.keys(
 	adapters,
 ) as (keyof typeof adapters)[];
-export function createAdapter(backend: keyof typeof adapters): ReadItLaterAPI {
+
+export function getAdatper(backend: keyof typeof adapters): ReadItLaterAPI {
+	const cachedAdapter = adapterCache.get(backend);
+	if (cachedAdapter) {
+		return cachedAdapter;
+	}
+
 	const AdapterClass = adapters[backend];
 	if (AdapterClass) {
-		return new AdapterClass();
+		const instance = new AdapterClass();
+		adapterCache.set(backend, instance);
+		return instance;
 	}
 	throw new Error("Invalid backend specified");
 }

@@ -1,4 +1,4 @@
-import { availableBackends, createAdapter } from "../utils/adapter-factory";
+import { availableBackends, getAdatper } from "../utils/adapter-factory";
 import { LogLevel } from "../utils/log-levels";
 import { logger } from "../utils/logger";
 import { getSettings, type Settings, settingsSchema } from "../utils/settings";
@@ -48,7 +48,7 @@ async function initialize(): Promise<void> {
 		assertDom(dom);
 		const settings = await getSettings();
 		for (const backend of availableBackends) {
-			const adapter = createAdapter(backend);
+			const adapter = getAdatper(backend);
 			const option = document.createElement("option");
 			option.value = backend;
 			option.textContent = adapter.displayName;
@@ -82,7 +82,7 @@ async function initialize(): Promise<void> {
 }
 async function loadBackend(backend: Settings["backend"]): Promise<void> {
 	assertDom(dom);
-	const factory = createAdapter(backend);
+	const factory = getAdatper(backend);
 	const formConfig = factory.formConfig;
 	dom.configContainer.innerHTML = "";
 	const form = document.createElement("form");
@@ -168,7 +168,7 @@ function getSettingsFromForm(): Settings | null {
 		const input = document.getElementById(id) as HTMLInputElement | null;
 		return input?.value || "";
 	};
-	const factory = createAdapter(dom.backendSelect.value as Settings["backend"]);
+	const factory = getAdatper(dom.backendSelect.value as Settings["backend"]);
 	const apiConfig: Record<string, string> = {};
 	for (const field of factory.formConfig) {
 		apiConfig[field.name as string] = getInputValue(field.name as string);
@@ -190,9 +190,8 @@ function getSettingsFromForm(): Settings | null {
 	};
 	const result = settingsSchema.safeParse(rawSettings);
 	if (!result.success) {
-		const errorMessage = result.error.errors.map((e) => e.message).join(", ");
-		showStatus(`Invalid settings: ${errorMessage}`, "error");
-		logger.error("Invalid settings provided:", result.error.format());
+		showStatus(`Invalid settings: ${result.error.message}`, "error");
+		logger.error("Invalid settings provided:", result.error.message);
 		return null;
 	}
 	return result.data;

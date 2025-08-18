@@ -2,23 +2,76 @@ import { z } from "zod";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
 import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
+
 export const karakeepConfigSchema = z.object({
 	url: z.string().url(),
 	token: z.string(),
 });
+
 export const karakeepSettingsSchema = baseSettingsSchema.extend({
 	backend: z.literal("karakeep"),
 	apiConfig: karakeepConfigSchema,
 });
+
 export type KarakeepSettings = z.infer<typeof karakeepSettingsSchema>;
 export type KarakeepConfig = z.infer<typeof karakeepConfigSchema>;
+
+// Zod schemas for API responses based on official documentation
+const karakeepItemSchema = z.object({
+	id: z.number(),
+	title: z.string(),
+	url: z.string(),
+	createdAt: z.string(),
+	cover: z.string().optional(),
+	// Additional fields that may be present based on API docs
+	description: z.string().optional(),
+	summary: z.string().optional(),
+	content: z.string().optional(),
+	status: z.string().optional(),
+	tags: z
+		.array(
+			z.object({
+				id: z.number(),
+				name: z.string(),
+			}),
+		)
+		.optional(),
+	highlights: z.array(z.unknown()).optional(),
+	assets: z.array(z.unknown()).optional(),
+});
+
+// Error response schemas
+const karakeepErrorSchema = z.object({
+	error: z.string(),
+	message: z.string().optional(),
+	status: z.number().optional(),
+});
+
+const karakeepSaveResponseSchema = z.union([
+	karakeepItemSchema,
+	karakeepErrorSchema,
+]);
+
+const karakeepSyncResponseSchema = z.union([
+	z.array(karakeepItemSchema),
+	karakeepErrorSchema,
+]);
+
 interface KarakeepItem {
 	id: number;
 	title: string;
 	url: string;
 	createdAt: string;
 	cover?: string;
+	description?: string;
+	summary?: string;
+	content?: string;
+	status?: string;
+	tags?: { id: number; name: string }[];
+	highlights?: unknown[];
+	assets?: unknown[];
 }
+
 export class KarakeepAdapter implements ReadItLaterAPI<KarakeepSettings> {
 	public readonly displayName = "Karakeep";
 	private apiUrl: string = "";
@@ -60,8 +113,17 @@ export class KarakeepAdapter implements ReadItLaterAPI<KarakeepSettings> {
 		if (!response.ok) {
 			throw new Error(`Failed to save article: ${response.statusText}`);
 		}
-		const data = (await response.json()) as KarakeepItem;
-		return this.mapArticle(data);
+		const data = await response.json();
+		const validatedData = karakeepSaveResponseSchema.parse(data);
+
+		// Check if it's an error response
+		if ("error" in validatedData) {
+			throw new Error(
+				`Failed to save article: ${validatedData.message || validatedData.error}`,
+			);
+		}
+
+		return this.mapArticle(validatedData);
 	}
 	async deleteArticle(id: number): Promise<void> {
 		const response = await fetch(`${this.apiUrl}/bookmarks/${id}`, {
@@ -84,8 +146,17 @@ export class KarakeepAdapter implements ReadItLaterAPI<KarakeepSettings> {
 		if (!response.ok) {
 			throw new Error(`Failed to sync articles: ${response.statusText}`);
 		}
-		const data = (await response.json()) as KarakeepItem[];
-		return data.map(this.mapArticle);
+		const data = await response.json();
+		const validatedData = karakeepSyncResponseSchema.parse(data);
+
+		// Check if it's an error response
+		if ("error" in validatedData) {
+			throw new Error(
+				`Failed to sync articles: ${validatedData.message || validatedData.error}`,
+			);
+		}
+
+		return validatedData.map(this.mapArticle);
 	}
 	private mapArticle(item: KarakeepItem): Article {
 		return {

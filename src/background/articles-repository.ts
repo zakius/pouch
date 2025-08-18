@@ -1,5 +1,5 @@
 import type { Article } from "../types/common";
-import { createAdapter } from "../utils/adapter-factory";
+import { getAdatper } from "../utils/adapter-factory";
 import { logger } from "../utils/logger";
 import type { Settings } from "../utils/settings";
 import { canonicalizeUrl } from "../utils/url-helpers";
@@ -17,7 +17,7 @@ export class ArticlesRepository {
 			return this.api;
 		}
 		logger.debug("API not initialized, creating adapter now...");
-		const api = createAdapter(this.settings.backend);
+		const api = getAdatper(this.settings.backend);
 		logger.debug("Initializing API with config:", this.settings.apiConfig);
 		await api.initialize(this.settings);
 		logger.info("On-demand API initialization completed");

@@ -3,7 +3,6 @@ import { instapaperSettingsSchema } from "../background/api/adapters/instapaper-
 import { karakeepSettingsSchema } from "../background/api/adapters/karakeep-adapter";
 import { linkwardenSettingsSchema } from "../background/api/adapters/linkwarden-adapter";
 import { raindropSettingsSchema } from "../background/api/adapters/raindrop-adapter";
-import { shioriSettingsSchema } from "../background/api/adapters/shiori-adapter";
 import { syncSettingsSchema } from "../background/api/adapters/sync-adapter";
 import { wallabagSettingsSchema } from "../background/api/adapters/wallabag-adapter";
 import type { baseSettingsSchema } from "./base-settings-schema";
@@ -13,7 +12,6 @@ export const settingsSchema = z.discriminatedUnion("backend", [
 	wallabagSettingsSchema,
 	raindropSettingsSchema,
 	instapaperSettingsSchema,
-	shioriSettingsSchema,
 	karakeepSettingsSchema,
 	linkwardenSettingsSchema,
 	syncSettingsSchema,
