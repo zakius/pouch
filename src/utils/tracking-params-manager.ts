@@ -1,7 +1,6 @@
 import { logger } from "./logger";
+import { TidyURL } from "@protontech/tidy-url";
 
-const REMOTE_LIST_URL =
-	"https://raw.githubusercontent.com/newhouse/url-tracking-stripper/master/src/data/param-list.csv";
 const STORAGE_KEY = "tracking_parameters_list";
 const LAST_UPDATED_KEY = "tracking_parameters_last_updated";
 const REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -29,27 +28,34 @@ const DEFAULT_TRACKING_PARAMETERS = [
 	"wickedid",
 	"yclid",
 ];
+
 function mergeAndDeduplicate(...lists: string[][]): string[] {
 	const combined = lists.flat();
 	return [...new Set(combined)];
 }
-async function fetchAndParseList(): Promise<string[]> {
+
+async function getTidyUrlTrackingParameters(): Promise<string[]> {
 	try {
-		const response = await fetch(REMOTE_LIST_URL);
-		if (!response.ok) {
-			throw new Error(`HTTP error! status: ${response.status}`);
+		// TidyURL has built-in tracking parameter detection
+		// We'll use a test URL to extract the parameters it would remove
+		const testUrl = "https://example.com/test?utm_source=test&gclid=test&fbclid=test&__hstc=test&custom_param=keep";
+		const cleaned = TidyURL.clean(testUrl);
+		
+		// Extract parameters that were removed by comparing original and cleaned URLs
+		const originalUrl = new URL(testUrl);
+		const cleanedUrl = new URL(cleaned.url);
+		
+		const removedParams: string[] = [];
+		for (const [key] of originalUrl.searchParams) {
+			if (!cleanedUrl.searchParams.has(key)) {
+				removedParams.push(key);
+			}
 		}
-		const csvText = await response.text();
-		const parameters = csvText.split(",").map((param) => param.trim());
-		if (parameters.length === 0) {
-			throw new Error("Parsed list is empty");
-		}
-		return parameters;
+		
+		logger.info(`TidyURL detected ${removedParams.length} tracking parameters`);
+		return removedParams;
 	} catch (error) {
-		logger.error(
-			"Failed to fetch or parse remote tracking parameter list:",
-			error,
-		);
+		logger.error("Failed to get tracking parameters from TidyURL:", error);
 		return [];
 	}
 }
@@ -71,11 +77,11 @@ export async function updateTrackingParametersIfNeeded(): Promise<void> {
 		logger.info("Tracking parameter list is up-to-date. Skipping refresh.");
 		return;
 	}
-	logger.info("Refreshing tracking parameter list from remote source...");
-	const remoteList = await fetchAndParseList();
-	if (remoteList.length > 0) {
+	logger.info("Refreshing tracking parameter list using TidyURL...");
+	const tidyUrlList = await getTidyUrlTrackingParameters();
+	if (tidyUrlList.length > 0) {
 		const finalList = mergeAndDeduplicate(
-			remoteList,
+			tidyUrlList,
 			ESSENTIAL_TRACKING_PARAMETERS,
 			DEFAULT_TRACKING_PARAMETERS,
 		);
@@ -88,7 +94,7 @@ export async function updateTrackingParametersIfNeeded(): Promise<void> {
 		);
 	} else {
 		logger.warn(
-			"Failed to fetch new tracking parameter list. Will continue using the existing or default list.",
+			"Failed to get tracking parameter list from TidyURL. Will continue using the existing or default list.",
 		);
 	}
 }

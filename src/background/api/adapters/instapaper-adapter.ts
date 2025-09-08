@@ -29,14 +29,14 @@ const instapaperBookmarkSchema = z.object({
 	bookmark_id: z.number(),
 	url: z.string(),
 	title: z.string(),
-	description: z.string().optional(),
+	description: z.string().nullable().optional(),
 	tags: z.array(instapaperTagSchema).optional(),
 	time: z.number().optional(),
-	image_url: z.string().optional(),
+	image_url: z.string().nullable().optional(),
 	// Additional fields that may be present
 	progress: z.number().optional(),
 	progress_timestamp: z.number().optional(),
-	private_source: z.string().optional(),
+	private_source: z.string().nullable().optional(),
 });
 
 const instapaperUserSchema = z.object({
@@ -81,13 +81,13 @@ interface InstapaperBookmark {
 	bookmark_id: number;
 	url: string;
 	title: string;
-	description?: string;
+	description?: string | null;
 	tags?: { id: number; name: string }[];
 	time?: number;
-	image_url?: string;
+	image_url?: string | null;
 	progress?: number;
 	progress_timestamp?: number;
-	private_source?: string;
+	private_source?: string | null;
 }
 
 interface InstapaperError {

@@ -31,17 +31,17 @@ const linkaceLinkSchema = z.object({
 	id: z.number(),
 	url: z.string(),
 	title: z.string(),
-	description: z.string().optional(),
+	description: z.string().nullable().optional(),
 	created_at: z.string(),
-	updated_at: z.string().optional(),
+	updated_at: z.string().nullable().optional(),
 	// Additional fields that may be present
 	lists: z.array(linkaceListSchema).optional(),
 	tags: z.array(linkaceTagSchema).optional(),
 	visibility: z.number().optional(),
-	check_disabled: z.boolean().optional(),
+	check_disabled: z.union([z.boolean(), z.number()]).optional(),
 	status: z.number().optional(),
-	icon: z.string().optional(),
-	thumbnail: z.string().optional(),
+	icon: z.string().nullable().optional(),
+	thumbnail: z.string().nullable().optional(),
 });
 
 // Error response schemas
@@ -82,16 +82,16 @@ interface LinkaceLink {
 	id: number;
 	url: string;
 	title: string;
-	description?: string;
+	description?: string | null;
 	created_at: string;
-	updated_at?: string;
+	updated_at?: string | null;
 	lists?: { id: number; name: string }[];
 	tags?: { id: number; name: string }[];
 	visibility?: number;
-	check_disabled?: boolean;
+	check_disabled?: boolean | number;
 	status?: number;
-	icon?: string;
-	thumbnail?: string;
+	icon?: string | null;
+	thumbnail?: string | null;
 }
 
 export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings> {

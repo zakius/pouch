@@ -21,14 +21,14 @@ const raindropItemSchema = z.object({
 	title: z.string(),
 	link: z.string(),
 	created: z.string(),
-	cover: z.string().optional(),
+	cover: z.string().nullable().optional(),
 	tags: z.array(z.string()),
 	// Additional fields that may be present
-	excerpt: z.string().optional(),
-	type: z.string().optional(),
-	domain: z.string().optional(),
-	lastUpdate: z.string().optional(),
-	important: z.boolean().optional(),
+	excerpt: z.string().nullable().optional(),
+	type: z.string().nullable().optional(),
+	domain: z.string().nullable().optional(),
+	lastUpdate: z.string().nullable().optional(),
+	important: z.union([z.boolean(), z.number()]).optional(),
 	collection: z
 		.object({
 			$id: z.number(),
@@ -72,13 +72,13 @@ interface RaindropItem {
 	title: string;
 	link: string;
 	created: string;
-	cover?: string;
+	cover?: string | null;
 	tags: string[];
-	excerpt?: string;
-	type?: string;
-	domain?: string;
-	lastUpdate?: string;
-	important?: boolean;
+	excerpt?: string | null;
+	type?: string | null;
+	domain?: string | null;
+	lastUpdate?: string | null;
+	important?: boolean | number;
 	collection?: {
 		$id: number;
 	};

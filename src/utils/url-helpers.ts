@@ -1,4 +1,5 @@
 import { getTrackingParameters } from "./tracking-params-manager";
+import { TidyURL } from "@protontech/tidy-url";
 
 let loadedTrackingParameters: string[] = [];
 export async function initializeUrlCanonizer(): Promise<void> {
@@ -121,7 +122,11 @@ function canonicalizeAmazonUrl(url: URL): URL {
 }
 export function canonicalizeUrl(urlString: string): string {
 	try {
-		let url = new URL(urlString);
+		// First, apply TidyURL cleaning for comprehensive tracking parameter removal
+		const tidyResult = TidyURL.clean(urlString);
+		let url = new URL(tidyResult.url);
+		
+		// Apply our custom canonicalization logic on top of TidyURL's cleaning
 		const maxRedirects = 5;
 		for (let i = 0; i < maxRedirects; i++) {
 			const originalUrlString = url.toString();
@@ -135,6 +140,9 @@ export function canonicalizeUrl(urlString: string): string {
 		url = canonicalizeTwitterUrl(url);
 		url = canonicalizeYoutubeUrl(url);
 		url = canonicalizeAmazonUrl(url);
+		
+		// Apply additional tracking parameter removal using our custom list
+		// This ensures we don't lose any parameters that TidyURL might not catch
 		const params = url.searchParams;
 		const trackingParamsSet = new Set(loadedTrackingParameters);
 		const paramsToDelete: string[] = [];

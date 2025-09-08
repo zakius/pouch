@@ -32,14 +32,14 @@ const wallabagItemSchema = z.object({
 	created_at: z.string(),
 	tags: z.array(wallabagTagSchema).optional(),
 	// Additional fields that may be present
-	content: z.string().optional(),
+	content: z.string().nullable().optional(),
 	excerpt: z.string().optional(),
 	domain_name: z.string().optional(),
-	is_archived: z.boolean().optional(),
-	is_starred: z.boolean().optional(),
-	language: z.string().optional(),
+	is_archived: z.union([z.boolean(), z.number()]).optional(),
+	is_starred: z.union([z.boolean(), z.number()]).optional(),
+	language: z.string().nullable().optional(),
 	reading_time: z.number().optional(),
-	preview_picture: z.string().optional(),
+	preview_picture: z.string().nullable().optional(),
 	user_name: z.string().optional(),
 	user_email: z.string().optional(),
 	user_id: z.number().optional(),
@@ -89,14 +89,14 @@ interface WallabagItem {
 	url: string;
 	created_at: string;
 	tags?: { id: number; name: string }[];
-	content?: string;
+	content?: string | null;
 	excerpt?: string;
 	domain_name?: string;
-	is_archived?: boolean;
-	is_starred?: boolean;
-	language?: string;
+	is_archived?: boolean | number;
+	is_starred?: boolean | number;
+	language?: string | null;
 	reading_time?: number;
-	preview_picture?: string;
+	preview_picture?: string | null;
 	user_name?: string;
 	user_email?: string;
 	user_id?: number;

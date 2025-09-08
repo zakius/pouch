@@ -4,13 +4,14 @@
     "": {
       "name": "wallabag-firefox-extension",
       "dependencies": {
-        "zod": "^4.0.17",
+        "@protontech/tidy-url": "^1.18.3",
+        "zod": "^4.1.5",
       },
       "devDependencies": {
-        "@biomejs/biome": "^2.1.4",
+        "@biomejs/biome": "^2.2.3",
         "@total-typescript/ts-reset": "^0.6.1",
         "@types/firefox-webext-browser": "^120.0.4",
-        "@types/node": "^22.17.1",
+        "@types/node": "^22.18.1",
         "bun-types": "latest",
         "typescript": "^5.9.2",
         "web-ext": "^8.9.0",
@@ -79,6 +80,8 @@
     "@pnpm/network.ca-file": ["@pnpm/network.ca-file@1.0.2", "", { "dependencies": { "graceful-fs": "4.2.10" } }, "sha512-YcPQ8a0jwYU9bTdJDpXjMi7Brhkr1mXsXrUJvjqM2mQDgkRiz8jFaQGOdaLxgjtUfQgZhKy/O3cG/YwmgKaxLA=="],
 
     "@pnpm/npm-conf": ["@pnpm/npm-conf@2.3.1", "", { "dependencies": { "@pnpm/config.env-replace": "^1.1.0", "@pnpm/network.ca-file": "^1.0.1", "config-chain": "^1.1.11" } }, "sha512-c83qWb22rNRuB0UaVCI0uRPNRr8Z0FWnEIvT47jiHAmOIUHbBOg5XvV7pM5x+rKn9HRpjxquDbXYSXr3fAKFcw=="],
+
+    "@protontech/tidy-url": ["@protontech/tidy-url@1.18.3", "", {}, "sha512-wfAzgFmH6M819EHG5vFvfsX6tDL23XBIUrsRBYr1PK9PAGp/0f7EEfSxvP//vPIkN3Dl9nGalmHr7LilwNIiLQ=="],
 
     "@total-typescript/ts-reset": ["@total-typescript/ts-reset@0.6.1", "", {}, "sha512-cka47fVSo6lfQDIATYqb/vO1nvFfbPw7uWLayIXIhGETj0wcOOlrlkobOMDNQOFr9QOafegUPq13V2+6vtD7yg=="],
 

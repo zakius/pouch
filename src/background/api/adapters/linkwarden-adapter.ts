@@ -22,9 +22,9 @@ const linkwardenItemSchema = z.object({
 	name: z.string(),
 	url: z.string(),
 	createdAt: z.string(),
-	image: z.string().optional(),
+	image: z.string().nullable().optional(),
 	// Additional fields that may be present based on API docs
-	description: z.string().optional(),
+	description: z.string().nullable().optional(),
 	collectionId: z.number().optional(),
 	tags: z
 		.array(
@@ -34,8 +34,8 @@ const linkwardenItemSchema = z.object({
 			}),
 		)
 		.optional(),
-	status: z.string().optional(),
-	archived: z.boolean().optional(),
+	status: z.string().nullable().optional(),
+	archived: z.union([z.boolean(), z.number()]).optional(),
 });
 
 // Error response schemas
@@ -66,12 +66,12 @@ interface LinkwardenItem {
 	name: string;
 	url: string;
 	createdAt: string;
-	image?: string;
-	description?: string;
+	image?: string | null;
+	description?: string | null;
 	collectionId?: number;
 	tags?: { id: number; name: string }[];
-	status?: string;
-	archived?: boolean;
+	status?: string | null;
+	archived?: boolean | number;
 }
 
 export class LinkwardenAdapter implements ReadItLaterAPI<LinkwardenSettings> {

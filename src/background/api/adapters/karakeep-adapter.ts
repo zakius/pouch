@@ -22,12 +22,12 @@ const karakeepItemSchema = z.object({
 	title: z.string(),
 	url: z.string(),
 	createdAt: z.string(),
-	cover: z.string().optional(),
+	cover: z.string().nullable().optional(),
 	// Additional fields that may be present based on API docs
-	description: z.string().optional(),
-	summary: z.string().optional(),
-	content: z.string().optional(),
-	status: z.string().optional(),
+	description: z.string().nullable().optional(),
+	summary: z.string().nullable().optional(),
+	content: z.string().nullable().optional(),
+	status: z.string().nullable().optional(),
 	tags: z
 		.array(
 			z.object({
@@ -62,11 +62,11 @@ interface KarakeepItem {
 	title: string;
 	url: string;
 	createdAt: string;
-	cover?: string;
-	description?: string;
-	summary?: string;
-	content?: string;
-	status?: string;
+	cover?: string | null;
+	description?: string | null;
+	summary?: string | null;
+	content?: string | null;
+	status?: string | null;
 	tags?: { id: number; name: string }[];
 	highlights?: unknown[];
 	assets?: unknown[];
