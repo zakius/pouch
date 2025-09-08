@@ -14,6 +14,38 @@ const execAsync = promisify(exec);
 
 type Browser = "firefox" | "chromium" | "chromium-mv2";
 
+async function bumpPatchVersion(): Promise<string> {
+	try {
+		// Read current package.json
+		const packageJson = JSON.parse(await readFile("package.json", "utf-8"));
+		const currentVersion = packageJson.version;
+		
+		// Parse version (assuming semantic versioning)
+		const versionParts = currentVersion.split(".");
+		const major = parseInt(versionParts[0]);
+		const minor = parseInt(versionParts[1]);
+		const patch = parseInt(versionParts[2]);
+		
+		// Bump patch version
+		const newVersion = `${major}.${minor}.${patch + 1}`;
+		
+		// Update package.json
+		packageJson.version = newVersion;
+		await writeFile("package.json", JSON.stringify(packageJson, null, 2));
+		
+		// Update manifest template
+		const manifestTemplate = JSON.parse(await readFile("src/manifest.template.json", "utf-8"));
+		manifestTemplate.version = newVersion;
+		await writeFile("src/manifest.template.json", JSON.stringify(manifestTemplate, null, 2));
+		
+		console.log(`Version bumped from ${currentVersion} to ${newVersion}`);
+		return newVersion;
+	} catch (error) {
+		console.error("Failed to bump version:", error);
+		throw error;
+	}
+}
+
 interface ManifestV2 {
 	manifest_version: 2;
 	browser_action: {
@@ -349,12 +381,18 @@ async function main() {
 	const watchMode = process.argv.includes("--watch");
 	const skipSigning = process.argv.includes("--skip-signing");
 	const prepareOnly = process.argv.includes("--prepare-only") || watchMode;
+	const shouldSign = process.argv.includes("--sign");
 
 	if (!["firefox", "chromium", "chromium-mv2"].includes(targetBrowser)) {
 		console.error(
 			'Invalid browser specified. Use "firefox", "chromium" or "chromium-mv2".',
 		);
 		process.exit(1);
+	}
+
+	// Bump version if signing (for AMO compatibility)
+	if (shouldSign) {
+		await bumpPatchVersion();
 	}
 
 	await build(targetBrowser, skipSigning, prepareOnly).catch((error) => {
