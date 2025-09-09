@@ -1,27 +1,17 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeEach } from "bun:test";
 import { 
 	cleanUrl, 
-	setFilterLists, 
-	resetFilterLists, 
-	initializeEngine 
+	initializeWithRawFilterLists
 } from "../src/utils/filter-list-url-cleaner";
+import { readFileSync } from "fs";
 
 describe("Filter List URL Cleaning", () => {
 	beforeEach(async () => {
-		// Set up test filter lists with known behavior using local file
-		const testFilterLists = [
-			{
-				name: "TestList",
-				url: "file://" + import.meta.resolve("../test-filters.txt").replace("file://", "")
-			}
-		];
-		setFilterLists(testFilterLists);
-		await initializeEngine();
-	});
-
-	afterEach(() => {
-		// Reset to default filter lists
-		resetFilterLists();
+		// Load test filter list content directly
+		const testFilterContent = readFileSync("test-filters.txt", "utf-8");
+		await initializeWithRawFilterLists([
+			{ name: "TestFilters", content: testFilterContent }
+		]);
 	});
 
 	test("should keep sc_eh parameter on puma.com domains (not in test filter list)", async () => {

@@ -1,9 +1,24 @@
-import { getTrackingParameters } from "./tracking-params-manager";
+import { initializeUrlCleanerWithRemoteLists } from "./filter-list-manager";
 import { cleanUrl as filterListCleanUrl } from "./filter-list-url-cleaner";
+import { getTrackingParameters } from "./tracking-params-manager";
 
 let loadedTrackingParameters: string[] = [];
+let urlCanonizerInitialized = false;
+
 export async function initializeUrlCanonizer(): Promise<void> {
+	if (urlCanonizerInitialized) return;
+
+	// Initialize tracking parameters
 	loadedTrackingParameters = await getTrackingParameters();
+
+	// Initialize filter list cleaner with remote filter lists
+	try {
+		await initializeUrlCleanerWithRemoteLists();
+	} catch (error) {
+		console.warn("Failed to initialize filter list cleaner:", error);
+	}
+
+	urlCanonizerInitialized = true;
 }
 function handleOpenRedirects(url: URL): URL {
 	const redirectParams = [
@@ -124,18 +139,18 @@ function removeTrackingParameters(url: URL): URL {
 	const params = url.searchParams;
 	const trackingParamsSet = new Set(loadedTrackingParameters);
 	const paramsToDelete: string[] = [];
-	
+
 	// Remove all tracking parameters
 	for (const key of params.keys()) {
 		if (key.startsWith("utm_") || trackingParamsSet.has(key)) {
 			paramsToDelete.push(key);
 		}
 	}
-	
+
 	paramsToDelete.forEach((param) => {
 		params.delete(param);
 	});
-	
+
 	url.search = params.toString();
 	return url;
 }
@@ -143,7 +158,7 @@ function removeTrackingParameters(url: URL): URL {
 export async function canonicalizeUrl(urlString: string): Promise<string> {
 	try {
 		// First, use filter lists for comprehensive URL cleaning
-		let cleanedUrl = await filterListCleanUrl(urlString);
+		const cleanedUrl = await filterListCleanUrl(urlString);
 		let url = new URL(cleanedUrl);
 
 		// Apply our custom canonicalization logic
@@ -164,7 +179,7 @@ export async function canonicalizeUrl(urlString: string): Promise<string> {
 		// Apply additional tracking parameter removal using our custom list
 		// This ensures we don't lose any parameters that filter lists might not catch
 		url = removeTrackingParameters(url);
-		
+
 		return url.toString();
 	} catch (_error) {
 		return urlString;

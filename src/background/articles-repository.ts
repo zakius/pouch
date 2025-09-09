@@ -125,10 +125,12 @@ export class ArticlesRepository {
 			const allArticles = await api.sync();
 			logger.debug(`Synced ${allArticles.length} articles from API`);
 			const processedArticles = this.settings.normalizeOnSave
-				? await Promise.all(allArticles.map(async (article) => ({
-						...article,
-						url: await canonicalizeUrl(article.url),
-					})))
+				? await Promise.all(
+						allArticles.map(async (article) => ({
+							...article,
+							url: await canonicalizeUrl(article.url),
+						})),
+					)
 				: allArticles;
 			await this.updateArticles(processedArticles);
 			return {
