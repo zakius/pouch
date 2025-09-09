@@ -1,61 +1,64 @@
-import { z } from "zod";
+import * as v from "valibot";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
 import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
 
-export const linkwardenConfigSchema = z.object({
-	url: z.string().url(),
-	token: z.string(),
+export const linkwardenConfigSchema = v.object({
+	url: v.string([v.url()]),
+	token: v.string(),
 });
 
-export const linkwardenSettingsSchema = baseSettingsSchema.extend({
-	backend: z.literal("linkwarden"),
-	apiConfig: linkwardenConfigSchema,
-});
+export const linkwardenSettingsSchema = v.merge([
+	baseSettingsSchema,
+	v.object({
+		backend: v.literal("linkwarden"),
+		apiConfig: linkwardenConfigSchema,
+	}),
+]);
 
-export type LinkwardenSettings = z.infer<typeof linkwardenSettingsSchema>;
-export type LinkwardenConfig = z.infer<typeof linkwardenConfigSchema>;
+export type LinkwardenSettings = v.Input<typeof linkwardenSettingsSchema>;
+export type LinkwardenConfig = v.Input<typeof linkwardenConfigSchema>;
 
-// Zod schemas for API responses based on official documentation
-const linkwardenItemSchema = z.object({
-	id: z.number(),
-	name: z.string(),
-	url: z.string(),
-	createdAt: z.string(),
-	image: z.string().nullable().optional(),
+// Valibot schemas for API responses based on official documentation
+const linkwardenItemSchema = v.object({
+	id: v.number(),
+	name: v.string(),
+	url: v.string(),
+	createdAt: v.string(),
+	image: v.optional(v.nullable(v.string())),
 	// Additional fields that may be present based on API docs
-	description: z.string().nullable().optional(),
-	collectionId: z.number().optional(),
-	tags: z
-		.array(
-			z.object({
-				id: z.number(),
-				name: z.string(),
+	description: v.optional(v.nullable(v.string())),
+	collectionId: v.optional(v.number()),
+	tags: v.optional(
+		v.array(
+			v.object({
+				id: v.number(),
+				name: v.string(),
 			}),
-		)
-		.optional(),
-	status: z.string().nullable().optional(),
-	archived: z.union([z.boolean(), z.number()]).optional(),
+		),
+	),
+	status: v.optional(v.nullable(v.string())),
+	archived: v.optional(v.union([v.boolean(), v.number()])),
 });
 
 // Error response schemas
-const linkwardenErrorSchema = z.object({
-	error: z.string(),
-	message: z.string().optional(),
-	status: z.number().optional(),
+const linkwardenErrorSchema = v.object({
+	error: v.string(),
+	message: v.optional(v.string()),
+	status: v.optional(v.number()),
 });
 
-const linkwardenSaveResponseSchema = z.union([
-	z.object({
+const linkwardenSaveResponseSchema = v.union([
+	v.object({
 		response: linkwardenItemSchema,
 	}),
 	linkwardenErrorSchema,
 ]);
 
-const linkwardenSyncResponseSchema = z.union([
-	z.object({
-		response: z.object({
-			data: z.array(linkwardenItemSchema),
+const linkwardenSyncResponseSchema = v.union([
+	v.object({
+		response: v.object({
+			data: v.array(linkwardenItemSchema),
 		}),
 	}),
 	linkwardenErrorSchema,
@@ -116,7 +119,7 @@ export class LinkwardenAdapter implements ReadItLaterAPI<LinkwardenSettings> {
 			throw new Error(`Failed to save article: ${response.statusText}`);
 		}
 		const data = await response.json();
-		const validatedData = linkwardenSaveResponseSchema.parse(data);
+		const validatedData = v.parse(linkwardenSaveResponseSchema, data);
 
 		// Check if it's an error response
 		if ("error" in validatedData) {
@@ -149,7 +152,7 @@ export class LinkwardenAdapter implements ReadItLaterAPI<LinkwardenSettings> {
 			throw new Error(`Failed to sync articles: ${response.statusText}`);
 		}
 		const data = await response.json();
-		const validatedData = linkwardenSyncResponseSchema.parse(data);
+		const validatedData = v.parse(linkwardenSyncResponseSchema, data);
 
 		// Check if it's an error response
 		if ("error" in validatedData) {

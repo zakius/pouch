@@ -1,64 +1,65 @@
-import { z } from "zod";
+import * as v from "valibot";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
 import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
 
-export const instapaperConfigSchema = z.object({
-	consumerKey: z.string(),
-	consumerSecret: z.string(),
-	username: z.string(),
-	password: z.string().optional(),
+export const instapaperConfigSchema = v.object({
+	consumerKey: v.string(),
+	consumerSecret: v.string(),
+	username: v.string(),
+	password: v.optional(v.string()),
 });
 
-export const instapaperSettingsSchema = baseSettingsSchema.extend({
-	backend: z.literal("instapaper"),
-	apiConfig: instapaperConfigSchema,
+export const instapaperSettingsSchema = v.merge([
+	baseSettingsSchema,
+	v.object({
+		backend: v.literal("instapaper"),
+		apiConfig: instapaperConfigSchema,
+	}),
+]);
+
+export type InstapaperSettings = v.Input<typeof instapaperSettingsSchema>;
+export type InstapaperConfig = v.Input<typeof instapaperConfigSchema>;
+
+// Valibot schemas for API responses based on official documentation
+const instapaperTagSchema = v.object({
+	id: v.number(),
+	name: v.string(),
 });
 
-export type InstapaperSettings = z.infer<typeof instapaperSettingsSchema>;
-export type InstapaperConfig = z.infer<typeof instapaperConfigSchema>;
-
-// Zod schemas for API responses based on official documentation
-const instapaperTagSchema = z.object({
-	id: z.number(),
-	name: z.string(),
-});
-
-const instapaperBookmarkSchema = z.object({
-	type: z.literal("bookmark"),
-	bookmark_id: z.number(),
-	url: z.string(),
-	title: z.string(),
-	description: z.string().nullable().optional(),
-	tags: z.array(instapaperTagSchema).optional(),
-	time: z.number().optional(),
-	image_url: z.string().nullable().optional(),
+const instapaperBookmarkSchema = v.object({
+	type: v.literal("bookmark"),
+	bookmark_id: v.number(),
+	url: v.string(),
+	title: v.string(),
+	description: v.optional(v.nullable(v.string())),
+	tags: v.optional(v.array(instapaperTagSchema)),
+	time: v.optional(v.number()),
+	image_url: v.optional(v.nullable(v.string())),
 	// Additional fields that may be present
-	progress: z.number().optional(),
-	progress_timestamp: z.number().optional(),
-	private_source: z.string().nullable().optional(),
+	progress: v.optional(v.number()),
+	progress_timestamp: v.optional(v.number()),
+	private_source: v.optional(v.nullable(v.string())),
 });
 
-const instapaperUserSchema = z.object({
-	type: z.literal("user"),
-	user_id: z.number(),
-	username: z.string(),
+const instapaperUserSchema = v.object({
+	type: v.literal("user"),
+	user_id: v.number(),
+	username: v.string(),
 });
 
-const instapaperErrorSchema = z.object({
-	type: z.literal("error"),
-	error_code: z.number(),
-	message: z.string(),
+const instapaperErrorSchema = v.object({
+	type: v.literal("error"),
+	error_code: v.number(),
+	message: v.string(),
 });
 
-const instapaperMetaSchema = z
-	.object({
-		type: z.literal("meta"),
-	})
-	.passthrough();
+const instapaperMetaSchema = v.object({
+	type: v.literal("meta"),
+});
 
 // Union type for all possible API response items
-const instapaperResponseItemSchema = z.union([
+const instapaperResponseItemSchema = v.union([
 	instapaperBookmarkSchema,
 	instapaperUserSchema,
 	instapaperErrorSchema,
@@ -66,14 +67,14 @@ const instapaperResponseItemSchema = z.union([
 ]);
 
 // Save response is an array of items
-const instapaperSaveResponseSchema = z.array(instapaperResponseItemSchema);
+const instapaperSaveResponseSchema = v.array(instapaperResponseItemSchema);
 
 // Sync response has a specific structure
-const instapaperSyncResponseSchema = z.object({
+const instapaperSyncResponseSchema = v.object({
 	user: instapaperUserSchema,
-	bookmarks: z.array(instapaperBookmarkSchema),
-	highlights: z.array(z.unknown()).optional(), // We don't use highlights
-	delete_ids: z.array(z.number()).optional(),
+	bookmarks: v.array(instapaperBookmarkSchema),
+	highlights: v.optional(v.array(v.unknown())), // We don't use highlights
+	delete_ids: v.optional(v.array(v.number())),
 });
 
 interface InstapaperBookmark {
@@ -145,7 +146,7 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings> {
 	async saveArticle(article: SavingArticle): Promise<Article> {
 		const params = { url: article.url, title: article.title };
 		const data = await this._makeSignedRequest("/api/1/bookmarks/add", params);
-		const validatedData = instapaperSaveResponseSchema.parse(data);
+		const validatedData = v.parse(instapaperSaveResponseSchema, data);
 
 		// Find the bookmark in the response
 		const savedBookmark = validatedData.find(
@@ -190,7 +191,7 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings> {
 				"/api/1/bookmarks/list",
 				params,
 			);
-			const validatedData = instapaperSyncResponseSchema.parse(data);
+			const validatedData = v.parse(instapaperSyncResponseSchema, data);
 
 			if (validatedData.bookmarks) {
 				receivedBookmarks = validatedData.bookmarks;

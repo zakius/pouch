@@ -1,69 +1,78 @@
-import { z } from "zod";
+import * as v from "valibot";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
 import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
 
-export const raindropConfigSchema = z.object({
-	apiKey: z.string(),
+export const raindropConfigSchema = v.object({
+	apiKey: v.string(),
 });
 
-export const raindropSettingsSchema = baseSettingsSchema.extend({
-	backend: z.literal("raindrop"),
-	apiConfig: raindropConfigSchema,
-});
+export const raindropSettingsSchema = v.merge([
+	baseSettingsSchema,
+	v.object({
+		backend: v.literal("raindrop"),
+		apiConfig: raindropConfigSchema,
+	}),
+]);
 
-export type RaindropSettings = z.infer<typeof raindropSettingsSchema>;
-export type RaindropConfig = z.infer<typeof raindropConfigSchema>;
+export type RaindropSettings = v.Input<typeof raindropSettingsSchema>;
+export type RaindropConfig = v.Input<typeof raindropConfigSchema>;
 
-// Zod schemas for API responses based on official documentation
-const raindropItemSchema = z.object({
-	_id: z.number(),
-	title: z.string(),
-	link: z.string(),
-	created: z.string(),
-	cover: z.string().nullable().optional(),
-	tags: z.array(z.string()),
+// Valibot schemas for API responses based on official documentation
+const raindropItemSchema = v.object({
+	_id: v.number(),
+	title: v.string(),
+	link: v.string(),
+	created: v.string(),
+	cover: v.optional(v.nullable(v.string())),
+	tags: v.array(v.string()),
 	// Additional fields that may be present
-	excerpt: z.string().nullable().optional(),
-	type: z.string().nullable().optional(),
-	domain: z.string().nullable().optional(),
-	lastUpdate: z.string().nullable().optional(),
-	important: z.union([z.boolean(), z.number()]).optional(),
-	collection: z
-		.object({
-			$id: z.number(),
-		})
-		.optional(),
+	excerpt: v.optional(v.nullable(v.string())),
+	type: v.optional(v.nullable(v.string())),
+	domain: v.optional(v.nullable(v.string())),
+	lastUpdate: v.optional(v.nullable(v.string())),
+	important: v.optional(v.union([v.boolean(), v.number()])),
+	collection: v.optional(
+		v.object({
+			$id: v.number(),
+		}),
+	),
 });
 
 // Error response schemas based on official documentation
-const raindropErrorSchema = z.object({
-	result: z.literal(false),
-	error: z.union([z.number(), z.string()]).optional(),
-	errorMessage: z.string().optional(),
+const raindropErrorSchema = v.object({
+	result: v.literal(false),
+	error: v.optional(v.union([v.number(), v.string()])),
+	errorMessage: v.optional(v.string()),
 });
 
-const raindropSuccessResponseSchema = z.object({
-	result: z.literal(true),
+const raindropSuccessResponseSchema = v.object({
+	result: v.literal(true),
 });
 
-const raindropSaveResponseSchema = z.union([
-	raindropSuccessResponseSchema.extend({
-		item: raindropItemSchema,
-	}),
+const raindropSaveResponseSchema = v.union([
+	v.merge([
+		raindropSuccessResponseSchema,
+		v.object({
+			item: raindropItemSchema,
+		}),
+	]),
 	raindropErrorSchema,
 ]);
 
-const raindropDeleteResponseSchema = z.union([
+const raindropDeleteResponseSchema = v.union([
 	raindropSuccessResponseSchema,
 	raindropErrorSchema,
 ]);
 
-const raindropSyncResponseSchema = z.union([
-	raindropSuccessResponseSchema.extend({
-		items: z.array(raindropItemSchema),
-		count: z.number().optional(),
-	}),
+const raindropSyncResponseSchema = v.union([
+	v.merge([
+		raindropSuccessResponseSchema,
+		v.object({
+			items: v.array(raindropItemSchema),
+			count: v.optional(v.number()),
+		}),
+	]),
 	raindropErrorSchema,
 ]);
 
@@ -123,7 +132,7 @@ export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings> {
 			}),
 		});
 		const data = await response.json();
-		const validatedData = raindropSaveResponseSchema.parse(data);
+		const validatedData = v.parse(raindropSaveResponseSchema, data);
 		if (!validatedData.result) {
 			throw new Error(
 				`Failed to save article: ${validatedData.errorMessage || "API returned an error"}`,
@@ -142,7 +151,7 @@ export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings> {
 			},
 		);
 		const data = await response.json();
-		const validatedData = raindropDeleteResponseSchema.parse(data);
+		const validatedData = v.parse(raindropDeleteResponseSchema, data);
 		if (!validatedData.result) {
 			throw new Error(
 				`Failed to delete article: ${validatedData.errorMessage || "API returned an error"}`,
@@ -164,7 +173,7 @@ export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings> {
 				},
 			);
 			const data = await response.json();
-			const validatedData = raindropSyncResponseSchema.parse(data);
+			const validatedData = v.parse(raindropSyncResponseSchema, data);
 			if (!validatedData.result) {
 				throw new Error(
 					`Failed to get articles: ${validatedData.errorMessage || "API returned an error"}`,

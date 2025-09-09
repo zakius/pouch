@@ -1,3 +1,4 @@
+import * as v from "valibot";
 import { availableBackends, getAdatper } from "../utils/adapter-factory";
 import { LogLevel } from "../utils/log-levels";
 import { logger } from "../utils/logger";
@@ -188,13 +189,14 @@ function getSettingsFromForm(): Settings | null {
 			dom.normalizeOnCompareCheckbox.checked,
 		apiConfig,
 	};
-	const result = settingsSchema.safeParse(rawSettings);
+	const result = v.safeParse(settingsSchema, rawSettings);
 	if (!result.success) {
-		showStatus(`Invalid settings: ${result.error.message}`, "error");
-		logger.error("Invalid settings provided:", result.error.message);
+		const errorMessage = result.issues.map((issue) => issue.message).join(", ");
+		showStatus(`Invalid settings: ${errorMessage}`, "error");
+		logger.error("Invalid settings provided:", errorMessage);
 		return null;
 	}
-	return result.data;
+	return result.output;
 }
 type StatusType = "info" | "success" | "error";
 function showStatus(message: string, type: StatusType = "info"): void {

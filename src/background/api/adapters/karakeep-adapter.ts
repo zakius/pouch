@@ -1,59 +1,62 @@
-import { z } from "zod";
+import * as v from "valibot";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
 import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
 
-export const karakeepConfigSchema = z.object({
-	url: z.string().url(),
-	token: z.string(),
+export const karakeepConfigSchema = v.object({
+	url: v.string([v.url()]),
+	token: v.string(),
 });
 
-export const karakeepSettingsSchema = baseSettingsSchema.extend({
-	backend: z.literal("karakeep"),
-	apiConfig: karakeepConfigSchema,
-});
+export const karakeepSettingsSchema = v.merge([
+	baseSettingsSchema,
+	v.object({
+		backend: v.literal("karakeep"),
+		apiConfig: karakeepConfigSchema,
+	}),
+]);
 
-export type KarakeepSettings = z.infer<typeof karakeepSettingsSchema>;
-export type KarakeepConfig = z.infer<typeof karakeepConfigSchema>;
+export type KarakeepSettings = v.Input<typeof karakeepSettingsSchema>;
+export type KarakeepConfig = v.Input<typeof karakeepConfigSchema>;
 
-// Zod schemas for API responses based on official documentation
-const karakeepItemSchema = z.object({
-	id: z.number(),
-	title: z.string(),
-	url: z.string(),
-	createdAt: z.string(),
-	cover: z.string().nullable().optional(),
+// Valibot schemas for API responses based on official documentation
+const karakeepItemSchema = v.object({
+	id: v.number(),
+	title: v.string(),
+	url: v.string(),
+	createdAt: v.string(),
+	cover: v.optional(v.nullable(v.string())),
 	// Additional fields that may be present based on API docs
-	description: z.string().nullable().optional(),
-	summary: z.string().nullable().optional(),
-	content: z.string().nullable().optional(),
-	status: z.string().nullable().optional(),
-	tags: z
-		.array(
-			z.object({
-				id: z.number(),
-				name: z.string(),
+	description: v.optional(v.nullable(v.string())),
+	summary: v.optional(v.nullable(v.string())),
+	content: v.optional(v.nullable(v.string())),
+	status: v.optional(v.nullable(v.string())),
+	tags: v.optional(
+		v.array(
+			v.object({
+				id: v.number(),
+				name: v.string(),
 			}),
-		)
-		.optional(),
-	highlights: z.array(z.unknown()).optional(),
-	assets: z.array(z.unknown()).optional(),
+		),
+	),
+	highlights: v.optional(v.array(v.unknown())),
+	assets: v.optional(v.array(v.unknown())),
 });
 
 // Error response schemas
-const karakeepErrorSchema = z.object({
-	error: z.string(),
-	message: z.string().optional(),
-	status: z.number().optional(),
+const karakeepErrorSchema = v.object({
+	error: v.string(),
+	message: v.optional(v.string()),
+	status: v.optional(v.number()),
 });
 
-const karakeepSaveResponseSchema = z.union([
+const karakeepSaveResponseSchema = v.union([
 	karakeepItemSchema,
 	karakeepErrorSchema,
 ]);
 
-const karakeepSyncResponseSchema = z.union([
-	z.array(karakeepItemSchema),
+const karakeepSyncResponseSchema = v.union([
+	v.array(karakeepItemSchema),
 	karakeepErrorSchema,
 ]);
 
@@ -114,7 +117,7 @@ export class KarakeepAdapter implements ReadItLaterAPI<KarakeepSettings> {
 			throw new Error(`Failed to save article: ${response.statusText}`);
 		}
 		const data = await response.json();
-		const validatedData = karakeepSaveResponseSchema.parse(data);
+		const validatedData = v.parse(karakeepSaveResponseSchema, data);
 
 		// Check if it's an error response
 		if ("error" in validatedData) {
@@ -147,7 +150,7 @@ export class KarakeepAdapter implements ReadItLaterAPI<KarakeepSettings> {
 			throw new Error(`Failed to sync articles: ${response.statusText}`);
 		}
 		const data = await response.json();
-		const validatedData = karakeepSyncResponseSchema.parse(data);
+		const validatedData = v.parse(karakeepSyncResponseSchema, data);
 
 		// Check if it's an error response
 		if ("error" in validatedData) {

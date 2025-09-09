@@ -1,79 +1,86 @@
-import { z } from "zod";
+import * as v from "valibot";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
 import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
 
-export const linkaceConfigSchema = z.object({
-	url: z.string().url(),
-	token: z.string(),
+export const linkaceConfigSchema = v.object({
+	url: v.string([v.url()]),
+	token: v.string(),
 });
 
-export const linkaceSettingsSchema = baseSettingsSchema.extend({
-	backend: z.literal("linkace"),
-	apiConfig: linkaceConfigSchema,
+export const linkaceSettingsSchema = v.merge([
+	baseSettingsSchema,
+	v.object({
+		backend: v.literal("linkace"),
+		apiConfig: linkaceConfigSchema,
+	}),
+]);
+
+export type LinkaceSettings = v.Input<typeof linkaceSettingsSchema>;
+export type LinkaceConfig = v.Input<typeof linkaceConfigSchema>;
+
+// Valibot schemas for API responses based on LinkAce API documentation
+const linkaceTagSchema = v.object({
+	id: v.number(),
+	name: v.string(),
 });
 
-export type LinkaceSettings = z.infer<typeof linkaceSettingsSchema>;
-export type LinkaceConfig = z.infer<typeof linkaceConfigSchema>;
-
-// Zod schemas for API responses based on LinkAce API documentation
-const linkaceTagSchema = z.object({
-	id: z.number(),
-	name: z.string(),
+const linkaceListSchema = v.object({
+	id: v.number(),
+	name: v.string(),
 });
 
-const linkaceListSchema = z.object({
-	id: z.number(),
-	name: z.string(),
-});
-
-const linkaceLinkSchema = z.object({
-	id: z.number(),
-	url: z.string(),
-	title: z.string(),
-	description: z.string().nullable().optional(),
-	created_at: z.string(),
-	updated_at: z.string().nullable().optional(),
+const linkaceLinkSchema = v.object({
+	id: v.number(),
+	url: v.string(),
+	title: v.string(),
+	description: v.optional(v.nullable(v.string())),
+	created_at: v.string(),
+	updated_at: v.optional(v.nullable(v.string())),
 	// Additional fields that may be present
-	lists: z.array(linkaceListSchema).optional(),
-	tags: z.array(linkaceTagSchema).optional(),
-	visibility: z.number().optional(),
-	check_disabled: z.union([z.boolean(), z.number()]).optional(),
-	status: z.number().optional(),
-	icon: z.string().nullable().optional(),
-	thumbnail: z.string().nullable().optional(),
+	lists: v.optional(v.array(linkaceListSchema)),
+	tags: v.optional(v.array(linkaceTagSchema)),
+	visibility: v.optional(v.number()),
+	check_disabled: v.optional(v.union([v.boolean(), v.number()])),
+	status: v.optional(v.number()),
+	icon: v.optional(v.nullable(v.string())),
+	thumbnail: v.optional(v.nullable(v.string())),
 });
 
 // Error response schemas
-const linkaceErrorSchema = z.object({
-	message: z.string(),
-	errors: z.record(z.string(), z.array(z.string())).optional(),
+const linkaceErrorSchema = v.object({
+	message: v.string(),
+	errors: v.optional(v.record(v.string(), v.array(v.string()))),
 });
 
-const linkaceSaveResponseSchema = z.union([
-	z.object({
+const linkaceSaveResponseSchema = v.union([
+	v.object({
 		data: linkaceLinkSchema,
 	}),
 	linkaceErrorSchema,
 ]);
 
-const linkaceSyncResponseSchema = z.union([
-	z.object({
-		data: z.array(linkaceLinkSchema),
-		links: z.object({
-			first: z.string().optional(),
-			last: z.string().optional(),
-			prev: z.string().optional(),
-			next: z.string().optional(),
-		}).optional(),
-		meta: z.object({
-			current_page: z.number(),
-			from: z.number().optional(),
-			last_page: z.number(),
-			per_page: z.number(),
-			to: z.number().optional(),
-			total: z.number(),
-		}).optional(),
+const linkaceSyncResponseSchema = v.union([
+	v.object({
+		data: v.array(linkaceLinkSchema),
+		links: v.optional(
+			v.object({
+				first: v.optional(v.string()),
+				last: v.optional(v.string()),
+				prev: v.optional(v.string()),
+				next: v.optional(v.string()),
+			}),
+		),
+		meta: v.optional(
+			v.object({
+				current_page: v.number(),
+				from: v.optional(v.number()),
+				last_page: v.number(),
+				per_page: v.number(),
+				to: v.optional(v.number()),
+				total: v.number(),
+			}),
+		),
 	}),
 	linkaceErrorSchema,
 ]);
@@ -147,13 +154,11 @@ export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings> {
 		}
 
 		const data = await response.json();
-		const validatedData = linkaceSaveResponseSchema.parse(data);
+		const validatedData = v.parse(linkaceSaveResponseSchema, data);
 
 		// Check if it's an error response
 		if ("message" in validatedData) {
-			throw new Error(
-				`Failed to save article: ${validatedData.message}`,
-			);
+			throw new Error(`Failed to save article: ${validatedData.message}`);
 		}
 
 		return this.mapArticle(validatedData.data);
@@ -203,13 +208,11 @@ export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings> {
 			}
 
 			const data = await response.json();
-			const validatedData = linkaceSyncResponseSchema.parse(data);
+			const validatedData = v.parse(linkaceSyncResponseSchema, data);
 
 			// Check if it's an error response
 			if ("message" in validatedData) {
-				throw new Error(
-					`Failed to sync articles: ${validatedData.message}`,
-				);
+				throw new Error(`Failed to sync articles: ${validatedData.message}`);
 			}
 
 			allArticles.push(

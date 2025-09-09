@@ -40,7 +40,7 @@ export class ArticlesRepository {
 	async findSaved(url: string): Promise<Article | undefined> {
 		const articles = await this.getAllArticles();
 		const urlToCompare = this.settings.normalizeOnCompare
-			? canonicalizeUrl(url)
+			? await canonicalizeUrl(url)
 			: url;
 		const existingArticle = articles.find(
 			(article) => article.url === urlToCompare,
@@ -84,7 +84,7 @@ export class ArticlesRepository {
 		const api = await this.getApi();
 		logger.info("Saving article:", article);
 		const urlToSave = this.settings.normalizeOnSave
-			? canonicalizeUrl(article.url)
+			? await canonicalizeUrl(article.url)
 			: article.url;
 		try {
 			const savedArticle = await api.saveArticle({
@@ -125,10 +125,10 @@ export class ArticlesRepository {
 			const allArticles = await api.sync();
 			logger.debug(`Synced ${allArticles.length} articles from API`);
 			const processedArticles = this.settings.normalizeOnSave
-				? allArticles.map((article) => ({
+				? await Promise.all(allArticles.map(async (article) => ({
 						...article,
-						url: canonicalizeUrl(article.url),
-					}))
+						url: await canonicalizeUrl(article.url),
+					})))
 				: allArticles;
 			await this.updateArticles(processedArticles);
 			return {

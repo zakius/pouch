@@ -1,0 +1,10 @@
+! Test filter list from local file
+$removeparam=si
+||youtube.com^$removeparam=si
+||amazon.com^$removeparam=ref
+||amazon.com^$removeparam=tag
+?from=glia^$removeparam=from
+$removeparam=utm_medium
+$removeparam=utm_source
+@@||rd.bizrate.com^$removeparam=utm_medium
+@@||special-site.com^$removeparam=utm_source

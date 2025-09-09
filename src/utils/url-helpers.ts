@@ -1,5 +1,5 @@
 import { getTrackingParameters } from "./tracking-params-manager";
-import { TidyURL } from "@protontech/tidy-url";
+import { cleanUrl as filterListCleanUrl } from "./filter-list-url-cleaner";
 
 let loadedTrackingParameters: string[] = [];
 export async function initializeUrlCanonizer(): Promise<void> {
@@ -120,13 +120,33 @@ function canonicalizeAmazonUrl(url: URL): URL {
 	}
 	return url;
 }
-export function canonicalizeUrl(urlString: string): string {
+function removeTrackingParameters(url: URL): URL {
+	const params = url.searchParams;
+	const trackingParamsSet = new Set(loadedTrackingParameters);
+	const paramsToDelete: string[] = [];
+	
+	// Remove all tracking parameters
+	for (const key of params.keys()) {
+		if (key.startsWith("utm_") || trackingParamsSet.has(key)) {
+			paramsToDelete.push(key);
+		}
+	}
+	
+	paramsToDelete.forEach((param) => {
+		params.delete(param);
+	});
+	
+	url.search = params.toString();
+	return url;
+}
+
+export async function canonicalizeUrl(urlString: string): Promise<string> {
 	try {
-		// First, apply TidyURL cleaning for comprehensive tracking parameter removal
-		const tidyResult = TidyURL.clean(urlString);
-		let url = new URL(tidyResult.url);
-		
-		// Apply our custom canonicalization logic on top of TidyURL's cleaning
+		// First, use filter lists for comprehensive URL cleaning
+		let cleanedUrl = await filterListCleanUrl(urlString);
+		let url = new URL(cleanedUrl);
+
+		// Apply our custom canonicalization logic
 		const maxRedirects = 5;
 		for (let i = 0; i < maxRedirects; i++) {
 			const originalUrlString = url.toString();
@@ -140,21 +160,11 @@ export function canonicalizeUrl(urlString: string): string {
 		url = canonicalizeTwitterUrl(url);
 		url = canonicalizeYoutubeUrl(url);
 		url = canonicalizeAmazonUrl(url);
-		
+
 		// Apply additional tracking parameter removal using our custom list
-		// This ensures we don't lose any parameters that TidyURL might not catch
-		const params = url.searchParams;
-		const trackingParamsSet = new Set(loadedTrackingParameters);
-		const paramsToDelete: string[] = [];
-		for (const key of params.keys()) {
-			if (key.startsWith("utm_") || trackingParamsSet.has(key)) {
-				paramsToDelete.push(key);
-			}
-		}
-		paramsToDelete.forEach((param) => {
-			params.delete(param);
-		});
-		url.search = params.toString();
+		// This ensures we don't lose any parameters that filter lists might not catch
+		url = removeTrackingParameters(url);
+		
 		return url.toString();
 	} catch (_error) {
 		return urlString;

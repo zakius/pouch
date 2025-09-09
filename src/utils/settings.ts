@@ -1,4 +1,4 @@
-import { z } from "zod";
+import * as v from "valibot";
 import { instapaperSettingsSchema } from "../background/api/adapters/instapaper-adapter";
 import { karakeepSettingsSchema } from "../background/api/adapters/karakeep-adapter";
 import { linkwardenSettingsSchema } from "../background/api/adapters/linkwarden-adapter";
@@ -8,7 +8,7 @@ import { wallabagSettingsSchema } from "../background/api/adapters/wallabag-adap
 import type { baseSettingsSchema } from "./base-settings-schema";
 import { LogLevel } from "./log-levels";
 import { logger } from "./logger";
-export const settingsSchema = z.discriminatedUnion("backend", [
+export const settingsSchema = v.variant("backend", [
 	wallabagSettingsSchema,
 	raindropSettingsSchema,
 	instapaperSettingsSchema,
@@ -16,8 +16,8 @@ export const settingsSchema = z.discriminatedUnion("backend", [
 	linkwardenSettingsSchema,
 	syncSettingsSchema,
 ]);
-export type Settings = z.infer<typeof settingsSchema>;
-export type BaseSettings = z.infer<typeof baseSettingsSchema>;
+export type Settings = v.Input<typeof settingsSchema>;
+export type BaseSettings = v.Input<typeof baseSettingsSchema>;
 export const DEFAULT_SETTINGS: Settings = {
 	backend: "sync",
 	apiConfig: {},
@@ -32,7 +32,7 @@ export async function getSettings(): Promise<Settings> {
 		);
 		logger.debug("Retrieved settings from storage:", result);
 		const mergedSettings = { ...DEFAULT_SETTINGS, ...result };
-		return settingsSchema.parse(mergedSettings);
+		return v.parse(settingsSchema, mergedSettings);
 	} catch (error) {
 		logger.error("Error getting or validating settings:", error);
 		return DEFAULT_SETTINGS;
@@ -40,7 +40,7 @@ export async function getSettings(): Promise<Settings> {
 }
 export async function saveSettings(settings: Settings) {
 	try {
-		const validatedSettings = settingsSchema.parse(settings);
+		const validatedSettings = v.parse(settingsSchema, settings);
 		logger.debug("Saving settings:", validatedSettings);
 		await browser.storage.sync.set(validatedSettings);
 	} catch (error) {

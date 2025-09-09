@@ -1,84 +1,87 @@
-import { z } from "zod";
+import * as v from "valibot";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
 import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
 
-export const wallabagConfigSchema = z.object({
-	url: z.string().url(),
-	clientId: z.string(),
-	clientSecret: z.string(),
-	username: z.string(),
-	password: z.string().optional(),
+export const wallabagConfigSchema = v.object({
+	url: v.string([v.url()]),
+	clientId: v.string(),
+	clientSecret: v.string(),
+	username: v.string(),
+	password: v.optional(v.string()),
 });
 
-export const wallabagSettingsSchema = baseSettingsSchema.extend({
-	backend: z.literal("wallabag"),
-	apiConfig: wallabagConfigSchema,
+export const wallabagSettingsSchema = v.merge([
+	baseSettingsSchema,
+	v.object({
+		backend: v.literal("wallabag"),
+		apiConfig: wallabagConfigSchema,
+	}),
+]);
+
+export type WallabagSettings = v.Input<typeof wallabagSettingsSchema>;
+export type WallabagConfig = v.Input<typeof wallabagConfigSchema>;
+
+// Valibot schemas for API responses based on official documentation
+const wallabagTagSchema = v.object({
+	id: v.number(),
+	name: v.string(),
 });
 
-export type WallabagSettings = z.infer<typeof wallabagSettingsSchema>;
-export type WallabagConfig = z.infer<typeof wallabagConfigSchema>;
-
-// Zod schemas for API responses based on official documentation
-const wallabagTagSchema = z.object({
-	id: z.number(),
-	name: z.string(),
-});
-
-const wallabagItemSchema = z.object({
-	id: z.number(),
-	title: z.string(),
-	url: z.string(),
-	created_at: z.string(),
-	tags: z.array(wallabagTagSchema).optional(),
+const wallabagItemSchema = v.object({
+	id: v.number(),
+	title: v.string(),
+	url: v.string(),
+	created_at: v.string(),
+	tags: v.optional(v.array(wallabagTagSchema)),
 	// Additional fields that may be present
-	content: z.string().nullable().optional(),
-	excerpt: z.string().optional(),
-	domain_name: z.string().optional(),
-	is_archived: z.union([z.boolean(), z.number()]).optional(),
-	is_starred: z.union([z.boolean(), z.number()]).optional(),
-	language: z.string().nullable().optional(),
-	reading_time: z.number().optional(),
-	preview_picture: z.string().nullable().optional(),
-	user_name: z.string().optional(),
-	user_email: z.string().optional(),
-	user_id: z.number().optional(),
+	content: v.optional(v.nullable(v.string())),
+	excerpt: v.optional(v.string()),
+	domain_name: v.optional(v.string()),
+	is_archived: v.optional(v.union([v.boolean(), v.number()])),
+	is_starred: v.optional(v.union([v.boolean(), v.number()])),
+	language: v.optional(v.nullable(v.string())),
+	reading_time: v.optional(v.number()),
+	preview_picture: v.optional(v.nullable(v.string())),
+	user_name: v.optional(v.string()),
+	user_email: v.optional(v.string()),
+	user_id: v.optional(v.number()),
 });
 
-const wallabagTokenResponseSchema = z.object({
-	access_token: z.string(),
-	token_type: z.string().optional(),
-	expires_in: z.number().optional(),
-	refresh_token: z.string().optional(),
+const wallabagTokenResponseSchema = v.object({
+	access_token: v.string(),
+	token_type: v.optional(v.string()),
+	expires_in: v.optional(v.number()),
+	refresh_token: v.optional(v.string()),
 });
 
-const wallabagErrorSchema = z.object({
-	error: z.string(),
-	error_description: z.string().optional(),
-	message: z.string().optional(),
+const wallabagErrorSchema = v.object({
+	error: v.string(),
+	error_description: v.optional(v.string()),
+	message: v.optional(v.string()),
 });
 
-const wallabagSaveResponseSchema = z.union([
+const wallabagSaveResponseSchema = v.union([
 	wallabagItemSchema,
 	wallabagErrorSchema,
 ]);
 
-const wallabagSyncResponseSchema = z.union([
-	z.object({
-		_embedded: z.object({
-			items: z.array(wallabagItemSchema),
+const wallabagSyncResponseSchema = v.union([
+	v.object({
+		_embedded: v.object({
+			items: v.array(wallabagItemSchema),
 		}),
-		_links: z
-			.object({
-				first: z.object({ href: z.string() }).optional(),
-				last: z.object({ href: z.string() }).optional(),
-				self: z.object({ href: z.string() }).optional(),
-			})
-			.optional(),
-		limit: z.number(),
-		page: z.number(),
-		pages: z.number(),
-		total: z.number(),
+		_links: v.optional(
+			v.object({
+				first: v.optional(v.object({ href: v.string() })),
+				last: v.optional(v.object({ href: v.string() })),
+				self: v.optional(v.object({ href: v.string() })),
+			}),
+		),
+		limit: v.number(),
+		page: v.number(),
+		pages: v.number(),
+		total: v.number(),
 	}),
 	wallabagErrorSchema,
 ]);
@@ -135,7 +138,7 @@ export class WallabagAdapter implements ReadItLaterAPI<WallabagSettings> {
 			throw new Error("Failed to authenticate with Wallabag API");
 		}
 		const tokenData = await response.json();
-		const validatedTokenData = wallabagTokenResponseSchema.parse(tokenData);
+		const validatedTokenData = v.parse(wallabagTokenResponseSchema, tokenData);
 		this.accessToken = validatedTokenData.access_token;
 	}
 	async testConnection(): Promise<boolean> {
@@ -170,7 +173,7 @@ export class WallabagAdapter implements ReadItLaterAPI<WallabagSettings> {
 			throw new Error(`Failed to save article: ${response.statusText}`);
 		}
 		const data = await response.json();
-		const validatedData = wallabagSaveResponseSchema.parse(data);
+		const validatedData = v.parse(wallabagSaveResponseSchema, data);
 
 		// Check if it's an error response
 		if ("error" in validatedData) {
@@ -207,7 +210,7 @@ export class WallabagAdapter implements ReadItLaterAPI<WallabagSettings> {
 			throw new Error(`Failed to get articles: ${firstResponse.statusText}`);
 		}
 		const firstData = await firstResponse.json();
-		const validatedFirstData = wallabagSyncResponseSchema.parse(firstData);
+		const validatedFirstData = v.parse(wallabagSyncResponseSchema, firstData);
 
 		// Check if it's an error response
 		if ("error" in validatedFirstData) {
@@ -239,7 +242,7 @@ export class WallabagAdapter implements ReadItLaterAPI<WallabagSettings> {
 				throw new Error(`Failed to get articles: ${response.statusText}`);
 			}
 			const data = await response.json();
-			const validatedData = wallabagSyncResponseSchema.parse(data);
+			const validatedData = v.parse(wallabagSyncResponseSchema, data);
 
 			// Check if it's an error response
 			if ("error" in validatedData) {

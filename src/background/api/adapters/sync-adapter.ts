@@ -1,14 +1,17 @@
-import { z } from "zod";
+import * as v from "valibot";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
 import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
 
 const STORAGE_KEY = "pouch-articles";
-export const syncSettingsSchema = baseSettingsSchema.extend({
-	backend: z.literal("sync"),
-	apiConfig: z.object({}),
-});
-export type SyncSettings = z.infer<typeof syncSettingsSchema>;
+export const syncSettingsSchema = v.merge([
+	baseSettingsSchema,
+	v.object({
+		backend: v.literal("sync"),
+		apiConfig: v.object({}),
+	}),
+]);
+export type SyncSettings = v.Input<typeof syncSettingsSchema>;
 export class SyncAdapter implements ReadItLaterAPI<SyncSettings> {
 	public readonly displayName = "Sync (Built-in)";
 	formConfig = [];
