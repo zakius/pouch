@@ -1,7 +1,6 @@
 import { b, features } from "../utils/browser";
 import { logger } from "../utils/logger";
 import { getSettings, type Settings, saveSettings } from "../utils/settings";
-import { updateTrackingParametersIfNeeded } from "../utils/tracking-params-manager";
 import { initializeUrlCanonizer } from "../utils/url-helpers";
 import { ArticlesRepository } from "./articles-repository";
 
@@ -61,7 +60,6 @@ interface Tab {
 	title?: string;
 }
 const REFRESH_INTERVAL = 5;
-const TRACKING_PARAMS_REFRESH_INTERVAL = 24 * 60;
 let articlesRepository: ArticlesRepository;
 let initializePromise: Promise<void> | null = null;
 async function getArticlesRepository(): Promise<ArticlesRepository> {
@@ -272,7 +270,6 @@ async function initialize(): Promise<void> {
 		await b.contextMenus.removeAll();
 		await logger.initialize();
 		logger.info("Background script initialized");
-		await updateTrackingParametersIfNeeded();
 		await initializeUrlCanonizer();
 		b.contextMenus.create({
 			id: "save-link",
@@ -285,9 +282,6 @@ async function initialize(): Promise<void> {
 			contexts: [features.hasPageAction ? "browser_action" : "action"],
 		});
 		browser.alarms.create("refresh", { periodInMinutes: REFRESH_INTERVAL });
-		browser.alarms.create("update-tracking-params", {
-			periodInMinutes: TRACKING_PARAMS_REFRESH_INTERVAL,
-		});
 		browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 			if (
 				(changeInfo.status === "complete" || "favIconUrl" in changeInfo) &&
@@ -319,10 +313,6 @@ browser.alarms.onAlarm.addListener(async (alarm) => {
 		} catch (error) {
 			logger.error("Error refreshing articles:", error);
 		}
-	} else if (alarm.name === "update-tracking-params") {
-		logger.info("Updating tracking parameters list due to alarm");
-		await updateTrackingParametersIfNeeded();
-		await initializeUrlCanonizer();
 	}
 });
 browser.runtime.onInstalled.addListener(async (details) => {

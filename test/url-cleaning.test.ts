@@ -1,18 +1,15 @@
-import { test, expect, describe, beforeEach } from "bun:test";
+import { test, expect, describe } from "bun:test";
 import { 
 	cleanUrl, 
 	initializeWithRawFilterLists
 } from "../src/utils/filter-list-url-cleaner";
-import { readFileSync } from "fs";
+import testFilterContent from "./test-data/test-filters.txt";
 
-describe("Filter List URL Cleaning", () => {
-	beforeEach(async () => {
-		// Load test filter list content directly
-		const testFilterContent = readFileSync("test-filters.txt", "utf-8");
-		await initializeWithRawFilterLists([
-			{ name: "TestFilters", content: testFilterContent }
-		]);
-	});
+await initializeWithRawFilterLists([
+	{ name: "TestFilters", content: testFilterContent }
+]);
+
+describe("Filter List URL Cleaning", () => {	
 
 	test("should keep sc_eh parameter on puma.com domains (not in test filter list)", async () => {
 		const input = "https://puma.com/test?sc_eh=test&important=keep";

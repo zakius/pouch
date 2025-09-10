@@ -5,11 +5,7 @@
  * Separates content loading from URL cleaning logic.
  */
 
-import {
-	type FilterRule,
-	type ParsedFilterList,
-	parseCompleteFilterList,
-} from "./filter-list-parser";
+import { type FilterRule, parseCompleteFilterList } from "./filter-list-parser";
 import { initializeWithRawFilterLists } from "./filter-list-url-cleaner";
 import { logger } from "./logger";
 
@@ -101,7 +97,7 @@ export async function loadFilterListContent(
 			try {
 				// Check if we're in a Node.js environment (test runner)
 				if (typeof process !== "undefined" && process.versions?.node) {
-					const fs = await import("fs/promises");
+					const fs = await import("node:fs/promises");
 
 					// Convert file:// URL to local path
 					const filePath = url.replace("file://", "");
