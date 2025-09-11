@@ -25,7 +25,7 @@ export const availableBackends = Object.keys(
 	adapters,
 ) as (keyof typeof adapters)[];
 
-export function getAdatper(backend: keyof typeof adapters): ReadItLaterAPI {
+export function getAdapter(backend: keyof typeof adapters): ReadItLaterAPI {
 	const cachedAdapter = adapterCache.get(backend);
 	if (cachedAdapter) {
 		return cachedAdapter;
