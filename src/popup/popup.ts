@@ -26,7 +26,7 @@ const settingsButton = document.getElementById(
 const articleListContainer = document.getElementById("article-list");
 const emptyMessage = document.getElementById("empty-message");
 const noResultsMessage = document.getElementById("no-results-message");
-let currentTab: chrome.tabs.Tab | browser.tabs.Tab | undefined;
+let currentTab: browser.tabs.Tab | undefined;
 let savedArticleForCurrentPage: Article | undefined;
 const itemsPerPage = 10;
 let currentPage = 1;
@@ -65,44 +65,40 @@ async function initializePopup(): Promise<void> {
 		showError(`Could not load articles. ${errorMessage}`, true);
 	}
 }
-function loadRecentArticles(): Promise<void> {
+async function loadRecentArticles(): Promise<void> {
 	const searchTerm = searchInput?.value.toLowerCase().trim() || "";
 	logger.debug("Requesting recent articles from background script...");
-	return new Promise((resolve, reject) => {
-		chrome.runtime.sendMessage(
-			{
-				type: "getArticles",
-				payload: {
-					page: currentPage,
-					perPage: itemsPerPage,
-					search: searchTerm,
-				},
+	
+	try {
+		const response = await browser.runtime.sendMessage({
+			type: "getArticles",
+			payload: {
+				page: currentPage,
+				perPage: itemsPerPage,
+				search: searchTerm,
 			},
-			(response: {
-				items?: Article[];
-				page?: number;
-				pages?: number;
-				total?: number;
-				error?: string;
-			}) => {
-				logger.debug("Received response from background:", response);
-				if (browser.runtime.lastError) {
-					logger.error("Runtime error:", browser.runtime.lastError);
-					return reject(
-						new Error("Could not connect to the background service."),
-					);
-				}
-				if (response.error) {
-					logger.error("Background script reported error:", response.error);
-					return reject(new Error(response.error));
-				}
-				totalPages = response.pages || 1;
-				currentPage = response.page || 1;
-				displayArticles(response.items || []);
-				resolve();
-			},
-		);
-	});
+		}) as {
+			items?: Article[];
+			page?: number;
+			pages?: number;
+			total?: number;
+			error?: string;
+		};
+		
+		logger.debug("Received response from background:", response);
+		
+		if (response.error) {
+			logger.error("Background script reported error:", response.error);
+			throw new Error(response.error);
+		}
+		
+		totalPages = response.pages || 1;
+		currentPage = response.page || 1;
+		displayArticles(response.items || []);
+	} catch (error) {
+		logger.error("Runtime error:", error);
+		throw new Error("Could not connect to the background service.");
+	}
 }
 function displayArticles(articles: Article[]): void {
 	logger.debug("Displaying articles:", articles);
@@ -221,20 +217,15 @@ function createArticleElement(article: Article): HTMLElement {
 	removeButton.textContent = "×";
 	removeButton.className = "delete-button";
 	removeButton.addEventListener("click", () => {
-		chrome.runtime.sendMessage(
-			{
-				type: "deleteArticle",
-				payload: { articleId: article.id },
-			},
-			(response) => {
-				if (browser.runtime.lastError) {
-					logger.error("Error deleting article:", browser.runtime.lastError);
-					return;
-				}
-				logger.debug("Article deleted, reloading list:", response);
-				void loadRecentArticles();
-			},
-		);
+		browser.runtime.sendMessage({
+			type: "deleteArticle",
+			payload: { articleId: article.id },
+		}).then(() => {
+			logger.debug("Article deleted, reloading list");
+			void loadRecentArticles();
+		}).catch((error) => {
+			logger.error("Error deleting article:", error);
+		});
 	});
 	articleElement.appendChild(removeButton);
 	return articleElement;
@@ -244,13 +235,8 @@ async function updateSavePageButtonState(): Promise<void> {
 		if (savePageButton) savePageButton.style.display = "none";
 		return;
 	}
-	chrome.runtime.sendMessage(
-		{ type: "checkArticle", payload: { url: currentTab.url } },
-		(response: Article | undefined) => {
-			if (browser.runtime.lastError) {
-				logger.error("Error checking article:", browser.runtime.lastError);
-				return;
-			}
+	browser.runtime.sendMessage({ type: "checkArticle", payload: { url: currentTab.url } })
+		.then((response: Article | undefined) => {
 			savedArticleForCurrentPage = response;
 			if (savePageButton) {
 				if (response) {
@@ -264,49 +250,35 @@ async function updateSavePageButtonState(): Promise<void> {
 				}
 				savePageButton.style.display = "block";
 			}
-		},
-	);
+		})
+		.catch((error) => {
+			logger.error("Error checking article:", error);
+		});
 }
 async function handleSavePageClick(): Promise<void> {
 	if (!currentTab?.url) return;
 	if (savedArticleForCurrentPage) {
-		chrome.runtime.sendMessage(
-			{
-				type: "deleteArticle",
-				payload: { articleId: savedArticleForCurrentPage.id },
-			},
-			async (response) => {
-				if (browser.runtime.lastError || response?.error) {
-					logger.error(
-						"Error deleting article:",
-						browser.runtime.lastError || response?.error,
-					);
-					return;
-				}
-				logger.debug("Article deleted, reloading list and button state");
-				await updateSavePageButtonState();
-				await loadRecentArticles();
-			},
-		);
+		browser.runtime.sendMessage({
+			type: "deleteArticle",
+			payload: { articleId: savedArticleForCurrentPage.id },
+		}).then(async () => {
+			logger.debug("Article deleted, reloading list and button state");
+			await updateSavePageButtonState();
+			await loadRecentArticles();
+		}).catch((error) => {
+			logger.error("Error deleting article:", error);
+		});
 	} else {
-		chrome.runtime.sendMessage(
-			{
-				type: "saveArticle",
-				payload: { url: currentTab.url, title: currentTab.title || "" },
-			},
-			async (response) => {
-				if (browser.runtime.lastError || response?.error) {
-					logger.error(
-						"Error saving article:",
-						browser.runtime.lastError || response?.error,
-					);
-					return;
-				}
-				logger.debug("Article saved, reloading list and button state");
-				await updateSavePageButtonState();
-				await loadRecentArticles();
-			},
-		);
+		browser.runtime.sendMessage({
+			type: "saveArticle",
+			payload: { url: currentTab.url, title: currentTab.title || "" },
+		}).then(async () => {
+			logger.debug("Article saved, reloading list and button state");
+			await updateSavePageButtonState();
+			await loadRecentArticles();
+		}).catch((error) => {
+			logger.error("Error saving article:", error);
+		});
 	}
 }
 document.addEventListener("DOMContentLoaded", initializePopup);

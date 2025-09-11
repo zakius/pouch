@@ -1,4 +1,3 @@
-import { b, features } from "../utils/browser";
 import { logger } from "../utils/logger";
 import { getSettings, type Settings, saveSettings } from "../utils/settings";
 import { initializeUrlCanonizer } from "../utils/url-helpers";
@@ -152,7 +151,7 @@ browser.runtime.onMessage.addListener(
 		return true;
 	},
 );
-b.contextMenus.onClicked.addListener(async (info: OnClickData, tab?: Tab) => {
+browser.contextMenus.onClicked.addListener(async (info: OnClickData, tab?: Tab) => {
 	try {
 		const articlesRepository = await getArticlesRepository();
 		if (info.menuItemId === "save-link" && info.linkUrl) {
@@ -160,7 +159,7 @@ b.contextMenus.onClicked.addListener(async (info: OnClickData, tab?: Tab) => {
 				url: info.linkUrl,
 				title: "",
 			});
-			if (features.hasPageAction && tab?.id !== undefined) {
+			if (tab?.id !== undefined) {
 				await updateUiForTab(tab.id);
 			}
 		} else if (info.menuItemId === "save-page" && tab?.url) {
@@ -181,8 +180,7 @@ b.contextMenus.onClicked.addListener(async (info: OnClickData, tab?: Tab) => {
 		logger.error("Error saving link:", error);
 	}
 });
-if (features.hasPageAction) {
-	browser.pageAction.onClicked.addListener(async (tab) => {
+browser.pageAction.onClicked.addListener(async (tab) => {
 		if (!tab.url || !isValidHttpUrl(tab.url)) {
 			logger.warn("Page action clicked on invalid URL:", tab.url);
 			return;
@@ -210,13 +208,13 @@ if (features.hasPageAction) {
 			logger.error("Error handling page action click:", error);
 		}
 	});
-}
 async function isDarkTheme(): Promise<boolean> {
-	if (!features.hasThemeApi) {
+	try {
+		const theme = await browser.theme.getCurrent();
+		return theme.colors?.frame === "dark";
+	} catch {
 		return false;
 	}
-	const theme = await browser.theme.getCurrent();
-	return theme.colors?.frame === "dark";
 }
 async function getIconPath(isSaved: boolean): Promise<string> {
 	const dark = await isDarkTheme();
@@ -233,22 +231,20 @@ async function updateUiForTab(tabId: number): Promise<void> {
 		const articlesRepository = await getArticlesRepository();
 		const existingArticle = await articlesRepository.findSaved(tab.url);
 		const isSaved = !!existingArticle;
-		if (features.hasPageAction) {
-			const iconPath = await getIconPath(isSaved);
-			await browser.pageAction.setIcon({ tabId, path: iconPath });
-			await browser.pageAction.setTitle({
-				tabId,
-				title: isSaved ? "Article saved" : "Save to Pouch",
-			});
-			await browser.pageAction.show(tabId);
-		}
-		await b.contextMenus.update("save-page", {
+		const iconPath = await getIconPath(isSaved);
+		await browser.pageAction.setIcon({ tabId, path: iconPath });
+		await browser.pageAction.setTitle({
+			tabId,
+			title: isSaved ? "Article saved" : "Save to Pouch",
+		});
+		await browser.pageAction.show(tabId);
+		await browser.contextMenus.update("save-page", {
 			title: isSaved ? "Remove page" : "Save page",
 			enabled: true,
 		});
 	} catch (error) {
 		logger.error("Error updating UI for tab:", error);
-		await b.contextMenus.update("save-page", {
+		await browser.contextMenus.update("save-page", {
 			title: "Unable to determine page status",
 			enabled: false,
 		});
@@ -267,21 +263,21 @@ async function initialize(): Promise<void> {
 		return initializePromise;
 	}
 	initializePromise = (async () => {
-		await b.contextMenus.removeAll();
+		await browser.contextMenus.removeAll();
 		await logger.initialize();
 		logger.info("Background script initialized");
 		await initializeUrlCanonizer();
 		const articlesRepository = await getArticlesRepository();
 		await articlesRepository.syncWithAPI();
-		b.contextMenus.create({
+		browser.contextMenus.create({
 			id: "save-link",
 			title: "Save link",
 			contexts: ["link"],
 		});
-		b.contextMenus.create({
+		browser.contextMenus.create({
 			id: "save-page",
 			title: "Save page",
-			contexts: [features.hasPageAction ? "browser_action" : "action"],
+			contexts: ["browser_action"],
 		});
 		browser.alarms.create("refresh", { periodInMinutes: REFRESH_INTERVAL });
 		browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
@@ -322,16 +318,6 @@ browser.runtime.onInstalled.addListener(async (details) => {
 	}
 });
 
-// Initialize for both MV2 and MV3
-// For MV2: initialize immediately
-// For MV3: initialize when service worker starts
-if (!features.isManifestV3) {
-	initialize().catch((error) => {
-		logger.error("Failed to initialize extension on MV2:", error);
-	});
-} else {
-	// For MV3, initialize when the service worker starts
-	initialize().catch((error) => {
-		logger.error("Failed to initialize extension on MV3:", error);
-	});
-}
+initialize().catch((error) => {
+	logger.error("Failed to initialize extension:", error);
+});

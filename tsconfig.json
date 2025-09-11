@@ -20,7 +20,7 @@
 		"noUnusedParameters": true,
 		"noImplicitReturns": true,
 		"noFallthroughCasesInSwitch": true,
-		"types": ["chrome", "firefox-webext-browser", "node", "bun"],
+		"types": ["firefox-webext-browser", "node", "bun"],
 		"typeRoots": ["./types", "./node_modules/@types"],
 		"rootDir": "./src",
 		"baseUrl": ".",

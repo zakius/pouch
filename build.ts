@@ -12,7 +12,22 @@ import { promisify } from "node:util";
 
 const execAsync = promisify(exec);
 
-type Browser = "firefox" | "chromium" | "chromium-mv2";
+
+async function copyDirectoryContents(srcDir: string, destDir: string): Promise<void> {
+	const items = await readdir(srcDir, { withFileTypes: true });
+	
+	for (const item of items) {
+		const srcPath = join(srcDir, item.name);
+		const destPath = join(destDir, item.name);
+		
+		if (item.isDirectory()) {
+			await mkdir(destPath, { recursive: true });
+			await copyDirectoryContents(srcPath, destPath);
+		} else {
+			await copyFile(srcPath, destPath);
+		}
+	}
+}
 
 async function bumpPatchVersion(): Promise<string> {
 	try {
@@ -33,10 +48,10 @@ async function bumpPatchVersion(): Promise<string> {
 		packageJson.version = newVersion;
 		await writeFile("package.json", JSON.stringify(packageJson, null, 2));
 		
-		// Update manifest template
-		const manifestTemplate = JSON.parse(await readFile("src/manifest.template.json", "utf-8"));
-		manifestTemplate.version = newVersion;
-		await writeFile("src/manifest.template.json", JSON.stringify(manifestTemplate, null, 2));
+		// Update manifest
+		const manifest = JSON.parse(await readFile("src/manifest.json", "utf-8"));
+		manifest.version = newVersion;
+		await writeFile("src/manifest.json", JSON.stringify(manifest, null, 2));
 		
 		console.log(`Version bumped from ${currentVersion} to ${newVersion}`);
 		return newVersion;
@@ -46,72 +61,8 @@ async function bumpPatchVersion(): Promise<string> {
 	}
 }
 
-interface ManifestV2 {
-	manifest_version: 2;
-	browser_action: {
-		default_icon: Record<string, string>;
-		default_title: string;
-		default_popup: string;
-	};
-	page_action: {
-		default_icon: Record<string, string>;
-		default_title: string;
-		show_matches: string[];
-	};
-	background: {
-		page: string;
-	};
-	browser_specific_settings?: {
-		gecko: {
-			id: string;
-			strict_min_version: string;
-		};
-	};
-	permissions: string[];
-	optional_permissions?: string[];
-}
 
-interface ManifestV3 {
-	manifest_version: 3;
-	action: {
-		default_icon: Record<string, string>;
-		default_title: string;
-		default_popup: string;
-	};
-	background: {
-		service_worker: string;
-		type: "module";
-	};
-	permissions: string[];
-	host_permissions: string[];
-}
-
-interface ManifestBase {
-	name: string;
-	version: string;
-	description: string;
-	icons: Record<string, string>;
-	options_ui: {
-		page: string;
-		open_in_tab: boolean;
-	};
-}
-
-type ManifestTemplate = ManifestBase & {
-	browser_action: ManifestV2["browser_action"];
-	page_action: ManifestV2["page_action"];
-	background: ManifestV2["background"];
-	browser_specific_settings?: ManifestV2["browser_specific_settings"];
-	permissions: string[];
-	host_permissions: string[];
-};
-
-type Manifest = (ManifestV2 | ManifestV3) & ManifestBase;
-
-async function copyStaticFiles(
-	distDir: string,
-	browser: Browser,
-): Promise<void> {
+async function copyStaticFiles(distDir: string): Promise<void> {
 	// Copy icons
 	const srcIconsDir = join("src", "icons");
 	const destIconsDir = join(distDir, "icons");
@@ -122,127 +73,29 @@ async function copyStaticFiles(
 		const destPath = join(destIconsDir, file);
 		await copyFile(srcPath, destPath);
 	}
-
-	// Copy HTML and CSS files
-	const staticDirs = ["background", "options", "popup"];
-	for (const dir of staticDirs) {
-		const srcDir = join("src", dir);
-		const destDir = join(distDir, dir);
-		await mkdir(destDir, { recursive: true });
-
-		// Process HTML files
-		const htmlContent = await readFile(join(srcDir, `${dir}.html`), "utf-8");
-		const isMV2Chromium = browser === "chromium-mv2";
-		const processedHtml = isMV2Chromium
-			? htmlContent.replace('type="module"', "")
-			: htmlContent;
-		await writeFile(join(destDir, `${dir}.html`), processedHtml);
-
-		// Copy CSS files if they exist
-		try {
-			await copyFile(join(srcDir, `${dir}.css`), join(destDir, `${dir}.css`));
-		} catch (_error) {
-			// Ignore if CSS file doesn't exist
-			console.debug(`No CSS file found for ${dir}`);
-		}
-	}
-
-	// Copy compiled JavaScript files from tmp directory
-	const tmpDir = "dist/tmp";
-	for (const dir of staticDirs) {
-		const srcDir = join(tmpDir, dir);
-		const destDir = join(distDir, dir);
-		await mkdir(destDir, { recursive: true });
-
-		// Copy the JavaScript file
-		const jsFile = `${dir}.js`;
-		const srcPath = join(srcDir, jsFile);
-		const destPath = join(destDir, jsFile);
-		await copyFile(srcPath, destPath);
-	}
 }
 
-async function processManifest(browser: Browser): Promise<void> {
-	const distDir = `dist/${browser}`;
-	const manifestTemplate: ManifestTemplate = JSON.parse(
-		await readFile("src/manifest.template.json", "utf-8"),
-	);
-
-	let manifest: Manifest;
-	const isMV2 = browser === "firefox" || browser === "chromium-mv2";
-
-	if (isMV2) {
-		// Firefox-specific modifications (MV2)
-		const { host_permissions, ...rest } = manifestTemplate;
-
-		// Convert host_permissions to permissions for MV2
-		manifest = {
-			...rest,
-			manifest_version: 2,
-			browser_action: manifestTemplate.browser_action,
-			page_action: manifestTemplate.page_action,
-			background: manifestTemplate.background,
-			permissions: [
-				...manifestTemplate.permissions,
-				...manifestTemplate.host_permissions,
-			],
-		};
-
-		// Add browser-specific settings only for Firefox
-		if (browser === "firefox") {
-			manifest.browser_specific_settings =
-				manifestTemplate.browser_specific_settings;
-		}
-	} else {
-		// Chromium-specific modifications (MV3)
-		const {
-			browser_action,
-			page_action,
-			background,
-			browser_specific_settings,
-			...rest
-		} = manifestTemplate;
-
-		manifest = {
-			...rest,
-			manifest_version: 3,
-			action: {
-				default_icon: browser_action.default_icon,
-				default_title: browser_action.default_title,
-				default_popup: browser_action.default_popup,
-			},
-			background: {
-				service_worker: "background/background.js",
-				type: "module",
-			},
-			permissions: manifestTemplate.permissions,
-			host_permissions: manifestTemplate.host_permissions,
-		};
-	}
-
-	// Write the processed manifest
-	await writeFile(
-		join(distDir, "manifest.json"),
-		JSON.stringify(manifest, null, 2),
+async function copyManifest(): Promise<void> {
+	const distDir = "dist/unpackaged";
+	await copyFile(
+		"src/manifest.json",
+		join(distDir, "manifest.json")
 	);
 }
 
-async function createArchive(browser: Browser): Promise<void> {
-	const distDir = `dist/${browser}`;
+async function createArchive(): Promise<void> {
+	const distDir = "dist/unpackaged";
+	const archiveDir = "dist/packages";
+	
+	// Create packages directory
+	await mkdir(archiveDir, { recursive: true });
 
 	try {
-		if (browser === "chromium") {
-			// Create ZIP archive for Chromium
-			await execAsync(`cd ${distDir} && zip -r ../chromium-mv3.zip .`);
-			console.log("Created chromium-mv3.zip for Chromium");
-		}
-		if (browser === "chromium-mv2") {
-			// Create ZIP archive for Chromium
-			await execAsync(`cd ${distDir} && zip -r ../chromium-mv2.zip .`);
-			console.log("Created chromium-mv2.zip for Chromium MV2");
-		}
+		// Create ZIP archive
+		await execAsync(`cd ${distDir} && zip -r ../../${archiveDir}/extension.zip .`);
+		console.log("Created extension.zip in dist/packages/");
 	} catch (error) {
-		console.error(`Failed to create archive for ${browser}:`, error);
+		console.error("Failed to create archive:", error);
 		throw error;
 	}
 }
@@ -256,36 +109,37 @@ async function signFirefoxExtension(): Promise<void> {
 		);
 	}
 
-	try {
-		// Sign the extension using web-ext
-		await execAsync(
-			`web-ext sign --api-key=${AMO_API_KEY} --api-secret=${AMO_API_SECRET} --source-dir=dist/firefox --artifacts-dir=dist --channel=unlisted --amo-metadata=src/metadata.json`,
-		);
-		console.log("Firefox extension signed successfully");
-	} catch (error) {
-		console.error("Failed to sign Firefox extension:", error);
-		throw error;
-	}
+		try {
+			// Sign the extension using web-ext
+			await execAsync(
+				`web-ext sign --api-key=${AMO_API_KEY} --api-secret=${AMO_API_SECRET} --source-dir=dist/unpackaged --artifacts-dir=dist/signed --channel=unlisted --amo-metadata=src/metadata.json`,
+			);
+			console.log("Extension signed successfully");
+		} catch (error) {
+			console.error("Failed to sign extension:", error);
+			throw error;
+		}
 }
 
-async function compileTypeScript(isWatch = false): Promise<void> {
+async function compileTypeScript(distDir: string, isWatch = false): Promise<void> {
 	try {
-		// Create tmp directory for compilation output
-		const tmpDir = "dist/tmp";
-		await mkdir(tmpDir, { recursive: true });
-
-		// Build TypeScript files
+		// Build TypeScript files directly to dist directory
 		const result = await Bun.build({
 			entrypoints: [
-				"src/background/background.ts",
-				"src/options/options.ts",
-				"src/popup/popup.ts",
+				"src/background/background.html",
+				"src/options/options.html",
+				"src/popup/popup.html",
 			],
-			outdir: tmpDir,
+			outdir: distDir,
 			target: "browser",
 			format: "esm",
-			sourcemap: "inline",
-			minify: false,
+			sourcemap: false,
+			minify: true,
+			naming: {
+				entry: "[dir]/[name].[ext]",
+				chunk: "[dir]/[name]-[hash].[ext]",
+				asset: "[dir]/[name]-[hash].[ext]"
+			},
 		});
 
 		if (!result.success) {
@@ -306,26 +160,63 @@ async function compileTypeScript(isWatch = false): Promise<void> {
 	}
 }
 
+async function cleanOldArtifacts(): Promise<void> {
+	try {
+		// Remove old build artifacts from packages directory
+		const oldFiles = ["extension.zip", "firefox.zip", "chromium-mv3.zip", "chromium-mv2.zip"];
+		for (const file of oldFiles) {
+			try {
+				await execAsync(`rm -f dist/packages/${file}`);
+			} catch {
+				// Ignore if file doesn't exist
+			}
+		}
+		
+		// Remove old XPI files from signed directory
+		try {
+			await execAsync(`rm -f dist/signed/*.xpi`);
+		} catch {
+			// Ignore if no XPI files exist
+		}
+		
+		// Remove old directories
+		const oldDirs = ["firefox", "chromium", "tmp"];
+		for (const dir of oldDirs) {
+			try {
+				await execAsync(`rm -rf dist/${dir}`);
+			} catch {
+				// Ignore if directory doesn't exist
+			}
+		}
+	} catch (error) {
+		console.warn("Warning: Could not clean old artifacts:", error);
+	}
+}
+
 async function build(
-	browser: Browser,
 	skipSigning = false,
 	prepareOnly = false,
 	isWatch = false,
 ): Promise<void> {
-	const distDir = `dist/${browser}`;
+	const distDir = "dist/unpackaged";
 
 	try {
-		// First compile TypeScript to tmp directory
-		await compileTypeScript(isWatch);
-
-		// Create browser-specific directory
+		// Clean old artifacts
+		await cleanOldArtifacts();
+		
+		// Create dist directories
 		await mkdir(distDir, { recursive: true });
+		await mkdir("dist/packages", { recursive: true });
+		await mkdir("dist/signed", { recursive: true });
 
-		// Copy static files (icons, HTML, CSS) and compiled JavaScript
-		await copyStaticFiles(distDir, browser);
+		// Compile TypeScript directly to dist directory
+		await compileTypeScript(distDir, isWatch);
 
-		// Process and copy manifest
-		await processManifest(browser);
+		// Copy static files (icons)
+		await copyStaticFiles(distDir);
+
+		// Copy manifest
+		await copyManifest();
 
 		if (prepareOnly) {
 			console.log("Build preparation complete.");
@@ -333,18 +224,13 @@ async function build(
 		}
 
 		// Sign or create archive
-		if (browser === "firefox") {
-			if (skipSigning) {
-				console.log(
-					"Skipping Firefox extension signing. Creating zip archive instead.",
-				);
-				await createArchive(browser);
-			} else {
-				await signFirefoxExtension();
-			}
+		if (skipSigning) {
+			console.log(
+				"Skipping Firefox extension signing. Creating zip archive instead.",
+			);
+			await createArchive();
 		} else {
-			// For chromium builds
-			await createArchive(browser);
+			await signFirefoxExtension();
 		}
 
 		console.log("Build finished.");
@@ -357,18 +243,18 @@ async function build(
 	}
 }
 
-async function watchAndBuild(browser: Browser): Promise<void> {
+async function watchAndBuild(): Promise<void> {
 	const srcDir = "src";
-	console.log(`Watching for changes in ${srcDir} to build for ${browser}...`);
+	console.log(`Watching for changes in ${srcDir}...`);
 
 	// Initial build
-	await build(browser, true, true, true);
+	await build(true, true, true);
 
 	const watcher = watch(srcDir, { recursive: true });
 	for await (const event of watcher) {
 		console.log(`Detected ${event.eventType} in ${event.filename}`);
 		try {
-			await build(browser, true, true, true);
+			await build(true, true, true);
 		} catch (error) {
 			console.error("Build failed during watch:", error);
 			console.log("Watching for next change...");
@@ -377,31 +263,23 @@ async function watchAndBuild(browser: Browser): Promise<void> {
 }
 
 async function main() {
-	const targetBrowser = process.argv[2] as Browser;
 	const watchMode = process.argv.includes("--watch");
 	const skipSigning = !process.argv.includes("--sign");
 	const prepareOnly = process.argv.includes("--prepare-only") || watchMode;
 	const shouldSign = process.argv.includes("--sign");
-
-	if (!["firefox", "chromium", "chromium-mv2"].includes(targetBrowser)) {
-		console.error(
-			'Invalid browser specified. Use "firefox", "chromium" or "chromium-mv2".',
-		);
-		process.exit(1);
-	}
 
 	// Bump version if signing (for AMO compatibility)
 	if (shouldSign) {
 		await bumpPatchVersion();
 	}
 
-	await build(targetBrowser, skipSigning, prepareOnly).catch((error) => {
+	await build(skipSigning, prepareOnly).catch((error) => {
 		console.error("Build failed:", error);
 		process.exit(1);
 	});
 
 	if (watchMode) {
-		await watchAndBuild(targetBrowser);
+		await watchAndBuild();
 	}
 }
 
