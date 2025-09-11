@@ -1,3 +1,4 @@
+import { refreshFilterLists } from "../utils/filter-list-manager";
 import { logger } from "../utils/logger";
 import { getSettings, type Settings, saveSettings } from "../utils/settings";
 import { initializeUrlCanonizer } from "../utils/url-helpers";
@@ -151,63 +152,65 @@ browser.runtime.onMessage.addListener(
 		return true;
 	},
 );
-browser.contextMenus.onClicked.addListener(async (info: OnClickData, tab?: Tab) => {
-	try {
-		const articlesRepository = await getArticlesRepository();
-		if (info.menuItemId === "save-link" && info.linkUrl) {
-			await articlesRepository.saveArticle({
-				url: info.linkUrl,
-				title: "",
-			});
-			if (tab?.id !== undefined) {
-				await updateUiForTab(tab.id);
-			}
-		} else if (info.menuItemId === "save-page" && tab?.url) {
-			const existingArticle = await articlesRepository.findSaved(tab.url);
-			if (existingArticle) {
-				await articlesRepository.deleteArticle(existingArticle.id);
-			} else {
-				await articlesRepository.saveArticle({
-					url: tab.url,
-					title: tab.title ?? "",
-				});
-			}
-			if (tab.id) {
-				await updateUiForTab(tab.id);
-			}
-		}
-	} catch (error) {
-		logger.error("Error saving link:", error);
-	}
-});
-browser.pageAction.onClicked.addListener(async (tab) => {
-		if (!tab.url || !isValidHttpUrl(tab.url)) {
-			logger.warn("Page action clicked on invalid URL:", tab.url);
-			return;
-		}
+browser.contextMenus.onClicked.addListener(
+	async (info: OnClickData, tab?: Tab) => {
 		try {
 			const articlesRepository = await getArticlesRepository();
-			const existingArticle = await articlesRepository.findSaved(tab.url);
-			if (existingArticle) {
-				logger.info("Article already saved, deleting:", existingArticle.id);
-				await articlesRepository.deleteArticle(existingArticle.id);
-			} else {
-				logger.info("Article not saved, saving:", {
-					url: tab.url,
-					title: tab.title || "Untitled",
-				});
+			if (info.menuItemId === "save-link" && info.linkUrl) {
 				await articlesRepository.saveArticle({
-					url: tab.url,
-					title: tab.title || "Untitled",
+					url: info.linkUrl,
+					title: "",
 				});
-			}
-			if (tab.id) {
-				await updateUiForTab(tab.id);
+				if (tab?.id !== undefined) {
+					await updateUiForTab(tab.id);
+				}
+			} else if (info.menuItemId === "save-page" && tab?.url) {
+				const existingArticle = await articlesRepository.findSaved(tab.url);
+				if (existingArticle) {
+					await articlesRepository.deleteArticle(existingArticle.id);
+				} else {
+					await articlesRepository.saveArticle({
+						url: tab.url,
+						title: tab.title ?? "",
+					});
+				}
+				if (tab.id) {
+					await updateUiForTab(tab.id);
+				}
 			}
 		} catch (error) {
-			logger.error("Error handling page action click:", error);
+			logger.error("Error saving link:", error);
 		}
-	});
+	},
+);
+browser.pageAction.onClicked.addListener(async (tab) => {
+	if (!tab.url || !isValidHttpUrl(tab.url)) {
+		logger.warn("Page action clicked on invalid URL:", tab.url);
+		return;
+	}
+	try {
+		const articlesRepository = await getArticlesRepository();
+		const existingArticle = await articlesRepository.findSaved(tab.url);
+		if (existingArticle) {
+			logger.info("Article already saved, deleting:", existingArticle.id);
+			await articlesRepository.deleteArticle(existingArticle.id);
+		} else {
+			logger.info("Article not saved, saving:", {
+				url: tab.url,
+				title: tab.title || "Untitled",
+			});
+			await articlesRepository.saveArticle({
+				url: tab.url,
+				title: tab.title || "Untitled",
+			});
+		}
+		if (tab.id) {
+			await updateUiForTab(tab.id);
+		}
+	} catch (error) {
+		logger.error("Error handling page action click:", error);
+	}
+});
 async function isDarkTheme(): Promise<boolean> {
 	try {
 		const theme = await browser.theme.getCurrent();
@@ -267,6 +270,16 @@ async function initialize(): Promise<void> {
 		await logger.initialize();
 		logger.info("Background script initialized");
 		await initializeUrlCanonizer();
+
+		// Refresh filter lists on startup to ensure they're up to date
+		try {
+			logger.info("Refreshing filter lists on startup...");
+			await refreshFilterLists();
+			logger.info("Filter lists refreshed on startup");
+		} catch (error) {
+			logger.warn("Failed to refresh filter lists on startup:", error);
+		}
+
 		const articlesRepository = await getArticlesRepository();
 		await articlesRepository.syncWithAPI();
 		browser.contextMenus.create({
@@ -280,6 +293,8 @@ async function initialize(): Promise<void> {
 			contexts: ["browser_action"],
 		});
 		browser.alarms.create("refresh", { periodInMinutes: REFRESH_INTERVAL });
+		// Create alarm for filter list refresh (once per day)
+		browser.alarms.create("refresh-filters", { periodInMinutes: 24 * 60 });
 		browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 			if (
 				(changeInfo.status === "complete" || "favIconUrl" in changeInfo) &&
@@ -303,12 +318,20 @@ async function initialize(): Promise<void> {
 	return initializePromise;
 }
 browser.alarms.onAlarm.addListener(async (alarm) => {
-	if (alarm.name === "refresh") {		
+	if (alarm.name === "refresh") {
 		try {
 			const articlesRepository = await getArticlesRepository();
 			await articlesRepository.syncWithAPI();
 		} catch (error) {
 			logger.error("Error refreshing articles:", error);
+		}
+	} else if (alarm.name === "refresh-filters") {
+		try {
+			logger.info("Refreshing filter lists...");
+			await refreshFilterLists();
+			logger.info("Filter lists refreshed successfully");
+		} catch (error) {
+			logger.error("Error refreshing filter lists:", error);
 		}
 	}
 });

@@ -68,30 +68,30 @@ async function initializePopup(): Promise<void> {
 async function loadRecentArticles(): Promise<void> {
 	const searchTerm = searchInput?.value.toLowerCase().trim() || "";
 	logger.debug("Requesting recent articles from background script...");
-	
+
 	try {
-		const response = await browser.runtime.sendMessage({
+		const response = (await browser.runtime.sendMessage({
 			type: "getArticles",
 			payload: {
 				page: currentPage,
 				perPage: itemsPerPage,
 				search: searchTerm,
 			},
-		}) as {
+		})) as {
 			items?: Article[];
 			page?: number;
 			pages?: number;
 			total?: number;
 			error?: string;
 		};
-		
+
 		logger.debug("Received response from background:", response);
-		
+
 		if (response.error) {
 			logger.error("Background script reported error:", response.error);
 			throw new Error(response.error);
 		}
-		
+
 		totalPages = response.pages || 1;
 		currentPage = response.page || 1;
 		displayArticles(response.items || []);
@@ -217,15 +217,18 @@ function createArticleElement(article: Article): HTMLElement {
 	removeButton.textContent = "×";
 	removeButton.className = "delete-button";
 	removeButton.addEventListener("click", () => {
-		browser.runtime.sendMessage({
-			type: "deleteArticle",
-			payload: { articleId: article.id },
-		}).then(() => {
-			logger.debug("Article deleted, reloading list");
-			void loadRecentArticles();
-		}).catch((error) => {
-			logger.error("Error deleting article:", error);
-		});
+		browser.runtime
+			.sendMessage({
+				type: "deleteArticle",
+				payload: { articleId: article.id },
+			})
+			.then(() => {
+				logger.debug("Article deleted, reloading list");
+				void loadRecentArticles();
+			})
+			.catch((error) => {
+				logger.error("Error deleting article:", error);
+			});
 	});
 	articleElement.appendChild(removeButton);
 	return articleElement;
@@ -235,7 +238,8 @@ async function updateSavePageButtonState(): Promise<void> {
 		if (savePageButton) savePageButton.style.display = "none";
 		return;
 	}
-	browser.runtime.sendMessage({ type: "checkArticle", payload: { url: currentTab.url } })
+	browser.runtime
+		.sendMessage({ type: "checkArticle", payload: { url: currentTab.url } })
 		.then((response: Article | undefined) => {
 			savedArticleForCurrentPage = response;
 			if (savePageButton) {
@@ -258,27 +262,33 @@ async function updateSavePageButtonState(): Promise<void> {
 async function handleSavePageClick(): Promise<void> {
 	if (!currentTab?.url) return;
 	if (savedArticleForCurrentPage) {
-		browser.runtime.sendMessage({
-			type: "deleteArticle",
-			payload: { articleId: savedArticleForCurrentPage.id },
-		}).then(async () => {
-			logger.debug("Article deleted, reloading list and button state");
-			await updateSavePageButtonState();
-			await loadRecentArticles();
-		}).catch((error) => {
-			logger.error("Error deleting article:", error);
-		});
+		browser.runtime
+			.sendMessage({
+				type: "deleteArticle",
+				payload: { articleId: savedArticleForCurrentPage.id },
+			})
+			.then(async () => {
+				logger.debug("Article deleted, reloading list and button state");
+				await updateSavePageButtonState();
+				await loadRecentArticles();
+			})
+			.catch((error) => {
+				logger.error("Error deleting article:", error);
+			});
 	} else {
-		browser.runtime.sendMessage({
-			type: "saveArticle",
-			payload: { url: currentTab.url, title: currentTab.title || "" },
-		}).then(async () => {
-			logger.debug("Article saved, reloading list and button state");
-			await updateSavePageButtonState();
-			await loadRecentArticles();
-		}).catch((error) => {
-			logger.error("Error saving article:", error);
-		});
+		browser.runtime
+			.sendMessage({
+				type: "saveArticle",
+				payload: { url: currentTab.url, title: currentTab.title || "" },
+			})
+			.then(async () => {
+				logger.debug("Article saved, reloading list and button state");
+				await updateSavePageButtonState();
+				await loadRecentArticles();
+			})
+			.catch((error) => {
+				logger.error("Error saving article:", error);
+			});
 	}
 }
 document.addEventListener("DOMContentLoaded", initializePopup);

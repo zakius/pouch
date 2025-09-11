@@ -285,8 +285,47 @@ export async function refreshFilterLists(): Promise<{
  * This is a convenience function that loads remote lists and initializes the cleaner
  */
 export async function initializeUrlCleanerWithRemoteLists(): Promise<void> {
-	// Load remote filter lists
-	const { results } = await loadFilterLists();
+	// Initialize filter list manager with default sources if not already done
+	initializeFilterListManager();
+
+	// Try to load cached filter lists first
+	const cachedRules = await loadCachedFilterLists();
+	if (cachedRules && cachedRules.length > 0) {
+		// Use cached rules
+		await initializeWithRawFilterLists([
+			{
+				name: "cached",
+				content: cachedRules
+					.map((rule) => {
+						if (rule.pattern === "*") {
+							return rule.params
+								.map((param) => `$removeparam=${param}`)
+								.join("\n");
+						} else {
+							return rule.params
+								.map((param) => `${rule.pattern}$removeparam=${param}`)
+								.join("\n");
+						}
+					})
+					.join("\n"),
+			},
+		]);
+		logger.info(
+			`Initialized URL cleaner with ${cachedRules.length} cached filter rules`,
+		);
+		return;
+	}
+
+	// No valid cache, load from remote sources
+	logger.info(
+		"No valid cache found, loading filter lists from remote sources...",
+	);
+	const { rules, results, versions } = await loadFilterLists();
+
+	// Save to cache for future use
+	if (rules.length > 0) {
+		await saveCachedFilterLists(rules, versions);
+	}
 
 	// Convert results to raw content format
 	const filterLists = results.map((result) => ({

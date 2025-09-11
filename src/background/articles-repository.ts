@@ -39,12 +39,16 @@ export class ArticlesRepository {
 	}
 	async findSaved(url: string): Promise<Article | undefined> {
 		const articles = await this.getAllArticles();
-		const urlToCompare = this.settings.normalizeOnCompare
-			? await canonicalizeUrl(url)
-			: url;
-		const existingArticle = articles.find(
-			(article) => article.url === urlToCompare,
-		);
+		
+		// Get canonical URL for comparison
+		const canonicalUrl = await canonicalizeUrl(url);
+		
+		// Look for existing article by comparing canonical URLs
+		const existingArticle = articles.find((article) => {
+			const articleCanonicalUrl = article.canonicalUrl || article.url;
+			return articleCanonicalUrl === canonicalUrl;
+		});
+		
 		return existingArticle;
 	}
 	private filterBySearch(articles: Article[], search?: string): Article[] {
@@ -83,17 +87,27 @@ export class ArticlesRepository {
 	async saveArticle(article: Pick<Article, "url" | "title">): Promise<Article> {
 		const api = await this.getApi();
 		logger.info("Saving article:", article);
-		const urlToSave = this.settings.normalizeOnSave
-			? await canonicalizeUrl(article.url)
-			: article.url;
+		
+		// Always calculate canonical URL for storage
+		const canonicalUrl = await canonicalizeUrl(article.url);
+		
+		const urlToSave = this.settings.normalizeOnSave ? canonicalUrl : article.url;
+		
 		try {
 			const savedArticle = await api.saveArticle({
 				url: urlToSave,
 				title: article.title,
 			});
-			logger.debug("Saved article, now adding to cache", savedArticle);
-			await this.addArticle(savedArticle);
-			return savedArticle;
+			
+			// Add canonical URL to the saved article
+			const articleWithCanonicalUrl = {
+				...savedArticle,
+				canonicalUrl: canonicalUrl,
+			};
+			
+			logger.debug("Saved article, now adding to cache", articleWithCanonicalUrl);
+			await this.addArticle(articleWithCanonicalUrl);
+			return articleWithCanonicalUrl;
 		} catch (error) {
 			logger.error("Error saving article through cache:", error);
 			throw error;
@@ -124,14 +138,25 @@ export class ArticlesRepository {
 		try {
 			const allArticles = await api.sync();
 			logger.debug(`Synced ${allArticles.length} articles from API`);
+			
+			// Add canonical URLs to all articles
+			const articlesWithCanonicalUrls = await Promise.all(
+				allArticles.map(async (article) => {
+					const canonicalUrl = await canonicalizeUrl(article.url);
+					return {
+						...article,
+						canonicalUrl: canonicalUrl,
+					};
+				})
+			);
+			
 			const processedArticles = this.settings.normalizeOnSave
-				? await Promise.all(
-						allArticles.map(async (article) => ({
-							...article,
-							url: await canonicalizeUrl(article.url),
-						})),
-					)
-				: allArticles;
+				? articlesWithCanonicalUrls.map((article) => ({
+						...article,
+						url: article.canonicalUrl,
+					}))
+				: articlesWithCanonicalUrls;
+
 			await this.updateArticles(processedArticles);
 			return {
 				items: processedArticles,

@@ -3,10 +3,11 @@ import { cleanUrl as filterListCleanUrl } from "./filter-list-url-cleaner";
 
 let urlCanonizerInitialized = false;
 
+
+
 export async function initializeUrlCanonizer(): Promise<void> {
 	if (urlCanonizerInitialized) return;
 
-	// Initialize filter list cleaner with remote filter lists
 	try {
 		await initializeUrlCleanerWithRemoteLists();
 	} catch (error) {
@@ -133,6 +134,9 @@ function canonicalizeAmazonUrl(url: URL): URL {
 
 export async function canonicalizeUrl(urlString: string): Promise<string> {
 	try {
+		// Ensure URL canonizer is initialized before proceeding
+		await initializeUrlCanonizer();
+		
 		// First, use filter lists for comprehensive URL cleaning
 		const cleanedUrl = await filterListCleanUrl(urlString);
 		let url = new URL(cleanedUrl);
