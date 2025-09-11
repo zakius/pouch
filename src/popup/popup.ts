@@ -133,7 +133,7 @@ function displayArticles(articles: Article[]): void {
 	}
 	prevButton.disabled = currentPage === 1;
 	nextButton.disabled = currentPage === totalPages || totalPages === 0;
-	pageInfo.textContent = `${currentPage} of ${totalPages}`;
+	pageInfo.textContent = `of ${totalPages}`;
 	pageSelect.innerHTML = "";
 	for (let i = 1; i <= totalPages; i++) {
 		const option = document.createElement("option");

@@ -271,6 +271,8 @@ async function initialize(): Promise<void> {
 		await logger.initialize();
 		logger.info("Background script initialized");
 		await initializeUrlCanonizer();
+		const articlesRepository = await getArticlesRepository();
+		await articlesRepository.syncWithAPI();
 		b.contextMenus.create({
 			id: "save-link",
 			title: "Save link",
@@ -305,8 +307,7 @@ async function initialize(): Promise<void> {
 	return initializePromise;
 }
 browser.alarms.onAlarm.addListener(async (alarm) => {
-	if (alarm.name === "refresh") {
-		logger.info("Refreshing articles from API due to alarm");
+	if (alarm.name === "refresh") {		
 		try {
 			const articlesRepository = await getArticlesRepository();
 			await articlesRepository.syncWithAPI();
@@ -320,8 +321,17 @@ browser.runtime.onInstalled.addListener(async (details) => {
 		await initialize();
 	}
 });
+
+// Initialize for both MV2 and MV3
+// For MV2: initialize immediately
+// For MV3: initialize when service worker starts
 if (!features.isManifestV3) {
 	initialize().catch((error) => {
 		logger.error("Failed to initialize extension on MV2:", error);
+	});
+} else {
+	// For MV3, initialize when the service worker starts
+	initialize().catch((error) => {
+		logger.error("Failed to initialize extension on MV3:", error);
 	});
 }

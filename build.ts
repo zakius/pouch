@@ -379,7 +379,7 @@ async function watchAndBuild(browser: Browser): Promise<void> {
 async function main() {
 	const targetBrowser = process.argv[2] as Browser;
 	const watchMode = process.argv.includes("--watch");
-	const skipSigning = process.argv.includes("--skip-signing");
+	const skipSigning = !process.argv.includes("--sign");
 	const prepareOnly = process.argv.includes("--prepare-only") || watchMode;
 	const shouldSign = process.argv.includes("--sign");
 

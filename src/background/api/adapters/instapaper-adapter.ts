@@ -21,7 +21,6 @@ export const instapaperSettingsSchema = v.merge([
 export type InstapaperSettings = v.Input<typeof instapaperSettingsSchema>;
 export type InstapaperConfig = v.Input<typeof instapaperConfigSchema>;
 
-// Valibot schemas for API responses based on official documentation
 const instapaperTagSchema = v.object({
 	id: v.number(),
 	name: v.string(),
@@ -36,7 +35,6 @@ const instapaperBookmarkSchema = v.object({
 	tags: v.optional(v.array(instapaperTagSchema)),
 	time: v.optional(v.number()),
 	image_url: v.optional(v.nullable(v.string())),
-	// Additional fields that may be present
 	progress: v.optional(v.number()),
 	progress_timestamp: v.optional(v.number()),
 	private_source: v.optional(v.nullable(v.string())),
