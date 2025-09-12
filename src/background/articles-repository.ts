@@ -19,10 +19,15 @@ export class ArticlesRepository {
 		logger.debug("API not initialized, creating adapter now...");
 		const api = getAdapter(this.settings.backend);
 		logger.debug("Initializing API with config:", this.settings.apiConfig);
-		await api.initialize(this.settings);
-		logger.info("On-demand API initialization completed");
-		this.api = api;
-		return this.api;
+		try {
+			await api.initialize(this.settings);
+			logger.info("On-demand API initialization completed");
+			this.api = api;
+			return this.api;
+		} catch (error) {
+			logger.error("Failed to initialize API:", error);
+			throw new Error(`Failed to initialize ${this.settings.backend} API: ${error instanceof Error ? error.message : 'Unknown error'}`);
+		}
 	}
 	async testConnection(): Promise<boolean> {
 		const api = await this.getApi();
@@ -133,9 +138,10 @@ export class ArticlesRepository {
 		}
 	}
 	async syncWithAPI(): Promise<{ items: Article[]; total: number }> {
-		const api = await this.getApi();
-		logger.info("Starting cache sync with API");
 		try {
+			const api = await this.getApi();
+			logger.info("Starting cache sync with API");
+			
 			const allArticles = await api.sync();
 			logger.debug(`Synced ${allArticles.length} articles from API`);
 			
@@ -164,7 +170,12 @@ export class ArticlesRepository {
 			};
 		} catch (error) {
 			logger.error("Error syncing cache with API:", error);
-			throw error;
+			// Return current cached articles instead of throwing
+			const currentArticles = await this.getAllArticles();
+			return {
+				items: currentArticles,
+				total: currentArticles.length,
+			};
 		}
 	}
 	private async addArticle(article: Article): Promise<void> {

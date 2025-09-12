@@ -23,6 +23,16 @@ class Logger {
 		if (typeof data !== "object" || data === null) {
 			return data;
 		}
+		
+		// Handle Error objects specially to preserve their properties
+		if (data instanceof Error) {
+			return {
+				name: data.name,
+				message: data.message,
+				stack: data.stack,
+			};
+		}
+		
 		if (Array.isArray(data)) {
 			return data.map((item) => this.pseudonymize(item));
 		}

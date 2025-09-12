@@ -281,7 +281,12 @@ async function initialize(): Promise<void> {
 		}
 
 		const articlesRepository = await getArticlesRepository();
-		await articlesRepository.syncWithAPI();
+		try {
+			await articlesRepository.syncWithAPI();
+		} catch (error) {
+			logger.warn("Failed to sync during initialization:", error);
+			// Don't fail initialization if sync fails - this is expected for unconfigured APIs
+		}
 		browser.contextMenus.create({
 			id: "save-link",
 			title: "Save link",

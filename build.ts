@@ -4,6 +4,7 @@ import {
 	mkdir,
 	readdir,
 	readFile,
+	rm,
 	watch,
 	writeFile,
 } from "node:fs/promises";
@@ -160,6 +161,16 @@ async function compileTypeScript(distDir: string, isWatch = false): Promise<void
 	}
 }
 
+async function cleanDistDirectory(distDir: string): Promise<void> {
+	try {
+		// Remove the entire dist/unpackaged directory and recreate it
+		await rm(distDir, { recursive: true, force: true });
+		console.log(`Cleaned directory: ${distDir}`);
+	} catch (error) {
+		console.warn(`Warning: Could not clean directory ${distDir}:`, error);
+	}
+}
+
 async function cleanOldArtifacts(): Promise<void> {
 	try {
 		// Remove old build artifacts from packages directory
@@ -203,6 +214,9 @@ async function build(
 	try {
 		// Clean old artifacts
 		await cleanOldArtifacts();
+		
+		// Clean the main dist directory before building
+		await cleanDistDirectory(distDir);
 		
 		// Create dist directories
 		await mkdir(distDir, { recursive: true });
