@@ -1,10 +1,10 @@
 import * as v from "valibot";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
-import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
-import type { TokenizedAdapter } from "../tokenized-adapter";
 import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
+import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
+import type { TokenizedAdapter } from "../tokenized-adapter";
 
 export const linkaceConfigSchema = v.object({
 	url: v.string([v.url()]),
@@ -104,7 +104,9 @@ interface LinkaceLink {
 	thumbnail?: string | null;
 }
 
-export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings>, TokenizedAdapter {
+export class LinkaceAdapter
+	implements ReadItLaterAPI<LinkaceSettings>, TokenizedAdapter
+{
 	public readonly displayName = "LinkAce";
 	private apiUrl: string = "";
 	private token: string = "";
@@ -122,17 +124,19 @@ export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings>, Tokenize
 
 	getTokenRefreshConfig(): TokenRefreshConfig {
 		// LinkAce uses static API tokens, no refresh needed
-		throw new Error("LinkAce uses static API tokens, no refresh configuration available");
+		throw new Error(
+			"LinkAce uses static API tokens, no refresh configuration available",
+		);
 	}
 
-	createTokenMetadata(tokenData: any) {
+	createTokenMetadata(_tokenData: Record<string, unknown>) {
 		// For static tokens, create a simple metadata structure
 		const now = Date.now();
 		return {
 			accessToken: this.token,
 			refreshToken: "", // No refresh token for static API keys
 			tokenType: "Bearer",
-			expiresAt: now + (365 * 24 * 60 * 60 * 1000), // 1 year from now (effectively never expires)
+			expiresAt: now + 365 * 24 * 60 * 60 * 1000, // 1 year from now (effectively never expires)
 			issuedAt: now,
 			scope: undefined,
 			refreshCount: 0,
@@ -151,15 +155,20 @@ export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings>, Tokenize
 	async initialize(settings: LinkaceSettings): Promise<void> {
 		this.apiUrl = settings.apiConfig.url;
 		this.token = settings.apiConfig.token;
-		
+
 		// Store the static token in the token manager
 		const tokenMetadata = this.createTokenMetadata({});
 		tokenManager.storeToken(this.getServiceName(), tokenMetadata);
 	}
 
-	private async makeAuthenticatedRequest(url: string, options: RequestInit = {}): Promise<Response> {
-		const accessToken = await tokenManager.getAccessToken(this.getServiceName());
-		
+	private async makeAuthenticatedRequest(
+		url: string,
+		options: RequestInit = {},
+	): Promise<Response> {
+		const accessToken = await tokenManager.getAccessToken(
+			this.getServiceName(),
+		);
+
 		return fetch(url, {
 			...options,
 			headers: {
@@ -172,7 +181,9 @@ export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings>, Tokenize
 
 	async testConnection(): Promise<boolean> {
 		try {
-			const response = await this.makeAuthenticatedRequest(`${this.apiUrl}/api/v2/links?per_page=1`);
+			const response = await this.makeAuthenticatedRequest(
+				`${this.apiUrl}/api/v2/links?per_page=1`,
+			);
 			return response.ok;
 		} catch (error) {
 			console.error("LinkAce connection test failed:", error);
@@ -181,18 +192,21 @@ export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings>, Tokenize
 	}
 
 	async saveArticle(article: SavingArticle): Promise<Article> {
-		const response = await this.makeAuthenticatedRequest(`${this.apiUrl}/api/v2/links`, {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
+		const response = await this.makeAuthenticatedRequest(
+			`${this.apiUrl}/api/v2/links`,
+			{
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({
+					url: article.url,
+					title: article.title,
+					visibility: 1, // Private by default
+					check_disabled: false,
+				}),
 			},
-			body: JSON.stringify({
-				url: article.url,
-				title: article.title,
-				visibility: 1, // Private by default
-				check_disabled: false,
-			}),
-		});
+		);
 
 		if (!response.ok) {
 			throw new Error(`Failed to save article: ${response.statusText}`);
@@ -210,9 +224,12 @@ export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings>, Tokenize
 	}
 
 	async deleteArticle(id: number): Promise<void> {
-		const response = await this.makeAuthenticatedRequest(`${this.apiUrl}/api/v2/links/${id}`, {
-			method: "DELETE",
-		});
+		const response = await this.makeAuthenticatedRequest(
+			`${this.apiUrl}/api/v2/links/${id}`,
+			{
+				method: "DELETE",
+			},
+		);
 
 		if (!response.ok) {
 			throw new Error(`Failed to delete article: ${response.statusText}`);
@@ -234,7 +251,7 @@ export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings>, Tokenize
 			}
 
 			const response = await this.makeAuthenticatedRequest(
-				`${this.apiUrl}/api/v2/links?page=${currentPage}&per_page=${perPage}`
+				`${this.apiUrl}/api/v2/links?page=${currentPage}&per_page=${perPage}`,
 			);
 
 			if (!response.ok) {
@@ -273,7 +290,11 @@ export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings>, Tokenize
 	}
 
 	// Method to get token health information for debugging
-	public getTokenHealth(): { isValid: boolean; expiresAt?: string; refreshCount?: number } {
+	public getTokenHealth(): {
+		isValid: boolean;
+		expiresAt?: string;
+		refreshCount?: number;
+	} {
 		const health = tokenManager.getTokenHealth();
 		return health[this.getServiceName()] || { isValid: false };
 	}

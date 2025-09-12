@@ -271,7 +271,7 @@ async function initialize(): Promise<void> {
 		await logger.initialize();
 		logger.info("Background script initialized");
 		await initializeUrlCanonizer();
-		
+
 		// Initialize token manager and load existing tokens
 		await tokenManager.loadTokens();
 		logger.info("Token manager initialized");

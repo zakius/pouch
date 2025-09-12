@@ -1,10 +1,10 @@
 import * as v from "valibot";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
-import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
-import type { TokenizedAdapter } from "../tokenized-adapter";
 import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
+import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
+import type { TokenizedAdapter } from "../tokenized-adapter";
 
 export const linkwardenConfigSchema = v.object({
 	url: v.string([v.url()]),
@@ -80,7 +80,9 @@ interface LinkwardenItem {
 	archived?: boolean | number;
 }
 
-export class LinkwardenAdapter implements ReadItLaterAPI<LinkwardenSettings>, TokenizedAdapter {
+export class LinkwardenAdapter
+	implements ReadItLaterAPI<LinkwardenSettings>, TokenizedAdapter
+{
 	public readonly displayName = "Linkwarden";
 	private apiUrl: string = "";
 	private token: string = "";
@@ -96,17 +98,19 @@ export class LinkwardenAdapter implements ReadItLaterAPI<LinkwardenSettings>, To
 
 	getTokenRefreshConfig(): TokenRefreshConfig {
 		// Linkwarden uses static API tokens, no refresh needed
-		throw new Error("Linkwarden uses static API tokens, no refresh configuration available");
+		throw new Error(
+			"Linkwarden uses static API tokens, no refresh configuration available",
+		);
 	}
 
-	createTokenMetadata(tokenData: any) {
+	createTokenMetadata(_tokenData: Record<string, unknown>) {
 		// For static tokens, create a simple metadata structure
 		const now = Date.now();
 		return {
 			accessToken: this.token,
 			refreshToken: "", // No refresh token for static API keys
 			tokenType: "Bearer",
-			expiresAt: now + (365 * 24 * 60 * 60 * 1000), // 1 year from now (effectively never expires)
+			expiresAt: now + 365 * 24 * 60 * 60 * 1000, // 1 year from now (effectively never expires)
 			issuedAt: now,
 			scope: undefined,
 			refreshCount: 0,
@@ -125,14 +129,19 @@ export class LinkwardenAdapter implements ReadItLaterAPI<LinkwardenSettings>, To
 	async initialize(settings: LinkwardenSettings): Promise<void> {
 		this.apiUrl = settings.apiConfig.url;
 		this.token = settings.apiConfig.token;
-		
+
 		// Store the static token in the token manager
 		const tokenMetadata = this.createTokenMetadata({});
 		tokenManager.storeToken(this.getServiceName(), tokenMetadata);
 	}
-	private async makeAuthenticatedRequest(url: string, options: RequestInit = {}): Promise<Response> {
-		const accessToken = await tokenManager.getAccessToken(this.getServiceName());
-		
+	private async makeAuthenticatedRequest(
+		url: string,
+		options: RequestInit = {},
+	): Promise<Response> {
+		const accessToken = await tokenManager.getAccessToken(
+			this.getServiceName(),
+		);
+
 		return fetch(url, {
 			...options,
 			headers: {
@@ -144,7 +153,9 @@ export class LinkwardenAdapter implements ReadItLaterAPI<LinkwardenSettings>, To
 
 	async testConnection(): Promise<boolean> {
 		try {
-			const response = await this.makeAuthenticatedRequest(`${this.apiUrl}/api/v1/links`);
+			const response = await this.makeAuthenticatedRequest(
+				`${this.apiUrl}/api/v1/links`,
+			);
 			return response.ok;
 		} catch (error) {
 			console.error("Linkwarden connection test failed:", error);

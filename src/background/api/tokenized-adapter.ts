@@ -1,6 +1,6 @@
 /**
  * Tokenized Adapter Interface
- * 
+ *
  * Defines the interface for adapters that use token-based authentication
  * and can work with the centralized TokenManager.
  */
@@ -21,7 +21,7 @@ export interface TokenizedAdapter {
 	/**
 	 * Create token metadata from authentication response
 	 */
-	createTokenMetadata(tokenData: any): {
+	createTokenMetadata(tokenData: Record<string, unknown>): {
 		accessToken: string;
 		refreshToken: string;
 		tokenType: string;

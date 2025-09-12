@@ -1,10 +1,10 @@
 import * as v from "valibot";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
-import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
-import type { TokenizedAdapter } from "../tokenized-adapter";
 import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
+import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
+import type { TokenizedAdapter } from "../tokenized-adapter";
 
 export const karakeepConfigSchema = v.object({
 	url: v.string([v.url()]),
@@ -78,7 +78,9 @@ interface KarakeepItem {
 	assets?: unknown[];
 }
 
-export class KarakeepAdapter implements ReadItLaterAPI<KarakeepSettings>, TokenizedAdapter {
+export class KarakeepAdapter
+	implements ReadItLaterAPI<KarakeepSettings>, TokenizedAdapter
+{
 	public readonly displayName = "Karakeep";
 	private apiUrl: string = "";
 	private token: string = "";
@@ -94,17 +96,19 @@ export class KarakeepAdapter implements ReadItLaterAPI<KarakeepSettings>, Tokeni
 
 	getTokenRefreshConfig(): TokenRefreshConfig {
 		// Karakeep uses static API tokens, no refresh needed
-		throw new Error("Karakeep uses static API tokens, no refresh configuration available");
+		throw new Error(
+			"Karakeep uses static API tokens, no refresh configuration available",
+		);
 	}
 
-	createTokenMetadata(tokenData: any) {
+	createTokenMetadata(_tokenData: Record<string, unknown>) {
 		// For static tokens, create a simple metadata structure
 		const now = Date.now();
 		return {
 			accessToken: this.token,
 			refreshToken: "", // No refresh token for static API keys
 			tokenType: "Bearer",
-			expiresAt: now + (365 * 24 * 60 * 60 * 1000), // 1 year from now (effectively never expires)
+			expiresAt: now + 365 * 24 * 60 * 60 * 1000, // 1 year from now (effectively never expires)
 			issuedAt: now,
 			scope: undefined,
 			refreshCount: 0,
@@ -123,7 +127,7 @@ export class KarakeepAdapter implements ReadItLaterAPI<KarakeepSettings>, Tokeni
 	async initialize(settings: KarakeepSettings): Promise<void> {
 		this.apiUrl = settings.apiConfig.url;
 		this.token = settings.apiConfig.token;
-		
+
 		// Store the static token in the token manager
 		const tokenMetadata = this.createTokenMetadata({});
 		tokenManager.storeToken(this.getServiceName(), tokenMetadata);

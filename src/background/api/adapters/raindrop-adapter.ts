@@ -1,10 +1,10 @@
 import * as v from "valibot";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
-import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
-import type { TokenizedAdapter } from "../tokenized-adapter";
 import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
+import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
+import type { TokenizedAdapter } from "../tokenized-adapter";
 
 export const raindropConfigSchema = v.object({
 	apiKey: v.string(),
@@ -96,7 +96,9 @@ interface RaindropItem {
 	};
 }
 
-export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings>, TokenizedAdapter {
+export class RaindropAdapter
+	implements ReadItLaterAPI<RaindropSettings>, TokenizedAdapter
+{
 	public readonly displayName = "Raindrop.io";
 	private apiUrl = "https://api.raindrop.io/rest/v1";
 	private apiKey = "";
@@ -110,17 +112,19 @@ export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings>, Tokeni
 
 	getTokenRefreshConfig(): TokenRefreshConfig {
 		// Raindrop uses static API keys, no refresh needed
-		throw new Error("Raindrop uses static API keys, no refresh configuration available");
+		throw new Error(
+			"Raindrop uses static API keys, no refresh configuration available",
+		);
 	}
 
-	createTokenMetadata(tokenData: any) {
+	createTokenMetadata(_tokenData: Record<string, unknown>) {
 		// For static tokens, create a simple metadata structure
 		const now = Date.now();
 		return {
 			accessToken: this.apiKey,
 			refreshToken: "", // No refresh token for static API keys
 			tokenType: "Bearer",
-			expiresAt: now + (365 * 24 * 60 * 60 * 1000), // 1 year from now (effectively never expires)
+			expiresAt: now + 365 * 24 * 60 * 60 * 1000, // 1 year from now (effectively never expires)
 			issuedAt: now,
 			scope: undefined,
 			refreshCount: 0,
@@ -139,14 +143,19 @@ export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings>, Tokeni
 	async initialize(settings: RaindropSettings): Promise<void> {
 		const config = settings.apiConfig;
 		this.apiKey = config.apiKey;
-		
+
 		// Store the static token in the token manager
 		const tokenMetadata = this.createTokenMetadata({});
 		tokenManager.storeToken(this.getServiceName(), tokenMetadata);
 	}
-	private async makeAuthenticatedRequest(url: string, options: RequestInit = {}): Promise<Response> {
-		const accessToken = await tokenManager.getAccessToken(this.getServiceName());
-		
+	private async makeAuthenticatedRequest(
+		url: string,
+		options: RequestInit = {},
+	): Promise<Response> {
+		const accessToken = await tokenManager.getAccessToken(
+			this.getServiceName(),
+		);
+
 		return this._fetchWithRateLimit(url, {
 			...options,
 			headers: {
@@ -158,7 +167,9 @@ export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings>, Tokeni
 
 	async testConnection(): Promise<boolean> {
 		try {
-			const response = await this.makeAuthenticatedRequest(`${this.apiUrl}/collections`);
+			const response = await this.makeAuthenticatedRequest(
+				`${this.apiUrl}/collections`,
+			);
 			return response.ok;
 		} catch (error) {
 			console.error("Raindrop connection test failed:", error);
@@ -166,16 +177,19 @@ export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings>, Tokeni
 		}
 	}
 	async saveArticle(article: SavingArticle): Promise<Article> {
-		const response = await this.makeAuthenticatedRequest(`${this.apiUrl}/raindrop`, {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
+		const response = await this.makeAuthenticatedRequest(
+			`${this.apiUrl}/raindrop`,
+			{
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({
+					link: article.url,
+					title: article.title,
+				}),
 			},
-			body: JSON.stringify({
-				link: article.url,
-				title: article.title,
-			}),
-		});
+		);
 		const data = await response.json();
 		const validatedData = v.parse(raindropSaveResponseSchema, data);
 		if (!validatedData.result) {
@@ -190,7 +204,7 @@ export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings>, Tokeni
 			`${this.apiUrl}/raindrop/${id}`,
 			{
 				method: "DELETE",
-			}
+			},
 		);
 		const data = await response.json();
 		const validatedData = v.parse(raindropDeleteResponseSchema, data);
@@ -207,7 +221,7 @@ export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings>, Tokeni
 		let totalPages = 1;
 		do {
 			const response = await this.makeAuthenticatedRequest(
-				`${this.apiUrl}/raindrops/0?page=${page}&perpage=${perPage}&sort=-created`
+				`${this.apiUrl}/raindrops/0?page=${page}&perpage=${perPage}&sort=-created`,
 			);
 			const data = await response.json();
 			const validatedData = v.parse(raindropSyncResponseSchema, data);
@@ -234,7 +248,11 @@ export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings>, Tokeni
 	}
 
 	// Method to get token health information for debugging
-	public getTokenHealth(): { isValid: boolean; expiresAt?: string; refreshCount?: number } {
+	public getTokenHealth(): {
+		isValid: boolean;
+		expiresAt?: string;
+		refreshCount?: number;
+	} {
 		const health = tokenManager.getTokenHealth();
 		return health[this.getServiceName()] || { isValid: false };
 	}
