@@ -56,7 +56,7 @@ const wallabagTokenResponseSchema = v.object({
 	token_type: v.optional(v.string()),
 	expires_in: v.optional(v.number()),
 	refresh_token: v.optional(v.string()),
-	scope: v.optional(v.string()),
+	scope: v.optional(v.union([v.string(), v.null_()])),
 });
 
 const wallabagErrorSchema = v.object({
@@ -145,13 +145,18 @@ export class WallabagAdapter
 		const now = Date.now();
 		const expiresIn = tokenData.expires_in || 3600; // Default to 1 hour
 
+		// Ensure token type is properly capitalized
+		const tokenType = tokenData.token_type 
+			? tokenData.token_type.charAt(0).toUpperCase() + tokenData.token_type.slice(1).toLowerCase()
+			: "Bearer";
+
 		return {
 			accessToken: tokenData.access_token,
 			refreshToken: tokenData.refresh_token || "",
-			tokenType: tokenData.token_type || "Bearer",
+			tokenType: tokenType,
 			expiresAt: now + expiresIn * 1000,
 			issuedAt: now,
-			scope: tokenData.scope,
+			scope: tokenData.scope || undefined,
 			refreshCount: 0,
 		};
 	}
@@ -166,22 +171,36 @@ export class WallabagAdapter
 	async initialize(settings: WallabagSettings): Promise<void> {
 		this.config = settings.apiConfig;
 		this.apiUrl = this.config.url;
+		
+		// Validate that password is provided
+		if (!this.config.password) {
+			throw new Error("Password is required for Wallabag authentication");
+		}
+		
 		await this.authenticate();
 	}
 
 	private async authenticate(): Promise<void> {
+		const requestBody = new URLSearchParams({
+			grant_type: "password",
+			client_id: this.config.clientId,
+			client_secret: this.config.clientSecret,
+			username: this.config.username,
+			password: this.config.password!,
+		});
+		
+		console.log("Wallabag authentication request:", {
+			url: this.getAuthEndpoint(),
+			body: requestBody.toString(),
+			hasPassword: !!this.config.password,
+		});
+		
 		const response = await fetch(this.getAuthEndpoint(), {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/x-www-form-urlencoded",
 			},
-			body: new URLSearchParams({
-				grant_type: "password",
-				client_id: this.config.clientId,
-				client_secret: this.config.clientSecret,
-				username: this.config.username,
-				password: this.config.password || "",
-			}),
+			body: requestBody,
 		});
 
 		if (!response.ok) {
@@ -191,11 +210,26 @@ export class WallabagAdapter
 			);
 		}
 
-		const tokenData = await response.json();
-		const validatedTokenData = v.parse(wallabagTokenResponseSchema, tokenData);
+		const tokenData = await response.json() as Record<string, unknown>;
+		console.log("Wallabag API response:", tokenData);
+		
+		// Check if the response contains an error (OAuth error responses)
+		if (tokenData.error) {
+			const errorMessage = (tokenData.error_description as string) || (tokenData.message as string) || (tokenData.error as string);
+			throw new Error(`Wallabag authentication failed: ${errorMessage}`);
+		}
+		
+		let validatedTokenData: v.Output<typeof wallabagTokenResponseSchema>;
+		try {
+			validatedTokenData = v.parse(wallabagTokenResponseSchema, tokenData);
+		} catch (validationError: unknown) {
+			console.error("Validation error for Wallabag token response:", validationError);
+			console.error("Raw token data:", tokenData);
+			throw new Error(`Invalid token response from Wallabag API: ${validationError instanceof Error ? validationError.message : 'Unknown validation error'}`);
+		}
 
 		const tokenMetadata = this.createTokenMetadata(validatedTokenData);
-		tokenManager.storeToken(this.getServiceName(), tokenMetadata);
+		await tokenManager.storeToken(this.getServiceName(), tokenMetadata);
 
 		console.log("Wallabag authentication successful", {
 			tokenType: tokenMetadata.tokenType,
@@ -213,11 +247,19 @@ export class WallabagAdapter
 		);
 		const tokenMetadata = tokenManager.getTokenMetadata(this.getServiceName());
 
+		const authHeader = `${tokenMetadata?.tokenType || 'Bearer'} ${accessToken}`;
+		console.log("Making authenticated request:", {
+			url,
+			accessToken: accessToken.substring(0, 10) + "...",
+			tokenType: tokenMetadata?.tokenType,
+			authHeader: authHeader.substring(0, 20) + "...",
+		});
+
 		const response = await fetch(url, {
 			...options,
 			headers: {
 				...options.headers,
-				Authorization: `${tokenMetadata?.tokenType} ${accessToken}`,
+				Authorization: authHeader,
 			},
 		});
 
@@ -238,11 +280,19 @@ export class WallabagAdapter
 					this.getServiceName(),
 				);
 
+				const newAuthHeader = `${newTokenMetadata?.tokenType || 'Bearer'} ${newAccessToken}`;
+				console.log("Retrying with new token:", {
+					url,
+					accessToken: newAccessToken.substring(0, 10) + "...",
+					tokenType: newTokenMetadata?.tokenType,
+					authHeader: newAuthHeader.substring(0, 20) + "...",
+				});
+
 				return fetch(url, {
 					...options,
 					headers: {
 						...options.headers,
-						Authorization: `${newTokenMetadata?.tokenType} ${newAccessToken}`,
+						Authorization: newAuthHeader,
 					},
 				});
 			} else if (refreshResult.requiresReauth) {
@@ -261,11 +311,19 @@ export class WallabagAdapter
 					this.getServiceName(),
 				);
 
+				const freshAuthHeader = `${newTokenMetadata?.tokenType || 'Bearer'} ${newAccessToken}`;
+				console.log("Retrying with fresh token after re-auth:", {
+					url,
+					accessToken: newAccessToken.substring(0, 10) + "...",
+					tokenType: newTokenMetadata?.tokenType,
+					authHeader: freshAuthHeader.substring(0, 20) + "...",
+				});
+
 				return fetch(url, {
 					...options,
 					headers: {
 						...options.headers,
-						Authorization: `${newTokenMetadata?.tokenType} ${newAccessToken}`,
+						Authorization: freshAuthHeader,
 					},
 				});
 			} else {
@@ -278,8 +336,8 @@ export class WallabagAdapter
 	}
 
 	// Cleanup method to clear tokens when adapter is no longer needed
-	public cleanup(): void {
-		tokenManager.clearToken(this.getServiceName());
+	public async cleanup(): Promise<void> {
+		await tokenManager.clearToken(this.getServiceName());
 	}
 
 	// Method to get token health information for debugging

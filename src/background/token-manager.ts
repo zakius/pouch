@@ -59,10 +59,10 @@ export class TokenManager {
 	/**
 	 * Store a token for a service
 	 */
-	public storeToken(
+	public async storeToken(
 		serviceName: string,
 		tokenData: Omit<TokenMetadata, "serviceName">,
-	): void {
+	): Promise<void> {
 		const tokenMetadata: TokenMetadata = {
 			...tokenData,
 			serviceName,
@@ -70,7 +70,7 @@ export class TokenManager {
 
 		this.tokens.set(serviceName, tokenMetadata);
 		this.scheduleTokenRefresh(serviceName);
-		this.persistTokens();
+		await this.persistTokens();
 
 		logger.info(`Token stored for ${serviceName}`, {
 			expiresAt: new Date(tokenMetadata.expiresAt).toISOString(),
@@ -160,7 +160,7 @@ export class TokenManager {
 			logger.warn(
 				`Max refresh attempts exceeded for ${serviceName}, clearing token`,
 			);
-			this.clearToken(serviceName);
+			await this.clearToken(serviceName);
 			return {
 				success: false,
 				requiresReauth: true,
@@ -170,7 +170,7 @@ export class TokenManager {
 
 		if (!token.refreshToken) {
 			logger.warn(`No refresh token available for ${serviceName}`);
-			this.clearToken(serviceName);
+			await this.clearToken(serviceName);
 			return {
 				success: false,
 				requiresReauth: true,
@@ -202,7 +202,7 @@ export class TokenManager {
 				logger.error(
 					`Token refresh failed for ${serviceName}: ${response.status} ${errorText}`,
 				);
-				this.clearToken(serviceName);
+				await this.clearToken(serviceName);
 				return {
 					success: false,
 					requiresReauth: true,
@@ -223,7 +223,7 @@ export class TokenManager {
 			return { success: true, requiresReauth: false };
 		} catch (error) {
 			logger.error(`Token refresh error for ${serviceName}:`, error);
-			this.clearToken(serviceName);
+			await this.clearToken(serviceName);
 			return {
 				success: false,
 				requiresReauth: true,
@@ -235,31 +235,31 @@ export class TokenManager {
 	/**
 	 * Clear a token for a service
 	 */
-	public clearToken(serviceName: string): void {
+	public async clearToken(serviceName: string): Promise<void> {
 		this.tokens.delete(serviceName);
 		this.clearRefreshTimer(serviceName);
-		this.persistTokens();
+		await this.persistTokens();
 		logger.info(`Token cleared for ${serviceName}`);
 	}
 
 	/**
 	 * Force re-authentication by clearing token and requiring fresh login
 	 */
-	public forceReauth(serviceName: string): void {
-		this.clearToken(serviceName);
+	public async forceReauth(serviceName: string): Promise<void> {
+		await this.clearToken(serviceName);
 		logger.info(`Forced re-authentication for ${serviceName}`);
 	}
 
 	/**
 	 * Clear all tokens
 	 */
-	public clearAllTokens(): void {
+	public async clearAllTokens(): Promise<void> {
 		this.tokens.clear();
 		this.refreshTimers.forEach((timer) => {
 			clearTimeout(timer);
 		});
 		this.refreshTimers.clear();
-		this.persistTokens();
+		await this.persistTokens();
 		logger.info("All tokens cleared");
 	}
 

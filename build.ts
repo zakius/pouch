@@ -134,7 +134,7 @@ async function compileTypeScript(distDir: string, isWatch = false): Promise<void
 			outdir: distDir,
 			target: "browser",
 			format: "esm",
-			sourcemap: false,
+			sourcemap:  isWatch ? "inline" : false,
 			minify: true,
 			naming: {
 				entry: "[dir]/[name].[ext]",
