@@ -2,6 +2,9 @@ import * as v from "valibot";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
 import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
+import type { TokenizedAdapter } from "../tokenized-adapter";
+import type { TokenRefreshConfig } from "../../token-manager";
+import { tokenManager } from "../../token-manager";
 
 export const linkaceConfigSchema = v.object({
 	url: v.string([v.url()]),
@@ -101,7 +104,7 @@ interface LinkaceLink {
 	thumbnail?: string | null;
 }
 
-export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings> {
+export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings>, TokenizedAdapter {
 	public readonly displayName = "LinkAce";
 	private apiUrl: string = "";
 	private token: string = "";
@@ -112,20 +115,64 @@ export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings> {
 		{ name: "token", label: "API Token" },
 	];
 
+	// TokenizedAdapter interface implementation
+	getServiceName(): string {
+		return "linkace";
+	}
+
+	getTokenRefreshConfig(): TokenRefreshConfig {
+		// LinkAce uses static API tokens, no refresh needed
+		throw new Error("LinkAce uses static API tokens, no refresh configuration available");
+	}
+
+	createTokenMetadata(tokenData: any) {
+		// For static tokens, create a simple metadata structure
+		const now = Date.now();
+		return {
+			accessToken: this.token,
+			refreshToken: "", // No refresh token for static API keys
+			tokenType: "Bearer",
+			expiresAt: now + (365 * 24 * 60 * 60 * 1000), // 1 year from now (effectively never expires)
+			issuedAt: now,
+			scope: undefined,
+			refreshCount: 0,
+		};
+	}
+
+	getBaseUrl(): string {
+		return this.apiUrl;
+	}
+
+	getAuthEndpoint(): string {
+		// LinkAce doesn't have a traditional auth endpoint
+		return "";
+	}
+
 	async initialize(settings: LinkaceSettings): Promise<void> {
 		this.apiUrl = settings.apiConfig.url;
 		this.token = settings.apiConfig.token;
+		
+		// Store the static token in the token manager
+		const tokenMetadata = this.createTokenMetadata({});
+		tokenManager.storeToken(this.getServiceName(), tokenMetadata);
+	}
+
+	private async makeAuthenticatedRequest(url: string, options: RequestInit = {}): Promise<Response> {
+		const accessToken = await tokenManager.getAccessToken(this.getServiceName());
+		
+		return fetch(url, {
+			...options,
+			headers: {
+				...options.headers,
+				Authorization: `Bearer ${accessToken}`,
+				Accept: "application/json",
+			},
+		});
 	}
 
 	async testConnection(): Promise<boolean> {
 		try {
-			const response = await fetch(`${this.apiUrl}/api/v2/links?per_page=1`, {
-				method: "GET",
-				headers: {
-					Authorization: `Bearer ${this.token}`,
-					Accept: "application/json",
-				},
-			});
+			const response = await this.makeAuthenticatedRequest(`${this.apiUrl}/api/v2/links?per_page=1`);
 			return response.ok;
 		} catch (error) {
 			console.error("LinkAce connection test failed:", error);
@@ -134,12 +181,10 @@ export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings> {
 	}
 
 	async saveArticle(article: SavingArticle): Promise<Article> {
-		const response = await fetch(`${this.apiUrl}/api/v2/links`, {
+		const response = await this.makeAuthenticatedRequest(`${this.apiUrl}/api/v2/links`, {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
-				Authorization: `Bearer ${this.token}`,
-				Accept: "application/json",
 			},
 			body: JSON.stringify({
 				url: article.url,
@@ -165,12 +210,8 @@ export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings> {
 	}
 
 	async deleteArticle(id: number): Promise<void> {
-		const response = await fetch(`${this.apiUrl}/api/v2/links/${id}`, {
+		const response = await this.makeAuthenticatedRequest(`${this.apiUrl}/api/v2/links/${id}`, {
 			method: "DELETE",
-			headers: {
-				Authorization: `Bearer ${this.token}`,
-				Accept: "application/json",
-			},
 		});
 
 		if (!response.ok) {
@@ -192,15 +233,8 @@ export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings> {
 				);
 			}
 
-			const response = await fetch(
-				`${this.apiUrl}/api/v2/links?page=${currentPage}&per_page=${perPage}`,
-				{
-					method: "GET",
-					headers: {
-						Authorization: `Bearer ${this.token}`,
-						Accept: "application/json",
-					},
-				},
+			const response = await this.makeAuthenticatedRequest(
+				`${this.apiUrl}/api/v2/links?page=${currentPage}&per_page=${perPage}`
 			);
 
 			if (!response.ok) {
@@ -231,6 +265,17 @@ export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings> {
 		}
 
 		return allArticles;
+	}
+
+	// Cleanup method to clear tokens when adapter is no longer needed
+	public cleanup(): void {
+		tokenManager.clearToken(this.getServiceName());
+	}
+
+	// Method to get token health information for debugging
+	public getTokenHealth(): { isValid: boolean; expiresAt?: string; refreshCount?: number } {
+		const health = tokenManager.getTokenHealth();
+		return health[this.getServiceName()] || { isValid: false };
 	}
 
 	private mapArticle(item: LinkaceLink): Article {

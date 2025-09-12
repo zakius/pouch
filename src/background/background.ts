@@ -3,6 +3,7 @@ import { logger } from "../utils/logger";
 import { getSettings, type Settings, saveSettings } from "../utils/settings";
 import { initializeUrlCanonizer } from "../utils/url-helpers";
 import { ArticlesRepository } from "./articles-repository";
+import { tokenManager } from "./token-manager";
 
 interface SaveArticleMessage {
 	type: "saveArticle";
@@ -270,6 +271,10 @@ async function initialize(): Promise<void> {
 		await logger.initialize();
 		logger.info("Background script initialized");
 		await initializeUrlCanonizer();
+		
+		// Initialize token manager and load existing tokens
+		await tokenManager.loadTokens();
+		logger.info("Token manager initialized");
 
 		// Refresh filter lists on startup to ensure they're up to date
 		try {

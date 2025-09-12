@@ -2,6 +2,9 @@ import * as v from "valibot";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
 import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
+import type { TokenizedAdapter } from "../tokenized-adapter";
+import type { TokenRefreshConfig } from "../../token-manager";
+import { tokenManager } from "../../token-manager";
 
 export const raindropConfigSchema = v.object({
 	apiKey: v.string(),
@@ -93,26 +96,69 @@ interface RaindropItem {
 	};
 }
 
-export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings> {
+export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings>, TokenizedAdapter {
 	public readonly displayName = "Raindrop.io";
 	private apiUrl = "https://api.raindrop.io/rest/v1";
 	private apiKey = "";
 	private readonly LOW_RATE_LIMIT_THRESHOLD = 10;
 	formConfig = [{ name: "apiKey", label: "API Key (Test Token)" }];
+
+	// TokenizedAdapter interface implementation
+	getServiceName(): string {
+		return "raindrop";
+	}
+
+	getTokenRefreshConfig(): TokenRefreshConfig {
+		// Raindrop uses static API keys, no refresh needed
+		throw new Error("Raindrop uses static API keys, no refresh configuration available");
+	}
+
+	createTokenMetadata(tokenData: any) {
+		// For static tokens, create a simple metadata structure
+		const now = Date.now();
+		return {
+			accessToken: this.apiKey,
+			refreshToken: "", // No refresh token for static API keys
+			tokenType: "Bearer",
+			expiresAt: now + (365 * 24 * 60 * 60 * 1000), // 1 year from now (effectively never expires)
+			issuedAt: now,
+			scope: undefined,
+			refreshCount: 0,
+		};
+	}
+
+	getBaseUrl(): string {
+		return this.apiUrl;
+	}
+
+	getAuthEndpoint(): string {
+		// Raindrop doesn't have a traditional auth endpoint
+		return "";
+	}
+
 	async initialize(settings: RaindropSettings): Promise<void> {
 		const config = settings.apiConfig;
 		this.apiKey = config.apiKey;
+		
+		// Store the static token in the token manager
+		const tokenMetadata = this.createTokenMetadata({});
+		tokenManager.storeToken(this.getServiceName(), tokenMetadata);
 	}
+	private async makeAuthenticatedRequest(url: string, options: RequestInit = {}): Promise<Response> {
+		const accessToken = await tokenManager.getAccessToken(this.getServiceName());
+		
+		return this._fetchWithRateLimit(url, {
+			...options,
+			headers: {
+				...options.headers,
+				Authorization: `Bearer ${accessToken}`,
+			},
+		});
+	}
+
 	async testConnection(): Promise<boolean> {
 		try {
-			const response = await this._fetchWithRateLimit(
-				`${this.apiUrl}/collections`,
-				{
-					headers: {
-						Authorization: `Bearer ${this.apiKey}`,
-					},
-				},
-			);
+			const response = await this.makeAuthenticatedRequest(`${this.apiUrl}/collections`);
 			return response.ok;
 		} catch (error) {
 			console.error("Raindrop connection test failed:", error);
@@ -120,11 +166,10 @@ export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings> {
 		}
 	}
 	async saveArticle(article: SavingArticle): Promise<Article> {
-		const response = await this._fetchWithRateLimit(`${this.apiUrl}/raindrop`, {
+		const response = await this.makeAuthenticatedRequest(`${this.apiUrl}/raindrop`, {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
-				Authorization: `Bearer ${this.apiKey}`,
 			},
 			body: JSON.stringify({
 				link: article.url,
@@ -141,14 +186,11 @@ export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings> {
 		return this.mapArticle(validatedData.item);
 	}
 	async deleteArticle(id: number): Promise<void> {
-		const response = await this._fetchWithRateLimit(
+		const response = await this.makeAuthenticatedRequest(
 			`${this.apiUrl}/raindrop/${id}`,
 			{
 				method: "DELETE",
-				headers: {
-					Authorization: `Bearer ${this.apiKey}`,
-				},
-			},
+			}
 		);
 		const data = await response.json();
 		const validatedData = v.parse(raindropDeleteResponseSchema, data);
@@ -164,13 +206,8 @@ export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings> {
 		let page = 0;
 		let totalPages = 1;
 		do {
-			const response = await this._fetchWithRateLimit(
-				`${this.apiUrl}/raindrops/0?page=${page}&perpage=${perPage}&sort=-created`,
-				{
-					headers: {
-						Authorization: `Bearer ${this.apiKey}`,
-					},
-				},
+			const response = await this.makeAuthenticatedRequest(
+				`${this.apiUrl}/raindrops/0?page=${page}&perpage=${perPage}&sort=-created`
 			);
 			const data = await response.json();
 			const validatedData = v.parse(raindropSyncResponseSchema, data);
@@ -190,6 +227,18 @@ export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings> {
 		} while (page < totalPages);
 		return allArticles;
 	}
+
+	// Cleanup method to clear tokens when adapter is no longer needed
+	public cleanup(): void {
+		tokenManager.clearToken(this.getServiceName());
+	}
+
+	// Method to get token health information for debugging
+	public getTokenHealth(): { isValid: boolean; expiresAt?: string; refreshCount?: number } {
+		const health = tokenManager.getTokenHealth();
+		return health[this.getServiceName()] || { isValid: false };
+	}
+
 	private async _fetchWithRateLimit(
 		url: string,
 		options: RequestInit,
