@@ -14,53 +14,60 @@ A browser extension for saving articles to your favorite read-it-later service, 
 - Offline access to cached articles
 - Background sync to keep your article list up-to-date
 - Beautiful and intuitive user interface
+- Support for multiple read-it-later services:
+  - Instapaper
+  - KaraKeep
+  - LinkAce
+  - Linkwarden
+  - Raindrop
+  - Wallabag
 
 ## Development Setup
 
 1. Clone the repository
 2. Install dependencies:
    ```bash
-   npm install
+   bun install
    ```
 3. Start development server:
    ```bash
-   npm run dev
+   bun run watch
    ```
 4. Load the extension in Firefox:
    - Open `about:debugging`
    - Click "This Firefox"
    - Click "Load Temporary Add-on"
-   - Select the `manifest.json` file from the project directory
+   - Select the `manifest.json` file from the `dist/unpackaged` directory.
 
 ## Building
 
 To build the extension for production:
 
 ```bash
-npm run build
+bun run package
 ```
 
-The built extension will be available in the `web-ext-artifacts` directory.
+The built extension will be available in the `dist/packages` directory.
 
 ## Development
 
-- `npm run dev` - Start development server
-- `npm run build` - Build for production
-- `npm run lint` - Run ESLint
-- `npm run format` - Format code with Prettier
+- `bun run watch` - Start development server and watch for changes.
+- `bun run package` - Build for production.
+- `bun run release` - Build and sign the extension for release.
+- `bun run lint` - Run Biome to check for code quality.
+- `bun run type-check` - Run TypeScript compiler to check for type errors.
 
 ## Project Structure
 
 ```
 pouch-extension/
+src/
 ├── background/     # Background scripts
-├── popup/         # Browser action popup
-├── content/       # Content scripts
-├── options/       # Options page
-├── icons/         # Extension icons
-├── assets/        # Static assets
-│   └── styles/    # CSS styles
-└── utils/         # Utility functions
+├── icons/          # Extension icons
+├── options/        # Options page
+├── popup/          # Browser action popup
+├── types/          # TypeScript type definitions
+└── utils/          # Utility functions
 ```
 
 ## License
