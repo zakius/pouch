@@ -5,6 +5,8 @@ import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
 import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
 import type { TokenizedAdapter } from "../tokenized-adapter";
+import { createApiClient, type ApiClient } from "../api-client";
+import { logger } from "../../../utils/logger";
 
 export const wallabagConfigSchema = v.object({
 	url: v.string([v.url()]),
@@ -115,7 +117,7 @@ export class WallabagAdapter
 	public readonly displayName = "Wallabag";
 	private apiUrl: string = "";
 	private config!: WallabagConfig;
-	private readonly RATE_LIMIT_DELAY: number = 1000;
+	private apiClient!: ApiClient;
 	formConfig = [
 		{ name: "url", label: "API URL" },
 		{ name: "clientId", label: "Client ID" },
@@ -168,6 +170,14 @@ export class WallabagAdapter
 	getAuthEndpoint(): string {
 		return `${this.apiUrl}/oauth/v2/token`;
 	}
+
+	/**
+	 * Perform full re-authentication when refresh tokens are invalid
+	 */
+	async reAuthenticate(): Promise<void> {
+		logger.info(`Performing full re-authentication for ${this.getServiceName()}`);
+		await this.authenticate();
+	}
 	async initialize(settings: WallabagSettings): Promise<void> {
 		this.config = settings.apiConfig;
 		this.apiUrl = this.config.url;
@@ -178,6 +188,16 @@ export class WallabagAdapter
 		}
 		
 		await this.authenticate();
+
+		// Initialize the API client
+		this.apiClient = createApiClient(this, {
+			baseUrl: this.apiUrl,
+			rateLimit: {
+				delayMs: 1000,
+				maxRetries: 3,
+				lowLimitThreshold: 10,
+			},
+		});
 	}
 
 	private async authenticate(): Promise<void> {
@@ -238,113 +258,9 @@ export class WallabagAdapter
 		});
 	}
 
-	private async makeAuthenticatedRequest(
-		url: string,
-		options: RequestInit = {},
-	): Promise<Response> {
-		// Check if we have a token, if not, try to authenticate first
-		const existingToken = tokenManager.getTokenMetadata(this.getServiceName());
-		if (!existingToken) {
-			console.warn("No token found for Wallabag, attempting to authenticate...");
-			await this.authenticate();
-		}
-
-		const accessToken = await tokenManager.getAccessToken(
-			this.getServiceName(),
-		);
-		const tokenMetadata = tokenManager.getTokenMetadata(this.getServiceName());
-
-		const authHeader = `${tokenMetadata?.tokenType || 'Bearer'} ${accessToken}`;
-		console.log("Making authenticated request:", {
-			url,
-			accessToken: accessToken.substring(0, 10) + "...",
-			tokenType: tokenMetadata?.tokenType,
-			authHeader: authHeader.substring(0, 20) + "...",
-		});
-
-		const response = await fetch(url, {
-			...options,
-			headers: {
-				...options.headers,
-				Authorization: authHeader,
-			},
-		});
-
-		// If we get a 401, try to refresh the token and retry once
-		if (response.status === 401) {
-			console.warn("Received 401, attempting token refresh");
-			const refreshResult = await tokenManager.refreshToken(
-				this.getServiceName(),
-				this.getTokenRefreshConfig(),
-			);
-
-			if (refreshResult.success) {
-				// Refresh successful, retry with new token
-				const newAccessToken = await tokenManager.getAccessToken(
-					this.getServiceName(),
-				);
-				const newTokenMetadata = tokenManager.getTokenMetadata(
-					this.getServiceName(),
-				);
-
-				const newAuthHeader = `${newTokenMetadata?.tokenType || 'Bearer'} ${newAccessToken}`;
-				console.log("Retrying with new token:", {
-					url,
-					accessToken: newAccessToken.substring(0, 10) + "...",
-					tokenType: newTokenMetadata?.tokenType,
-					authHeader: newAuthHeader.substring(0, 20) + "...",
-				});
-
-				return fetch(url, {
-					...options,
-					headers: {
-						...options.headers,
-						Authorization: newAuthHeader,
-					},
-				});
-			} else if (refreshResult.requiresReauth) {
-				// Refresh failed, need to re-authenticate
-				console.warn(
-					"Token refresh failed, re-authenticating:",
-					refreshResult.error,
-				);
-				await this.authenticate();
-
-				// Retry with fresh token
-				const newAccessToken = await tokenManager.getAccessToken(
-					this.getServiceName(),
-				);
-				const newTokenMetadata = tokenManager.getTokenMetadata(
-					this.getServiceName(),
-				);
-
-				const freshAuthHeader = `${newTokenMetadata?.tokenType || 'Bearer'} ${newAccessToken}`;
-				console.log("Retrying with fresh token after re-auth:", {
-					url,
-					accessToken: newAccessToken.substring(0, 10) + "...",
-					tokenType: newTokenMetadata?.tokenType,
-					authHeader: freshAuthHeader.substring(0, 20) + "...",
-				});
-
-				return fetch(url, {
-					...options,
-					headers: {
-						...options.headers,
-						Authorization: freshAuthHeader,
-					},
-				});
-			} else {
-				// Unexpected error
-				throw new Error(`Token refresh failed: ${refreshResult.error}`);
-			}
-		}
-
-		return response;
-	}
-
 	// Cleanup method to clear tokens when adapter is no longer needed
 	public async cleanup(): Promise<void> {
-		await tokenManager.clearToken(this.getServiceName());
+		await this.apiClient.clearToken();
 	}
 
 	// Method to get token health information for debugging
@@ -353,40 +269,23 @@ export class WallabagAdapter
 		expiresAt?: string;
 		refreshCount?: number;
 	} {
-		const health = tokenManager.getTokenHealth();
-		return health[this.getServiceName()] || { isValid: false };
+		return this.apiClient.getTokenHealth();
 	}
 
 	async testConnection(): Promise<boolean> {
 		try {
-			const response = await this.makeAuthenticatedRequest(
-				`${this.apiUrl}/api/entries.json?page=1&perPage=1`,
-			);
-			return response.ok;
+			return await this.apiClient.testConnection("/api/entries.json?page=1&perPage=1");
 		} catch (error) {
 			console.error("Wallabag connection test failed:", error);
 			return false;
 		}
 	}
 	async saveArticle(article: SavingArticle): Promise<Article> {
-		const response = await this.makeAuthenticatedRequest(
-			`${this.apiUrl}/api/entries.json`,
-			{
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-				},
-				body: JSON.stringify({
-					url: article.url,
-					title: article.title,
-				}),
-			},
-		);
-		if (!response.ok) {
-			throw new Error(`Failed to save article: ${response.statusText}`);
-		}
-		const data = await response.json();
-		const validatedData = v.parse(wallabagSaveResponseSchema, data);
+		const response = await this.apiClient.post("/api/entries.json", {
+			url: article.url,
+			title: article.title,
+		});
+		const validatedData = v.parse(wallabagSaveResponseSchema, response.data);
 
 		// Check if it's an error response
 		if ("error" in validatedData) {
@@ -398,27 +297,15 @@ export class WallabagAdapter
 		return this.mapArticle(validatedData);
 	}
 	async deleteArticle(id: number): Promise<void> {
-		const response = await this.makeAuthenticatedRequest(
-			`${this.apiUrl}/api/entries/${id}.json`,
-			{
-				method: "DELETE",
-			},
-		);
-		if (!response.ok) {
-			throw new Error(`Failed to delete article: ${response.statusText}`);
-		}
+		await this.apiClient.delete(`/api/entries/${id}.json`);
 	}
 	async sync(): Promise<Article[]> {
 		const perPage = 30;
 		const allArticles: Article[] = [];
-		const firstResponse = await this.makeAuthenticatedRequest(
-			`${this.apiUrl}/api/entries.json?page=1&perPage=${perPage}&detail=metadata`,
+		const firstResponse = await this.apiClient.get(
+			`/api/entries.json?page=1&perPage=${perPage}&detail=metadata`,
 		);
-		if (!firstResponse.ok) {
-			throw new Error(`Failed to get articles: ${firstResponse.statusText}`);
-		}
-		const firstData = await firstResponse.json();
-		const validatedFirstData = v.parse(wallabagSyncResponseSchema, firstData);
+		const validatedFirstData = v.parse(wallabagSyncResponseSchema, firstResponse.data);
 
 		// Check if it's an error response
 		if ("error" in validatedFirstData) {
@@ -435,17 +322,10 @@ export class WallabagAdapter
 		const total = validatedFirstData.total;
 		const totalPages = Math.ceil(total / perPage);
 		for (let page = 2; page <= totalPages; page++) {
-			await new Promise((resolve) =>
-				setTimeout(resolve, this.RATE_LIMIT_DELAY),
+			const response = await this.apiClient.get(
+				`/api/entries.json?page=${page}&perPage=${perPage}&detail=metadata`,
 			);
-			const response = await this.makeAuthenticatedRequest(
-				`${this.apiUrl}/api/entries.json?page=${page}&perPage=${perPage}&detail=metadata`,
-			);
-			if (!response.ok) {
-				throw new Error(`Failed to get articles: ${response.statusText}`);
-			}
-			const data = await response.json();
-			const validatedData = v.parse(wallabagSyncResponseSchema, data);
+			const validatedData = v.parse(wallabagSyncResponseSchema, response.data);
 
 			// Check if it's an error response
 			if ("error" in validatedData) {

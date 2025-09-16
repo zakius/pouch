@@ -5,6 +5,7 @@ import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
 import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
 import type { TokenizedAdapter } from "../tokenized-adapter";
+import { createApiClient, type ApiClient } from "../api-client";
 
 export const linkaceConfigSchema = v.object({
 	url: v.string([v.url()]),
@@ -110,7 +111,7 @@ export class LinkaceAdapter
 	public readonly displayName = "LinkAce";
 	private apiUrl: string = "";
 	private token: string = "";
-	private readonly RATE_LIMIT_DELAY: number = 1000;
+	private apiClient!: ApiClient;
 
 	formConfig = [
 		{ name: "url", label: "API URL" },
@@ -158,33 +159,22 @@ export class LinkaceAdapter
 
 		// Store the static token in the token manager
 		const tokenMetadata = this.createTokenMetadata({});
-		tokenManager.storeToken(this.getServiceName(), tokenMetadata);
-	}
+		await tokenManager.storeToken(this.getServiceName(), tokenMetadata);
 
-	private async makeAuthenticatedRequest(
-		url: string,
-		options: RequestInit = {},
-	): Promise<Response> {
-		const accessToken = await tokenManager.getAccessToken(
-			this.getServiceName(),
-		);
-
-		return fetch(url, {
-			...options,
-			headers: {
-				...options.headers,
-				Authorization: `Bearer ${accessToken}`,
-				Accept: "application/json",
+		// Initialize the API client
+		this.apiClient = createApiClient(this, {
+			baseUrl: this.apiUrl,
+			rateLimit: {
+				delayMs: 1000,
+				maxRetries: 3,
+				lowLimitThreshold: 10,
 			},
 		});
 	}
 
 	async testConnection(): Promise<boolean> {
 		try {
-			const response = await this.makeAuthenticatedRequest(
-				`${this.apiUrl}/api/v2/links?per_page=1`,
-			);
-			return response.ok;
+			return await this.apiClient.testConnection("/api/v2/links?per_page=1");
 		} catch (error) {
 			console.error("LinkAce connection test failed:", error);
 			return false;
@@ -192,28 +182,13 @@ export class LinkaceAdapter
 	}
 
 	async saveArticle(article: SavingArticle): Promise<Article> {
-		const response = await this.makeAuthenticatedRequest(
-			`${this.apiUrl}/api/v2/links`,
-			{
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-				},
-				body: JSON.stringify({
-					url: article.url,
-					title: article.title,
-					visibility: 1, // Private by default
-					check_disabled: false,
-				}),
-			},
-		);
-
-		if (!response.ok) {
-			throw new Error(`Failed to save article: ${response.statusText}`);
-		}
-
-		const data = await response.json();
-		const validatedData = v.parse(linkaceSaveResponseSchema, data);
+		const response = await this.apiClient.post("/api/v2/links", {
+			url: article.url,
+			title: article.title,
+			visibility: 1, // Private by default
+			check_disabled: false,
+		});
+		const validatedData = v.parse(linkaceSaveResponseSchema, response.data);
 
 		// Check if it's an error response
 		if ("message" in validatedData) {
@@ -224,16 +199,7 @@ export class LinkaceAdapter
 	}
 
 	async deleteArticle(id: number): Promise<void> {
-		const response = await this.makeAuthenticatedRequest(
-			`${this.apiUrl}/api/v2/links/${id}`,
-			{
-				method: "DELETE",
-			},
-		);
-
-		if (!response.ok) {
-			throw new Error(`Failed to delete article: ${response.statusText}`);
-		}
+		await this.apiClient.delete(`/api/v2/links/${id}`);
 	}
 
 	async sync(): Promise<Article[]> {
@@ -243,23 +209,10 @@ export class LinkaceAdapter
 		let hasMorePages = true;
 
 		while (hasMorePages) {
-			// Add rate limiting delay for subsequent requests
-			if (currentPage > 1) {
-				await new Promise((resolve) =>
-					setTimeout(resolve, this.RATE_LIMIT_DELAY),
-				);
-			}
-
-			const response = await this.makeAuthenticatedRequest(
-				`${this.apiUrl}/api/v2/links?page=${currentPage}&per_page=${perPage}`,
+			const response = await this.apiClient.get(
+				`/api/v2/links?page=${currentPage}&per_page=${perPage}`,
 			);
-
-			if (!response.ok) {
-				throw new Error(`Failed to sync articles: ${response.statusText}`);
-			}
-
-			const data = await response.json();
-			const validatedData = v.parse(linkaceSyncResponseSchema, data);
+			const validatedData = v.parse(linkaceSyncResponseSchema, response.data);
 
 			// Check if it's an error response
 			if ("message" in validatedData) {
@@ -285,8 +238,8 @@ export class LinkaceAdapter
 	}
 
 	// Cleanup method to clear tokens when adapter is no longer needed
-	public cleanup(): void {
-		tokenManager.clearToken(this.getServiceName());
+	public async cleanup(): Promise<void> {
+		await this.apiClient.clearToken();
 	}
 
 	// Method to get token health information for debugging
@@ -295,8 +248,7 @@ export class LinkaceAdapter
 		expiresAt?: string;
 		refreshCount?: number;
 	} {
-		const health = tokenManager.getTokenHealth();
-		return health[this.getServiceName()] || { isValid: false };
+		return this.apiClient.getTokenHealth();
 	}
 
 	private mapArticle(item: LinkaceLink): Article {

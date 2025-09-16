@@ -40,4 +40,10 @@ export interface TokenizedAdapter {
 	 * Get the authentication endpoint URL
 	 */
 	getAuthEndpoint(): string;
+
+	/**
+	 * Perform full re-authentication when refresh tokens are invalid or unavailable
+	 * This method should handle the complete authentication flow and store new tokens
+	 */
+	reAuthenticate?(): Promise<void>;
 }

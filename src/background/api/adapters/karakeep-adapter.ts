@@ -5,6 +5,7 @@ import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
 import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
 import type { TokenizedAdapter } from "../tokenized-adapter";
+import { createApiClient, type ApiClient } from "../api-client";
 
 export const karakeepConfigSchema = v.object({
 	url: v.string([v.url()]),
@@ -84,6 +85,7 @@ export class KarakeepAdapter
 	public readonly displayName = "Karakeep";
 	private apiUrl: string = "";
 	private token: string = "";
+	private apiClient!: ApiClient;
 	formConfig = [
 		{ name: "url", label: "API URL" },
 		{ name: "token", label: "API Token" },
@@ -130,39 +132,32 @@ export class KarakeepAdapter
 
 		// Store the static token in the token manager
 		const tokenMetadata = this.createTokenMetadata({});
-		tokenManager.storeToken(this.getServiceName(), tokenMetadata);
+		await tokenManager.storeToken(this.getServiceName(), tokenMetadata);
+
+		// Initialize the API client
+		this.apiClient = createApiClient(this, {
+			baseUrl: this.apiUrl,
+			rateLimit: {
+				delayMs: 1000,
+				maxRetries: 3,
+				lowLimitThreshold: 10,
+			},
+		});
 	}
 	async testConnection(): Promise<boolean> {
 		try {
-			const response = await fetch(`${this.apiUrl}/bookmarks`, {
-				method: "GET",
-				headers: {
-					Authorization: `Bearer ${this.token}`,
-				},
-			});
-			return response.ok;
+			return await this.apiClient.testConnection("/bookmarks");
 		} catch (error) {
 			console.error("Karakeep connection test failed:", error);
 			return false;
 		}
 	}
 	async saveArticle(article: SavingArticle): Promise<Article> {
-		const response = await fetch(`${this.apiUrl}/bookmarks`, {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				Authorization: `Bearer ${this.token}`,
-			},
-			body: JSON.stringify({
-				url: article.url,
-				title: article.title,
-			}),
+		const response = await this.apiClient.post("/bookmarks", {
+			url: article.url,
+			title: article.title,
 		});
-		if (!response.ok) {
-			throw new Error(`Failed to save article: ${response.statusText}`);
-		}
-		const data = await response.json();
-		const validatedData = v.parse(karakeepSaveResponseSchema, data);
+		const validatedData = v.parse(karakeepSaveResponseSchema, response.data);
 
 		// Check if it's an error response
 		if ("error" in validatedData) {
@@ -174,28 +169,11 @@ export class KarakeepAdapter
 		return this.mapArticle(validatedData);
 	}
 	async deleteArticle(id: number): Promise<void> {
-		const response = await fetch(`${this.apiUrl}/bookmarks/${id}`, {
-			method: "DELETE",
-			headers: {
-				Authorization: `Bearer ${this.token}`,
-			},
-		});
-		if (!response.ok) {
-			throw new Error(`Failed to delete article: ${response.statusText}`);
-		}
+		await this.apiClient.delete(`/bookmarks/${id}`);
 	}
 	async sync(): Promise<Article[]> {
-		const response = await fetch(`${this.apiUrl}/bookmarks`, {
-			method: "GET",
-			headers: {
-				Authorization: `Bearer ${this.token}`,
-			},
-		});
-		if (!response.ok) {
-			throw new Error(`Failed to sync articles: ${response.statusText}`);
-		}
-		const data = await response.json();
-		const validatedData = v.parse(karakeepSyncResponseSchema, data);
+		const response = await this.apiClient.get("/bookmarks");
+		const validatedData = v.parse(karakeepSyncResponseSchema, response.data);
 
 		// Check if it's an error response
 		if ("error" in validatedData) {
@@ -206,6 +184,21 @@ export class KarakeepAdapter
 
 		return validatedData.map(this.mapArticle);
 	}
+
+	// Cleanup method to clear tokens when adapter is no longer needed
+	public async cleanup(): Promise<void> {
+		await this.apiClient.clearToken();
+	}
+
+	// Method to get token health information for debugging
+	public getTokenHealth(): {
+		isValid: boolean;
+		expiresAt?: string;
+		refreshCount?: number;
+	} {
+		return this.apiClient.getTokenHealth();
+	}
+
 	private mapArticle(item: KarakeepItem): Article {
 		return {
 			id: item.id,

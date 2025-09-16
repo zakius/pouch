@@ -1,7 +1,11 @@
 import * as v from "valibot";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
+import type { TokenRefreshConfig } from "../../token-manager";
+import { tokenManager } from "../../token-manager";
 import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
+import type { TokenizedAdapter } from "../tokenized-adapter";
+import { logger } from "../../../utils/logger";
 
 export const instapaperConfigSchema = v.object({
 	consumerKey: v.string(),
@@ -95,21 +99,64 @@ interface InstapaperError {
 	message: string;
 }
 
-export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings> {
+export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, TokenizedAdapter {
 	public readonly displayName = "Instapaper";
 	private apiUrl = "https://www.instapaper.com";
 	private config!: InstapaperConfig;
 	private accessToken: string | null = null;
 	private accessTokenSecret: string | null = null;
-	private readonly RATE_LIMIT_DELAY: number = 1000;
 	formConfig = [
 		{ name: "consumerKey", label: "OAuth Consumer Key" },
 		{ name: "consumerSecret", label: "OAuth Consumer Secret" },
 		{ name: "username", label: "Instapaper Username" },
 		{ name: "password", label: "Instapaper Password" },
 	];
+
+	// TokenizedAdapter interface implementation
+	getServiceName(): string {
+		return "instapaper";
+	}
+
+	getTokenRefreshConfig(): TokenRefreshConfig {
+		// Instapaper uses OAuth 1.0a, no refresh tokens
+		throw new Error("Instapaper uses OAuth 1.0a, no refresh configuration available");
+	}
+
+	createTokenMetadata(_tokenData: Record<string, unknown>) {
+		// For OAuth 1.0a, create a simple metadata structure
+		const now = Date.now();
+		return {
+			accessToken: this.accessToken || "",
+			refreshToken: "", // No refresh token for OAuth 1.0a
+			tokenType: "OAuth",
+			expiresAt: now + 365 * 24 * 60 * 60 * 1000, // 1 year from now (effectively never expires)
+			issuedAt: now,
+			scope: undefined,
+			refreshCount: 0,
+		};
+	}
+
+	getBaseUrl(): string {
+		return this.apiUrl;
+	}
+
+	getAuthEndpoint(): string {
+		return `${this.apiUrl}/api/1/oauth/access_token`;
+	}
+
+	/**
+	 * Perform full re-authentication when tokens are invalid
+	 */
+	async reAuthenticate(): Promise<void> {
+		logger.info(`Performing full re-authentication for ${this.getServiceName()}`);
+		await this.authenticate();
+	}
 	async initialize(settings: InstapaperSettings): Promise<void> {
 		this.config = settings.apiConfig;
+		await this.authenticate();
+	}
+
+	private async authenticate(): Promise<void> {
 		const response = await fetch(`${this.apiUrl}/api/1/oauth/access_token`, {
 			method: "POST",
 			headers: {
@@ -131,6 +178,10 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings> {
 		if (!this.accessToken || !this.accessTokenSecret) {
 			throw new Error("Failed to obtain Instapaper access token");
 		}
+
+		// Store the token in the token manager
+		const tokenMetadata = this.createTokenMetadata({});
+		await tokenManager.storeToken(this.getServiceName(), tokenMetadata);
 	}
 	async testConnection(): Promise<boolean> {
 		try {
@@ -140,6 +191,21 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings> {
 			console.error("Instapaper connection test failed:", error);
 			return false;
 		}
+	}
+
+	// Cleanup method to clear tokens when adapter is no longer needed
+	public async cleanup(): Promise<void> {
+		await tokenManager.clearToken(this.getServiceName());
+	}
+
+	// Method to get token health information for debugging
+	public getTokenHealth(): {
+		isValid: boolean;
+		expiresAt?: string;
+		refreshCount?: number;
+	} {
+		const health = tokenManager.getTokenHealth();
+		return health[this.getServiceName()] || { isValid: false };
 	}
 	async saveArticle(article: SavingArticle): Promise<Article> {
 		const params = { url: article.url, title: article.title };

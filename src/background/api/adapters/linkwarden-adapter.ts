@@ -5,6 +5,7 @@ import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
 import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
 import type { TokenizedAdapter } from "../tokenized-adapter";
+import { createApiClient, type ApiClient } from "../api-client";
 
 export const linkwardenConfigSchema = v.object({
 	url: v.string([v.url()]),
@@ -86,6 +87,7 @@ export class LinkwardenAdapter
 	public readonly displayName = "Linkwarden";
 	private apiUrl: string = "";
 	private token: string = "";
+	private apiClient!: ApiClient;
 	formConfig = [
 		{ name: "url", label: "API URL" },
 		{ name: "token", label: "API Token" },
@@ -132,53 +134,32 @@ export class LinkwardenAdapter
 
 		// Store the static token in the token manager
 		const tokenMetadata = this.createTokenMetadata({});
-		tokenManager.storeToken(this.getServiceName(), tokenMetadata);
-	}
-	private async makeAuthenticatedRequest(
-		url: string,
-		options: RequestInit = {},
-	): Promise<Response> {
-		const accessToken = await tokenManager.getAccessToken(
-			this.getServiceName(),
-		);
+		await tokenManager.storeToken(this.getServiceName(), tokenMetadata);
 
-		return fetch(url, {
-			...options,
-			headers: {
-				...options.headers,
-				Authorization: `Bearer ${accessToken}`,
+		// Initialize the API client
+		this.apiClient = createApiClient(this, {
+			baseUrl: this.apiUrl,
+			rateLimit: {
+				delayMs: 1000,
+				maxRetries: 3,
+				lowLimitThreshold: 10,
 			},
 		});
 	}
-
 	async testConnection(): Promise<boolean> {
 		try {
-			const response = await this.makeAuthenticatedRequest(
-				`${this.apiUrl}/api/v1/links`,
-			);
-			return response.ok;
+			return await this.apiClient.testConnection("/api/v1/links");
 		} catch (error) {
 			console.error("Linkwarden connection test failed:", error);
 			return false;
 		}
 	}
 	async saveArticle(article: SavingArticle): Promise<Article> {
-		const response = await fetch(`${this.apiUrl}/api/v1/links`, {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				Authorization: `Bearer ${this.token}`,
-			},
-			body: JSON.stringify({
-				url: article.url,
-				name: article.title,
-			}),
+		const response = await this.apiClient.post("/api/v1/links", {
+			url: article.url,
+			name: article.title,
 		});
-		if (!response.ok) {
-			throw new Error(`Failed to save article: ${response.statusText}`);
-		}
-		const data = await response.json();
-		const validatedData = v.parse(linkwardenSaveResponseSchema, data);
+		const validatedData = v.parse(linkwardenSaveResponseSchema, response.data);
 
 		// Check if it's an error response
 		if ("error" in validatedData) {
@@ -190,28 +171,11 @@ export class LinkwardenAdapter
 		return this.mapArticle(validatedData.response);
 	}
 	async deleteArticle(id: number): Promise<void> {
-		const response = await fetch(`${this.apiUrl}/api/v1/links/${id}`, {
-			method: "DELETE",
-			headers: {
-				Authorization: `Bearer ${this.token}`,
-			},
-		});
-		if (!response.ok) {
-			throw new Error(`Failed to delete article: ${response.statusText}`);
-		}
+		await this.apiClient.delete(`/api/v1/links/${id}`);
 	}
 	async sync(): Promise<Article[]> {
-		const response = await fetch(`${this.apiUrl}/api/v1/links`, {
-			method: "GET",
-			headers: {
-				Authorization: `Bearer ${this.token}`,
-			},
-		});
-		if (!response.ok) {
-			throw new Error(`Failed to sync articles: ${response.statusText}`);
-		}
-		const data = await response.json();
-		const validatedData = v.parse(linkwardenSyncResponseSchema, data);
+		const response = await this.apiClient.get("/api/v1/links");
+		const validatedData = v.parse(linkwardenSyncResponseSchema, response.data);
 
 		// Check if it's an error response
 		if ("error" in validatedData) {
@@ -222,6 +186,21 @@ export class LinkwardenAdapter
 
 		return validatedData.response.data.map(this.mapArticle);
 	}
+
+	// Cleanup method to clear tokens when adapter is no longer needed
+	public async cleanup(): Promise<void> {
+		await this.apiClient.clearToken();
+	}
+
+	// Method to get token health information for debugging
+	public getTokenHealth(): {
+		isValid: boolean;
+		expiresAt?: string;
+		refreshCount?: number;
+	} {
+		return this.apiClient.getTokenHealth();
+	}
+
 	private mapArticle(item: LinkwardenItem): Article {
 		return {
 			id: item.id,

@@ -5,6 +5,7 @@ import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
 import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
 import type { TokenizedAdapter } from "../tokenized-adapter";
+import { createApiClient, type ApiClient } from "../api-client";
 
 export const raindropConfigSchema = v.object({
 	apiKey: v.string(),
@@ -102,7 +103,7 @@ export class RaindropAdapter
 	public readonly displayName = "Raindrop.io";
 	private apiUrl = "https://api.raindrop.io/rest/v1";
 	private apiKey = "";
-	private readonly LOW_RATE_LIMIT_THRESHOLD = 10;
+	private apiClient!: ApiClient;
 	formConfig = [{ name: "apiKey", label: "API Key (Test Token)" }];
 
 	// TokenizedAdapter interface implementation
@@ -146,52 +147,32 @@ export class RaindropAdapter
 
 		// Store the static token in the token manager
 		const tokenMetadata = this.createTokenMetadata({});
-		tokenManager.storeToken(this.getServiceName(), tokenMetadata);
-	}
-	private async makeAuthenticatedRequest(
-		url: string,
-		options: RequestInit = {},
-	): Promise<Response> {
-		const accessToken = await tokenManager.getAccessToken(
-			this.getServiceName(),
-		);
+		await tokenManager.storeToken(this.getServiceName(), tokenMetadata);
 
-		return this._fetchWithRateLimit(url, {
-			...options,
-			headers: {
-				...options.headers,
-				Authorization: `Bearer ${accessToken}`,
+		// Initialize the API client
+		this.apiClient = createApiClient(this, {
+			baseUrl: this.apiUrl,
+			rateLimit: {
+				delayMs: 1000,
+				maxRetries: 3,
+				lowLimitThreshold: 10,
 			},
 		});
 	}
-
 	async testConnection(): Promise<boolean> {
 		try {
-			const response = await this.makeAuthenticatedRequest(
-				`${this.apiUrl}/collections`,
-			);
-			return response.ok;
+			return await this.apiClient.testConnection("/collections");
 		} catch (error) {
 			console.error("Raindrop connection test failed:", error);
 			return false;
 		}
 	}
 	async saveArticle(article: SavingArticle): Promise<Article> {
-		const response = await this.makeAuthenticatedRequest(
-			`${this.apiUrl}/raindrop`,
-			{
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-				},
-				body: JSON.stringify({
-					link: article.url,
-					title: article.title,
-				}),
-			},
-		);
-		const data = await response.json();
-		const validatedData = v.parse(raindropSaveResponseSchema, data);
+		const response = await this.apiClient.post("/raindrop", {
+			link: article.url,
+			title: article.title,
+		});
+		const validatedData = v.parse(raindropSaveResponseSchema, response.data);
 		if (!validatedData.result) {
 			throw new Error(
 				`Failed to save article: ${validatedData.errorMessage || "API returned an error"}`,
@@ -200,14 +181,8 @@ export class RaindropAdapter
 		return this.mapArticle(validatedData.item);
 	}
 	async deleteArticle(id: number): Promise<void> {
-		const response = await this.makeAuthenticatedRequest(
-			`${this.apiUrl}/raindrop/${id}`,
-			{
-				method: "DELETE",
-			},
-		);
-		const data = await response.json();
-		const validatedData = v.parse(raindropDeleteResponseSchema, data);
+		const response = await this.apiClient.delete(`/raindrop/${id}`);
+		const validatedData = v.parse(raindropDeleteResponseSchema, response.data);
 		if (!validatedData.result) {
 			throw new Error(
 				`Failed to delete article: ${validatedData.errorMessage || "API returned an error"}`,
@@ -220,11 +195,10 @@ export class RaindropAdapter
 		let page = 0;
 		let totalPages = 1;
 		do {
-			const response = await this.makeAuthenticatedRequest(
-				`${this.apiUrl}/raindrops/0?page=${page}&perpage=${perPage}&sort=-created`,
+			const response = await this.apiClient.get(
+				`/raindrops/0?page=${page}&perpage=${perPage}&sort=-created`,
 			);
-			const data = await response.json();
-			const validatedData = v.parse(raindropSyncResponseSchema, data);
+			const validatedData = v.parse(raindropSyncResponseSchema, response.data);
 			if (!validatedData.result) {
 				throw new Error(
 					`Failed to get articles: ${validatedData.errorMessage || "API returned an error"}`,
@@ -243,8 +217,8 @@ export class RaindropAdapter
 	}
 
 	// Cleanup method to clear tokens when adapter is no longer needed
-	public cleanup(): void {
-		tokenManager.clearToken(this.getServiceName());
+	public async cleanup(): Promise<void> {
+		await this.apiClient.clearToken();
 	}
 
 	// Method to get token health information for debugging
@@ -253,53 +227,7 @@ export class RaindropAdapter
 		expiresAt?: string;
 		refreshCount?: number;
 	} {
-		const health = tokenManager.getTokenHealth();
-		return health[this.getServiceName()] || { isValid: false };
-	}
-
-	private async _fetchWithRateLimit(
-		url: string,
-		options: RequestInit,
-		retryCount = 3,
-	): Promise<Response> {
-		for (let i = 0; i < retryCount; i++) {
-			const response = await fetch(url, options);
-			if (response.status === 429) {
-				const retryAfterHeader = response.headers.get("Retry-After");
-				const rateLimitResetHeader = response.headers.get("X-RateLimit-Reset");
-				let delay = 1000 * (i + 1);
-				if (retryAfterHeader) {
-					delay = parseInt(retryAfterHeader, 10) * 1000;
-				} else if (rateLimitResetHeader) {
-					const resetTime = parseInt(rateLimitResetHeader, 10) * 1000;
-					delay = Math.max(0, resetTime - Date.now());
-				}
-				console.warn(`Rate limit hit. Retrying after ${delay}ms.`);
-				await new Promise((resolve) => setTimeout(resolve, delay));
-				continue;
-			}
-			if (!response.ok) {
-				throw new Error(`API request failed: ${response.statusText}`);
-			}
-			const remaining = response.headers.get("X-RateLimit-Remaining");
-			if (
-				remaining &&
-				parseInt(remaining, 10) < this.LOW_RATE_LIMIT_THRESHOLD
-			) {
-				const reset = response.headers.get("X-RateLimit-Reset");
-				if (reset) {
-					const delay = Math.max(0, parseInt(reset, 10) * 1000 - Date.now());
-					console.warn(
-						`Approaching rate limit. Pausing for ${delay}ms to allow reset.`,
-					);
-					await new Promise((resolve) => setTimeout(resolve, delay));
-				}
-			}
-			return response;
-		}
-		throw new Error(
-			"Request failed after multiple retries due to rate limiting.",
-		);
+		return this.apiClient.getTokenHealth();
 	}
 	private mapArticle(item: RaindropItem): Article {
 		return {
