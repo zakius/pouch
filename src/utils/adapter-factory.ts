@@ -1,3 +1,4 @@
+import { BookmarksAdapter } from "../background/api/adapters/bookmarks-adapter";
 import { InstapaperAdapter } from "../background/api/adapters/instapaper-adapter";
 import { KarakeepAdapter } from "../background/api/adapters/karakeep-adapter";
 import { LinkaceAdapter } from "../background/api/adapters/linkace-adapter";
@@ -9,6 +10,7 @@ import type { ReadItLaterAPI } from "../background/api/read-it-later-adapter";
 
 // Map backend names to their corresponding adapter classes
 const adapters = {
+	bookmarks: BookmarksAdapter,
 	wallabag: WallabagAdapter,
 	instapaper: InstapaperAdapter,
 	raindrop: RaindropAdapter,

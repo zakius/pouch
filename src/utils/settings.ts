@@ -1,4 +1,5 @@
 import * as v from "valibot";
+import { bookmarksSettingsSchema } from "../background/api/adapters/bookmarks-adapter";
 import { instapaperSettingsSchema } from "../background/api/adapters/instapaper-adapter";
 import { karakeepSettingsSchema } from "../background/api/adapters/karakeep-adapter";
 import { linkwardenSettingsSchema } from "../background/api/adapters/linkwarden-adapter";
@@ -9,6 +10,7 @@ import type { baseSettingsSchema } from "./base-settings-schema";
 import { LogLevel } from "./log-levels";
 import { logger } from "./logger";
 export const settingsSchema = v.variant("backend", [
+	bookmarksSettingsSchema,
 	wallabagSettingsSchema,
 	raindropSettingsSchema,
 	instapaperSettingsSchema,

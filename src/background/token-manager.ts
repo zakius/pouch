@@ -84,13 +84,16 @@ export class TokenManager {
 	public async getAccessToken(serviceName: string): Promise<string> {
 		const token = this.tokens.get(serviceName);
 		if (!token) {
-			throw new Error(`No token found for service: ${serviceName}`);
+			logger.error(`No token found for service: ${serviceName}. Available services: ${Array.from(this.tokens.keys()).join(', ')}`);
+			throw new Error(`No token found for service: ${serviceName}. Please check your configuration and try re-authenticating.`);
 		}
 
 		// Check if token needs refresh
 		if (this.needsRefresh(token)) {
+			logger.info(`Token for ${serviceName} needs refresh, attempting refresh...`);
 			const refreshResult = await this.refreshToken(serviceName);
 			if (!refreshResult.success) {
+				logger.error(`Token refresh failed for service: ${serviceName}. ${refreshResult.error}`);
 				throw new Error(
 					`Token refresh failed for service: ${serviceName}. ${refreshResult.error}`,
 				);
@@ -99,6 +102,7 @@ export class TokenManager {
 
 		const updatedToken = this.tokens.get(serviceName);
 		if (!updatedToken) {
+			logger.error(`No token available for service: ${serviceName} after refresh attempt`);
 			throw new Error(`No token available for service: ${serviceName}`);
 		}
 

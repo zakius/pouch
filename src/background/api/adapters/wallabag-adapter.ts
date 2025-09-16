@@ -186,7 +186,7 @@ export class WallabagAdapter
 			client_id: this.config.clientId,
 			client_secret: this.config.clientSecret,
 			username: this.config.username,
-			password: this.config.password!,
+			password: this.config.password || "",
 		});
 		
 		console.log("Wallabag authentication request:", {
@@ -242,6 +242,13 @@ export class WallabagAdapter
 		url: string,
 		options: RequestInit = {},
 	): Promise<Response> {
+		// Check if we have a token, if not, try to authenticate first
+		const existingToken = tokenManager.getTokenMetadata(this.getServiceName());
+		if (!existingToken) {
+			console.warn("No token found for Wallabag, attempting to authenticate...");
+			await this.authenticate();
+		}
+
 		const accessToken = await tokenManager.getAccessToken(
 			this.getServiceName(),
 		);
