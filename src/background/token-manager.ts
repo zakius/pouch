@@ -1,9 +1,3 @@
-/**
- * Centralized Token Manager
- *
- * Handles token storage, refresh, and lifecycle management for all API adapters.
- * Provides a unified interface for token-based authentication across different services.
- */
 
 import { logger } from "../utils/logger";
 
@@ -88,7 +82,6 @@ export class TokenManager {
 			throw new Error(`No token found for service: ${serviceName}. Please check your configuration and try re-authenticating.`);
 		}
 
-		// Check if token needs refresh
 		if (this.needsRefresh(token)) {
 			logger.info(`Token for ${serviceName} needs refresh, attempting refresh...`);
 			const refreshResult = await this.refreshToken(serviceName);
@@ -143,7 +136,6 @@ export class TokenManager {
 			};
 		}
 
-		// Prevent multiple simultaneous refresh attempts
 		if (
 			token.lastRefreshAttempt &&
 			Date.now() - token.lastRefreshAttempt < this.config.refreshCooldownMs
@@ -159,7 +151,6 @@ export class TokenManager {
 		token.lastRefreshAttempt = Date.now();
 		token.refreshCount++;
 
-		// If we've exceeded max refresh attempts, clear the token
 		if (token.refreshCount > this.config.maxRefreshAttempts) {
 			logger.warn(
 				`Max refresh attempts exceeded for ${serviceName}, clearing token`,
@@ -183,7 +174,6 @@ export class TokenManager {
 		}
 
 		try {
-			// Use provided refresh config or create default one
 			const config =
 				refreshConfig || this.createDefaultRefreshConfig(serviceName, token);
 
@@ -300,7 +290,6 @@ export class TokenManager {
 
 			if (storedTokens) {
 				this.tokens = new Map(storedTokens);
-				// Reschedule refresh timers for loaded tokens
 				for (const serviceName of this.tokens.keys()) {
 					this.scheduleTokenRefresh(serviceName);
 				}
@@ -381,7 +370,6 @@ export class TokenManager {
 		serviceName: string,
 		_token: TokenMetadata,
 	): TokenRefreshConfig {
-		// This is a fallback - adapters should provide their own refresh config
 		throw new Error(`No refresh config provided for service: ${serviceName}`);
 	}
 
@@ -400,7 +388,6 @@ export class TokenManager {
 		const now = Date.now();
 		const expiresIn = tokenData.expires_in || 3600; // Default to 1 hour
 
-		// Update token metadata
 		token.accessToken = (tokenData.access_token as string) || token.accessToken;
 		token.refreshToken =
 			(tokenData.refresh_token as string) || token.refreshToken;
@@ -415,5 +402,4 @@ export class TokenManager {
 	}
 }
 
-// Global token manager instance
 export const tokenManager = new TokenManager();

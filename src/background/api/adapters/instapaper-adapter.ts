@@ -60,7 +60,6 @@ const instapaperMetaSchema = v.object({
 	type: v.literal("meta"),
 });
 
-// Union type for all possible API response items
 const instapaperResponseItemSchema = v.union([
 	instapaperBookmarkSchema,
 	instapaperUserSchema,
@@ -68,10 +67,8 @@ const instapaperResponseItemSchema = v.union([
 	instapaperMetaSchema,
 ]);
 
-// Save response is an array of items
 const instapaperSaveResponseSchema = v.array(instapaperResponseItemSchema);
 
-// Sync response has a specific structure
 const instapaperSyncResponseSchema = v.object({
 	user: instapaperUserSchema,
 	bookmarks: v.array(instapaperBookmarkSchema),
@@ -112,18 +109,15 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
 		{ name: "password", label: "Instapaper Password" },
 	];
 
-	// TokenizedAdapter interface implementation
 	getServiceName(): string {
 		return "instapaper";
 	}
 
 	getTokenRefreshConfig(): TokenRefreshConfig {
-		// Instapaper uses OAuth 1.0a, no refresh tokens
 		throw new Error("Instapaper uses OAuth 1.0a, no refresh configuration available");
 	}
 
 	createTokenMetadata(_tokenData: Record<string, unknown>) {
-		// For OAuth 1.0a, create a simple metadata structure
 		const now = Date.now();
 		return {
 			accessToken: this.accessToken || "",
@@ -179,7 +173,6 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
 			throw new Error("Failed to obtain Instapaper access token");
 		}
 
-		// Store the token in the token manager
 		const tokenMetadata = this.createTokenMetadata({});
 		await tokenManager.storeToken(this.getServiceName(), tokenMetadata);
 	}
@@ -193,12 +186,10 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
 		}
 	}
 
-	// Cleanup method to clear tokens when adapter is no longer needed
 	public async cleanup(): Promise<void> {
 		await tokenManager.clearToken(this.getServiceName());
 	}
 
-	// Method to get token health information for debugging
 	public getTokenHealth(): {
 		isValid: boolean;
 		expiresAt?: string;
@@ -212,12 +203,10 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
 		const data = await this._makeSignedRequest("/api/1/bookmarks/add", params);
 		const validatedData = v.parse(instapaperSaveResponseSchema, data);
 
-		// Find the bookmark in the response
 		const savedBookmark = validatedData.find(
 			(item): item is InstapaperBookmark => item.type === "bookmark",
 		);
 
-		// Check for errors
 		const error = validatedData.find(
 			(item): item is InstapaperError => item.type === "error",
 		);

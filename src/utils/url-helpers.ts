@@ -132,14 +132,11 @@ function canonicalizeAmazonUrl(url: URL): URL {
 
 export async function canonicalizeUrl(urlString: string): Promise<string> {
 	try {
-		// Ensure URL canonizer is initialized before proceeding
 		await initializeUrlCanonizer();
 
-		// First, use filter lists for comprehensive URL cleaning
 		const cleanedUrl = await filterListCleanUrl(urlString);
 		let url = new URL(cleanedUrl);
 
-		// Apply our custom canonicalization logic
 		const maxRedirects = 5;
 		for (let i = 0; i < maxRedirects; i++) {
 			const originalUrlString = url.toString();

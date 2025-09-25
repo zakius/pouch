@@ -8,7 +8,6 @@ import { SyncAdapter } from "../background/api/adapters/sync-adapter";
 import { WallabagAdapter } from "../background/api/adapters/wallabag-adapter";
 import type { ReadItLaterAPI } from "../background/api/read-it-later-adapter";
 
-// Map backend names to their corresponding adapter classes
 const adapters = {
 	bookmarks: BookmarksAdapter,
 	wallabag: WallabagAdapter,
@@ -20,7 +19,6 @@ const adapters = {
 	sync: SyncAdapter,
 };
 
-// Cache for instantiated adapters to avoid recreating them
 const adapterCache = new Map<keyof typeof adapters, ReadItLaterAPI>();
 
 export const availableBackends = Object.keys(

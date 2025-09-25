@@ -37,7 +37,6 @@ const CACHE_VERSION = "1.0";
 const CACHE_EXPIRY_KEY = "filter_list_cache_expiry";
 const CACHE_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours
 
-// Injectable filter list sources (can be overridden for testing)
 let filterListSources: FilterListSource[] = [];
 
 /**
@@ -77,9 +76,7 @@ export async function loadFilterListContent(
 	url: string,
 ): Promise<FilterListContent> {
 	try {
-		// Handle different URL schemes
 		if (url.startsWith("data:")) {
-			// Data URL - decode base64 content
 			const base64Match = url.match(/^data:text\/plain;base64,(.+)$/);
 			if (base64Match) {
 				const content = atob(base64Match[1]);
@@ -93,13 +90,10 @@ export async function loadFilterListContent(
 		}
 
 		if (url.startsWith("file://")) {
-			// File URL - try to read local file (works in Node.js/test environments)
 			try {
-				// Check if we're in a Node.js environment (test runner)
 				if (typeof process !== "undefined" && process.versions?.node) {
 					const fs = await import("node:fs/promises");
 
-					// Convert file:// URL to local path
 					const filePath = url.replace("file://", "");
 					const content = await fs.readFile(filePath, "utf-8");
 
@@ -110,7 +104,6 @@ export async function loadFilterListContent(
 						etag: undefined,
 					};
 				} else {
-					// Browser environment - not supported
 					logger.warn(`File URLs not supported in browser environment: ${url}`);
 					return { name: "file-url", content: "" };
 				}
@@ -120,7 +113,6 @@ export async function loadFilterListContent(
 			}
 		}
 
-		// HTTP/HTTPS URLs - use fetch
 		const response = await fetch(url);
 		if (!response.ok) {
 			throw new Error(`Failed to fetch filter list: ${response.status}`);
@@ -152,7 +144,6 @@ export async function loadCachedFilterLists(): Promise<FilterRule[] | null> {
 		const cachedVersion = result[`${CACHE_KEY}_version`];
 		const cacheExpiry = result[CACHE_EXPIRY_KEY];
 
-		// Check if cache is valid and not expired
 		if (
 			cachedRules &&
 			cachedVersion === CACHE_VERSION &&
@@ -231,7 +222,6 @@ export async function loadFilterLists(): Promise<{
 				const parsed = parseCompleteFilterList(content.content);
 				allRules.push(...parsed.rules);
 
-				// Use metadata from parser
 				const version =
 					parsed.metadata.lastModified || parsed.metadata.version || "unknown";
 				versions[source.name] = version;
@@ -273,10 +263,8 @@ export async function refreshFilterLists(): Promise<{
 }> {
 	logger.info("Manually refreshing filter lists...");
 
-	// Clear cache
 	await clearFilterListCache();
 
-	// Load fresh filter lists
 	return await loadFilterLists();
 }
 
@@ -285,13 +273,10 @@ export async function refreshFilterLists(): Promise<{
  * This is a convenience function that loads remote lists and initializes the cleaner
  */
 export async function initializeUrlCleanerWithRemoteLists(): Promise<void> {
-	// Initialize filter list manager with default sources if not already done
 	initializeFilterListManager();
 
-	// Try to load cached filter lists first
 	const cachedRules = await loadCachedFilterLists();
 	if (cachedRules && cachedRules.length > 0) {
-		// Use cached rules
 		await initializeWithRawFilterLists([
 			{
 				name: "cached",
@@ -316,18 +301,15 @@ export async function initializeUrlCleanerWithRemoteLists(): Promise<void> {
 		return;
 	}
 
-	// No valid cache, load from remote sources
 	logger.info(
 		"No valid cache found, loading filter lists from remote sources...",
 	);
 	const { rules, results, versions } = await loadFilterLists();
 
-	// Save to cache for future use
 	if (rules.length > 0) {
 		await saveCachedFilterLists(rules, versions);
 	}
 
-	// Convert results to raw content format
 	const filterLists = results.map((result) => ({
 		name: result.name,
 		content: result.rules
@@ -343,6 +325,5 @@ export async function initializeUrlCleanerWithRemoteLists(): Promise<void> {
 			.join("\n"),
 	}));
 
-	// Initialize the cleaner
 	await initializeWithRawFilterLists(filterLists);
 }

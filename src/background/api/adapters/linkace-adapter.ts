@@ -23,7 +23,6 @@ export const linkaceSettingsSchema = v.merge([
 export type LinkaceSettings = v.Input<typeof linkaceSettingsSchema>;
 export type LinkaceConfig = v.Input<typeof linkaceConfigSchema>;
 
-// Valibot schemas for API responses based on LinkAce API documentation
 const linkaceTagSchema = v.object({
 	id: v.number(),
 	name: v.string(),
@@ -41,7 +40,6 @@ const linkaceLinkSchema = v.object({
 	description: v.optional(v.nullable(v.string())),
 	created_at: v.string(),
 	updated_at: v.optional(v.nullable(v.string())),
-	// Additional fields that may be present
 	lists: v.optional(v.array(linkaceListSchema)),
 	tags: v.optional(v.array(linkaceTagSchema)),
 	visibility: v.optional(v.number()),
@@ -51,7 +49,6 @@ const linkaceLinkSchema = v.object({
 	thumbnail: v.optional(v.nullable(v.string())),
 });
 
-// Error response schemas
 const linkaceErrorSchema = v.object({
 	message: v.string(),
 	errors: v.optional(v.record(v.string(), v.array(v.string()))),
@@ -118,20 +115,17 @@ export class LinkaceAdapter
 		{ name: "token", label: "API Token" },
 	];
 
-	// TokenizedAdapter interface implementation
 	getServiceName(): string {
 		return "linkace";
 	}
 
 	getTokenRefreshConfig(): TokenRefreshConfig {
-		// LinkAce uses static API tokens, no refresh needed
 		throw new Error(
 			"LinkAce uses static API tokens, no refresh configuration available",
 		);
 	}
 
 	createTokenMetadata(_tokenData: Record<string, unknown>) {
-		// For static tokens, create a simple metadata structure
 		const now = Date.now();
 		return {
 			accessToken: this.token,
@@ -149,7 +143,6 @@ export class LinkaceAdapter
 	}
 
 	getAuthEndpoint(): string {
-		// LinkAce doesn't have a traditional auth endpoint
 		return "";
 	}
 
@@ -157,11 +150,9 @@ export class LinkaceAdapter
 		this.apiUrl = settings.apiConfig.url;
 		this.token = settings.apiConfig.token;
 
-		// Store the static token in the token manager
 		const tokenMetadata = this.createTokenMetadata({});
 		await tokenManager.storeToken(this.getServiceName(), tokenMetadata);
 
-		// Initialize the API client
 		this.apiClient = createApiClient(this, {
 			baseUrl: this.apiUrl,
 			rateLimit: {
@@ -190,7 +181,6 @@ export class LinkaceAdapter
 		});
 		const validatedData = v.parse(linkaceSaveResponseSchema, response.data);
 
-		// Check if it's an error response
 		if ("message" in validatedData) {
 			throw new Error(`Failed to save article: ${validatedData.message}`);
 		}
@@ -214,7 +204,6 @@ export class LinkaceAdapter
 			);
 			const validatedData = v.parse(linkaceSyncResponseSchema, response.data);
 
-			// Check if it's an error response
 			if ("message" in validatedData) {
 				throw new Error(`Failed to sync articles: ${validatedData.message}`);
 			}
@@ -223,11 +212,9 @@ export class LinkaceAdapter
 				...validatedData.data.map((item) => this.mapArticle(item)),
 			);
 
-			// Check if there are more pages
 			if (validatedData.meta) {
 				hasMorePages = currentPage < validatedData.meta.last_page;
 			} else {
-				// If no meta information, assume no more pages if we got less than perPage items
 				hasMorePages = validatedData.data.length === perPage;
 			}
 
@@ -237,12 +224,10 @@ export class LinkaceAdapter
 		return allArticles;
 	}
 
-	// Cleanup method to clear tokens when adapter is no longer needed
 	public async cleanup(): Promise<void> {
 		await this.apiClient.clearToken();
 	}
 
-	// Method to get token health information for debugging
 	public getTokenHealth(): {
 		isValid: boolean;
 		expiresAt?: string;

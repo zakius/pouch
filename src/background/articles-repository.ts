@@ -47,10 +47,8 @@ export class ArticlesRepository {
 	async findSaved(url: string): Promise<Article | undefined> {
 		const articles = await this.getAllArticles();
 
-		// Get canonical URL for comparison
 		const canonicalUrl = await canonicalizeUrl(url);
 
-		// Look for existing article by comparing canonical URLs
 		const existingArticle = articles.find((article) => {
 			const articleCanonicalUrl = article.canonicalUrl || article.url;
 			return articleCanonicalUrl === canonicalUrl;
@@ -95,7 +93,6 @@ export class ArticlesRepository {
 		const api = await this.getApi();
 		logger.info("Saving article:", article);
 
-		// Always calculate canonical URL for storage
 		const canonicalUrl = await canonicalizeUrl(article.url);
 
 		const urlToSave = this.settings.normalizeOnSave
@@ -108,7 +105,6 @@ export class ArticlesRepository {
 				title: article.title,
 			});
 
-			// Add canonical URL to the saved article
 			const articleWithCanonicalUrl = {
 				...savedArticle,
 				canonicalUrl: canonicalUrl,
@@ -123,7 +119,6 @@ export class ArticlesRepository {
 		} catch (error) {
 			logger.error("Error saving article through cache:", error);
 			
-			// If the error is related to authentication, try to re-initialize the API
 			if (error instanceof Error && error.message.includes("No token found")) {
 				logger.warn("Authentication error detected, attempting to re-initialize API...");
 				this.api = null; // Clear the cached API instance
@@ -178,7 +173,6 @@ export class ArticlesRepository {
 			const allArticles = await api.sync();
 			logger.debug(`Synced ${allArticles.length} articles from API`);
 
-			// Add canonical URLs to all articles
 			const articlesWithCanonicalUrls = await Promise.all(
 				allArticles.map(async (article) => {
 					const canonicalUrl = await canonicalizeUrl(article.url);
@@ -203,7 +197,6 @@ export class ArticlesRepository {
 			};
 		} catch (error) {
 			logger.error("Error syncing cache with API:", error);
-			// Return current cached articles instead of throwing
 			const currentArticles = await this.getAllArticles();
 			return {
 				items: currentArticles,

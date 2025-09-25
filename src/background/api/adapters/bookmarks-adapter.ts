@@ -13,7 +13,6 @@ export const bookmarksSettingsSchema = v.merge([
 
 export type BookmarksSettings = v.Input<typeof bookmarksSettingsSchema>;
 
-// Firefox WebExtensions bookmarks API types
 interface FirefoxBookmarkTreeNode {
 	id: string;
 	parentId?: string;
@@ -32,13 +31,11 @@ export class BookmarksAdapter implements ReadItLaterAPI<BookmarksSettings> {
 	private readonly POUCH_FOLDER_NAME = "Pouch";
 
 	async initialize(): Promise<void> {
-		// Ensure the Pouch folder exists
 		await this.ensurePouchFolder();
 	}
 
 	async testConnection(): Promise<boolean> {
 		try {
-			// Test if we can access the bookmarks API
 			await this.ensurePouchFolder();
 			return true;
 		} catch (error) {
@@ -52,14 +49,12 @@ export class BookmarksAdapter implements ReadItLaterAPI<BookmarksSettings> {
 			return this.pouchFolderId;
 		}
 
-		// Check if Pouch folder already exists
 		const existingFolder = await this.findPouchFolder();
 		if (existingFolder) {
 			this.pouchFolderId = existingFolder.id;
 			return this.pouchFolderId;
 		}
 
-		// Create the Pouch folder in "Other bookmarks" (folder ID "unfiled_____")
 		const folder = await browser.bookmarks.create({
 			title: this.POUCH_FOLDER_NAME,
 			parentId: "unfiled_____", // Other bookmarks folder in Firefox

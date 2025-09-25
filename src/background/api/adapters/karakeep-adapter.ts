@@ -23,14 +23,12 @@ export const karakeepSettingsSchema = v.merge([
 export type KarakeepSettings = v.Input<typeof karakeepSettingsSchema>;
 export type KarakeepConfig = v.Input<typeof karakeepConfigSchema>;
 
-// Valibot schemas for API responses based on official documentation
 const karakeepItemSchema = v.object({
 	id: v.number(),
 	title: v.string(),
 	url: v.string(),
 	createdAt: v.string(),
 	cover: v.optional(v.nullable(v.string())),
-	// Additional fields that may be present based on API docs
 	description: v.optional(v.nullable(v.string())),
 	summary: v.optional(v.nullable(v.string())),
 	content: v.optional(v.nullable(v.string())),
@@ -47,7 +45,6 @@ const karakeepItemSchema = v.object({
 	assets: v.optional(v.array(v.unknown())),
 });
 
-// Error response schemas
 const karakeepErrorSchema = v.object({
 	error: v.string(),
 	message: v.optional(v.string()),
@@ -91,20 +88,17 @@ export class KarakeepAdapter
 		{ name: "token", label: "API Token" },
 	];
 
-	// TokenizedAdapter interface implementation
 	getServiceName(): string {
 		return "karakeep";
 	}
 
 	getTokenRefreshConfig(): TokenRefreshConfig {
-		// Karakeep uses static API tokens, no refresh needed
 		throw new Error(
 			"Karakeep uses static API tokens, no refresh configuration available",
 		);
 	}
 
 	createTokenMetadata(_tokenData: Record<string, unknown>) {
-		// For static tokens, create a simple metadata structure
 		const now = Date.now();
 		return {
 			accessToken: this.token,
@@ -122,7 +116,6 @@ export class KarakeepAdapter
 	}
 
 	getAuthEndpoint(): string {
-		// Karakeep doesn't have a traditional auth endpoint
 		return "";
 	}
 
@@ -130,11 +123,9 @@ export class KarakeepAdapter
 		this.apiUrl = settings.apiConfig.url;
 		this.token = settings.apiConfig.token;
 
-		// Store the static token in the token manager
 		const tokenMetadata = this.createTokenMetadata({});
 		await tokenManager.storeToken(this.getServiceName(), tokenMetadata);
 
-		// Initialize the API client
 		this.apiClient = createApiClient(this, {
 			baseUrl: this.apiUrl,
 			rateLimit: {
@@ -159,7 +150,6 @@ export class KarakeepAdapter
 		});
 		const validatedData = v.parse(karakeepSaveResponseSchema, response.data);
 
-		// Check if it's an error response
 		if ("error" in validatedData) {
 			throw new Error(
 				`Failed to save article: ${validatedData.message || validatedData.error}`,
@@ -175,7 +165,6 @@ export class KarakeepAdapter
 		const response = await this.apiClient.get("/bookmarks");
 		const validatedData = v.parse(karakeepSyncResponseSchema, response.data);
 
-		// Check if it's an error response
 		if ("error" in validatedData) {
 			throw new Error(
 				`Failed to sync articles: ${validatedData.message || validatedData.error}`,
@@ -185,12 +174,10 @@ export class KarakeepAdapter
 		return validatedData.map(this.mapArticle);
 	}
 
-	// Cleanup method to clear tokens when adapter is no longer needed
 	public async cleanup(): Promise<void> {
 		await this.apiClient.clearToken();
 	}
 
-	// Method to get token health information for debugging
 	public getTokenHealth(): {
 		isValid: boolean;
 		expiresAt?: string;

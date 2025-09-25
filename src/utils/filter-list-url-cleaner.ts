@@ -50,52 +50,39 @@ function applyFilterRules(urlString: string): string {
 		const url = new URL(urlString);
 		const hostname = url.hostname;
 
-		// Separate regular rules from exception rules
 		const regularRules = filterRules.filter((rule) => !rule.isException);
 		const exceptionRules = filterRules.filter((rule) => rule.isException);
 
-		// Check if any regular filter rules apply to this domain
 		const applicableRegularRules = regularRules.filter((rule) => {
-			// For query parameter patterns, we need to check the actual URL
 			if (rule.pattern.startsWith("?")) {
-				// Extract the query parameter pattern: ?param=value^
 				const paramMatch = rule.pattern.match(/\?([^=]+)=([^$^]+)/);
 				if (paramMatch) {
 					const paramName = paramMatch[1];
 					const paramValue = paramMatch[2];
-					// Check if the URL has this parameter with this value
 					return url.searchParams.get(paramName) === paramValue;
 				}
 				return false;
 			}
-			// For other patterns, use hostname matching
 			return matchesPattern(hostname, rule.pattern, rule.isRegex);
 		});
 
-		// Check if any exception rules apply to this domain
 		const applicableExceptionRules = exceptionRules.filter((rule) => {
-			// For query parameter patterns, we need to check the actual URL
 			if (rule.pattern.startsWith("?")) {
-				// Extract the query parameter pattern: ?param=value^
 				const paramMatch = rule.pattern.match(/\?([^=]+)=([^$^]+)/);
 				if (paramMatch) {
 					const paramName = paramMatch[1];
 					const paramValue = paramMatch[2];
-					// Check if the URL has this parameter with this value
 					return url.searchParams.get(paramName) === paramValue;
 				}
 				return false;
 			}
-			// For other patterns, use hostname matching
 			return matchesPattern(hostname, rule.pattern, rule.isRegex);
 		});
 
 		if (applicableRegularRules.length === 0) {
-			// No regular filter rules for this domain, keep all parameters
 			return urlString;
 		}
 
-		// Collect parameters to remove from regular rules
 		const paramsToRemove = new Set<string>();
 		for (const rule of applicableRegularRules) {
 			for (const param of rule.params) {
@@ -103,19 +90,16 @@ function applyFilterRules(urlString: string): string {
 			}
 		}
 
-		// Remove parameters that are protected by exception rules
 		for (const rule of applicableExceptionRules) {
 			for (const param of rule.params) {
 				paramsToRemove.delete(param);
 			}
 		}
 
-		// Remove the parameters that are not protected by exceptions
 		for (const param of paramsToRemove) {
 			url.searchParams.delete(param);
 		}
 
-		// Remove the ? character if no parameters are left
 		if (url.searchParams.size === 0) {
 			url.search = "";
 		}
@@ -129,16 +113,13 @@ function applyFilterRules(urlString: string): string {
 
 export async function cleanUrl(urlString: string): Promise<string> {
 	try {
-		// Initialize filter rules if not already done
 		if (!isInitialized) {
 			throw new Error("URL cleaner not initialized");
 		}
 
-		// Apply filter rules if available
 		if (filterRules.length > 0) {
 			return applyFilterRules(urlString);
 		} else {
-			// If no filter rules loaded, return original URL
 			logger.warn("No filter rules loaded, returning original URL");
 			return urlString;
 		}

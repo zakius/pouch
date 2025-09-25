@@ -24,7 +24,6 @@ class Logger {
 			return data;
 		}
 
-		// Handle Error objects specially to preserve their properties
 		if (data instanceof Error) {
 			return {
 				name: data.name,

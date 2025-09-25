@@ -221,13 +221,10 @@ export class ApiClient {
 			authenticated: options.authenticated ?? true,
 		});
 
-		// Apply rate limiting
 		await this.applyRateLimit();
 
-		// Make the request with retry logic
 		const response = await this.makeRequestWithRetry(url, requestOptions, options);
 		
-		// Parse response
 		const data = await this.parseResponse<T>(response);
 		
 		return {
@@ -287,12 +284,10 @@ export class ApiClient {
 	 * Build the full URL for an endpoint
 	 */
 	private buildUrl(endpoint: string): string {
-		// Handle absolute URLs
 		if (endpoint.startsWith("http://") || endpoint.startsWith("https://")) {
 			return endpoint;
 		}
 		
-		// Ensure base URL ends with / and endpoint doesn't start with /
 		const baseUrl = this.config.baseUrl.endsWith("/") 
 			? this.config.baseUrl.slice(0, -1) 
 			: this.config.baseUrl;
@@ -310,7 +305,6 @@ export class ApiClient {
 			...options.headers,
 		};
 
-		// Add authentication if requested
 		if (options.authenticated !== false) {
 			try {
 				const authHeader = await this.getAuthHeader();
@@ -319,7 +313,6 @@ export class ApiClient {
 				}
 			} catch (error) {
 				logger.warn(`Failed to get auth header for ${this.serviceName}:`, error);
-				// Continue without auth header - let the request fail and be handled by retry logic
 			}
 		}
 
@@ -360,7 +353,6 @@ export class ApiClient {
 	): Promise<Response> {
 		const timeout = requestOptions.timeout || this.config.timeoutMs;
 		
-		// Create abort controller for timeout
 		const controller = new AbortController();
 		const timeoutId = setTimeout(() => controller.abort(), timeout);
 
@@ -372,7 +364,6 @@ export class ApiClient {
 
 			clearTimeout(timeoutId);
 
-			// Handle authentication failures
 			if ((response.status === 401 || response.status === 403) && 
 				requestOptions.authenticated !== false && 
 				this.config.autoRetryOnAuth &&
@@ -380,16 +371,13 @@ export class ApiClient {
 				
 				logger.warn(`Authentication failed (${response.status}) for ${this.serviceName}, attempt ${attempt}`);
 				
-				// Try to refresh token and retry
 				const refreshResult = await this.handleAuthFailure();
 				if (refreshResult && attempt < this.config.maxAuthRetries) {
-					// Retry with new token
 					const newOptions = await this.buildRequestOptions(requestOptions);
 					return this.makeRequestWithRetry(url, newOptions, requestOptions, attempt + 1);
 				}
 			}
 
-			// Handle rate limiting
 			if (response.status === 429) {
 				await this.handleRateLimit(response);
 				if (attempt <= this.config.rateLimit.maxRetries) {
@@ -397,7 +385,6 @@ export class ApiClient {
 				}
 			}
 
-			// Check for low rate limit
 			this.checkRateLimit(response);
 
 			return response;
@@ -417,14 +404,12 @@ export class ApiClient {
 	 */
 	private async handleAuthFailure(): Promise<boolean> {
 		try {
-			// First, try token refresh if supported
-			const refreshSuccess = await this.attemptTokenRefresh();
+		const refreshSuccess = await this.attemptTokenRefresh();
 			if (refreshSuccess) {
 				return true;
 			}
 
-			// If refresh failed or is not supported, try full re-authentication
-			logger.warn(`Token refresh failed for ${this.serviceName}, attempting full re-authentication`);
+		logger.warn(`Token refresh failed for ${this.serviceName}, attempting full re-authentication`);
 			return await this.attemptReAuthentication();
 		} catch (error) {
 			logger.error(`Error handling auth failure for ${this.serviceName}:`, error);
@@ -437,16 +422,14 @@ export class ApiClient {
 	 */
 	private async attemptTokenRefresh(): Promise<boolean> {
 		try {
-			// Check if this service supports token refresh
-			if (!this.authHandlers.getTokenRefreshConfig) {
+		if (!this.authHandlers.getTokenRefreshConfig) {
 				logger.debug(`${this.serviceName} doesn't support token refresh`);
 				return false;
 			}
 
 			const refreshConfig = this.authHandlers.getTokenRefreshConfig();
 
-			// Attempt to refresh the token
-			const refreshResult = await tokenManager.refreshToken(
+		const refreshResult = await tokenManager.refreshToken(
 				this.serviceName,
 				refreshConfig,
 			);
@@ -471,17 +454,14 @@ export class ApiClient {
 	 */
 	private async attemptReAuthentication(): Promise<boolean> {
 		try {
-			// Check if the service supports re-authentication
-			if (!this.authHandlers.reAuthenticate) {
+		if (!this.authHandlers.reAuthenticate) {
 				logger.warn(`${this.serviceName} doesn't support re-authentication`);
 				return false;
 			}
 
-			// Clear existing tokens first
-			await tokenManager.clearToken(this.serviceName);
+		await tokenManager.clearToken(this.serviceName);
 
-			// Perform full re-authentication
-			await this.authHandlers.reAuthenticate();
+		await this.authHandlers.reAuthenticate();
 			
 			logger.info(`Full re-authentication successful for ${this.serviceName}`);
 			return true;
@@ -556,24 +536,20 @@ export class ApiClient {
 		} else if (contentType.includes("text/")) {
 			return response.text() as Promise<T>;
 		} else {
-			// For other content types, return the response as-is
-			return response as unknown as T;
+		return response as unknown as T;
 		}
 	}
 }
 
-/**
- * Factory function to create an ApiClient for a given adapter
- */
 export function createApiClient(
 	adapter: TokenizedAdapter,
 	config?: Partial<ApiClientConfig>,
 ): ApiClient {
 	const authHandlers: AuthHandlers = {
-		getTokenRefreshConfig: () => adapter.getTokenRefreshConfig(),
+		getTokenRefreshConfig: () => adapter.getTokenRefreshConfig.call(adapter),
 		reAuthenticate: adapter.reAuthenticate ? (() => {
 			const reAuth = adapter.reAuthenticate;
-			return reAuth ? reAuth() : Promise.resolve();
+			return reAuth ? reAuth.call(adapter) : Promise.resolve();
 		}) : undefined,
 	};
 

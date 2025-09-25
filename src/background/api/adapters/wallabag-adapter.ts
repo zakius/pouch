@@ -27,7 +27,6 @@ export const wallabagSettingsSchema = v.merge([
 export type WallabagSettings = v.Input<typeof wallabagSettingsSchema>;
 export type WallabagConfig = v.Input<typeof wallabagConfigSchema>;
 
-// Valibot schemas for API responses based on official documentation
 const wallabagTagSchema = v.object({
 	id: v.number(),
 	name: v.string(),
@@ -39,7 +38,6 @@ const wallabagItemSchema = v.object({
 	url: v.string(),
 	created_at: v.string(),
 	tags: v.optional(v.array(wallabagTagSchema)),
-	// Additional fields that may be present
 	content: v.optional(v.nullable(v.string())),
 	excerpt: v.optional(v.string()),
 	domain_name: v.optional(v.string()),
@@ -126,7 +124,6 @@ export class WallabagAdapter
 		{ name: "password", label: "Password" },
 	];
 
-	// TokenizedAdapter interface implementation
 	getServiceName(): string {
 		return "wallabag";
 	}
@@ -147,7 +144,6 @@ export class WallabagAdapter
 		const now = Date.now();
 		const expiresIn = tokenData.expires_in || 3600; // Default to 1 hour
 
-		// Ensure token type is properly capitalized
 		const tokenType = tokenData.token_type 
 			? tokenData.token_type.charAt(0).toUpperCase() + tokenData.token_type.slice(1).toLowerCase()
 			: "Bearer";
@@ -182,14 +178,12 @@ export class WallabagAdapter
 		this.config = settings.apiConfig;
 		this.apiUrl = this.config.url;
 		
-		// Validate that password is provided
 		if (!this.config.password) {
 			throw new Error("Password is required for Wallabag authentication");
 		}
 		
 		await this.authenticate();
 
-		// Initialize the API client
 		this.apiClient = createApiClient(this, {
 			baseUrl: this.apiUrl,
 			rateLimit: {
@@ -233,7 +227,6 @@ export class WallabagAdapter
 		const tokenData = await response.json() as Record<string, unknown>;
 		console.log("Wallabag API response:", tokenData);
 		
-		// Check if the response contains an error (OAuth error responses)
 		if (tokenData.error) {
 			const errorMessage = (tokenData.error_description as string) || (tokenData.message as string) || (tokenData.error as string);
 			throw new Error(`Wallabag authentication failed: ${errorMessage}`);
@@ -258,12 +251,10 @@ export class WallabagAdapter
 		});
 	}
 
-	// Cleanup method to clear tokens when adapter is no longer needed
 	public async cleanup(): Promise<void> {
 		await this.apiClient.clearToken();
 	}
 
-	// Method to get token health information for debugging
 	public getTokenHealth(): {
 		isValid: boolean;
 		expiresAt?: string;
@@ -287,7 +278,6 @@ export class WallabagAdapter
 		});
 		const validatedData = v.parse(wallabagSaveResponseSchema, response.data);
 
-		// Check if it's an error response
 		if ("error" in validatedData) {
 			throw new Error(
 				`Failed to save article: ${validatedData.error_description || validatedData.message || validatedData.error}`,
@@ -307,7 +297,6 @@ export class WallabagAdapter
 		);
 		const validatedFirstData = v.parse(wallabagSyncResponseSchema, firstResponse.data);
 
-		// Check if it's an error response
 		if ("error" in validatedFirstData) {
 			throw new Error(
 				`Failed to get articles: ${validatedFirstData.error_description || validatedFirstData.message || validatedFirstData.error}`,
@@ -327,7 +316,6 @@ export class WallabagAdapter
 			);
 			const validatedData = v.parse(wallabagSyncResponseSchema, response.data);
 
-			// Check if it's an error response
 			if ("error" in validatedData) {
 				throw new Error(
 					`Failed to get articles: ${validatedData.error_description || validatedData.message || validatedData.error}`,

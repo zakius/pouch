@@ -272,11 +272,9 @@ async function initialize(): Promise<void> {
 		logger.info("Background script initialized");
 		await initializeUrlCanonizer();
 
-		// Initialize token manager and load existing tokens
 		await tokenManager.loadTokens();
 		logger.info("Token manager initialized");
 
-		// Refresh filter lists on startup to ensure they're up to date
 		try {
 			logger.info("Refreshing filter lists on startup...");
 			await refreshFilterLists();
@@ -290,7 +288,6 @@ async function initialize(): Promise<void> {
 			await articlesRepository.syncWithAPI();
 		} catch (error) {
 			logger.warn("Failed to sync during initialization:", error);
-			// Don't fail initialization if sync fails - this is expected for unconfigured APIs
 		}
 		browser.contextMenus.create({
 			id: "save-link",
@@ -303,7 +300,6 @@ async function initialize(): Promise<void> {
 			contexts: ["browser_action"],
 		});
 		browser.alarms.create("refresh", { periodInMinutes: REFRESH_INTERVAL });
-		// Create alarm for filter list refresh (once per day)
 		browser.alarms.create("refresh-filters", { periodInMinutes: 24 * 60 });
 		browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 			if (

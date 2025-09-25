@@ -22,7 +22,6 @@ export const raindropSettingsSchema = v.merge([
 export type RaindropSettings = v.Input<typeof raindropSettingsSchema>;
 export type RaindropConfig = v.Input<typeof raindropConfigSchema>;
 
-// Valibot schemas for API responses based on official documentation
 const raindropItemSchema = v.object({
 	_id: v.number(),
 	title: v.string(),
@@ -30,7 +29,6 @@ const raindropItemSchema = v.object({
 	created: v.string(),
 	cover: v.optional(v.nullable(v.string())),
 	tags: v.array(v.string()),
-	// Additional fields that may be present
 	excerpt: v.optional(v.nullable(v.string())),
 	type: v.optional(v.nullable(v.string())),
 	domain: v.optional(v.nullable(v.string())),
@@ -43,7 +41,6 @@ const raindropItemSchema = v.object({
 	),
 });
 
-// Error response schemas based on official documentation
 const raindropErrorSchema = v.object({
 	result: v.literal(false),
 	error: v.optional(v.union([v.number(), v.string()])),
@@ -106,20 +103,17 @@ export class RaindropAdapter
 	private apiClient!: ApiClient;
 	formConfig = [{ name: "apiKey", label: "API Key (Test Token)" }];
 
-	// TokenizedAdapter interface implementation
 	getServiceName(): string {
 		return "raindrop";
 	}
 
 	getTokenRefreshConfig(): TokenRefreshConfig {
-		// Raindrop uses static API keys, no refresh needed
 		throw new Error(
 			"Raindrop uses static API keys, no refresh configuration available",
 		);
 	}
 
 	createTokenMetadata(_tokenData: Record<string, unknown>) {
-		// For static tokens, create a simple metadata structure
 		const now = Date.now();
 		return {
 			accessToken: this.apiKey,
@@ -137,7 +131,6 @@ export class RaindropAdapter
 	}
 
 	getAuthEndpoint(): string {
-		// Raindrop doesn't have a traditional auth endpoint
 		return "";
 	}
 
@@ -145,11 +138,9 @@ export class RaindropAdapter
 		const config = settings.apiConfig;
 		this.apiKey = config.apiKey;
 
-		// Store the static token in the token manager
 		const tokenMetadata = this.createTokenMetadata({});
 		await tokenManager.storeToken(this.getServiceName(), tokenMetadata);
 
-		// Initialize the API client
 		this.apiClient = createApiClient(this, {
 			baseUrl: this.apiUrl,
 			rateLimit: {
@@ -216,12 +207,10 @@ export class RaindropAdapter
 		return allArticles;
 	}
 
-	// Cleanup method to clear tokens when adapter is no longer needed
 	public async cleanup(): Promise<void> {
 		await this.apiClient.clearToken();
 	}
 
-	// Method to get token health information for debugging
 	public getTokenHealth(): {
 		isValid: boolean;
 		expiresAt?: string;
