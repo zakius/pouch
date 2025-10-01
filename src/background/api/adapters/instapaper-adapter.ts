@@ -1,11 +1,11 @@
 import * as v from "valibot";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
+import { logger } from "../../../utils/logger";
 import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
 import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
 import type { TokenizedAdapter } from "../tokenized-adapter";
-import { logger } from "../../../utils/logger";
 
 export const instapaperConfigSchema = v.object({
 	consumerKey: v.string(),
@@ -96,7 +96,9 @@ interface InstapaperError {
 	message: string;
 }
 
-export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, TokenizedAdapter {
+export class InstapaperAdapter
+	implements ReadItLaterAPI<InstapaperSettings>, TokenizedAdapter
+{
 	public readonly displayName = "Instapaper";
 	private apiUrl = "https://www.instapaper.com";
 	private config!: InstapaperConfig;
@@ -114,7 +116,9 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
 	}
 
 	getTokenRefreshConfig(): TokenRefreshConfig {
-		throw new Error("Instapaper uses OAuth 1.0a, no refresh configuration available");
+		throw new Error(
+			"Instapaper uses OAuth 1.0a, no refresh configuration available",
+		);
 	}
 
 	createTokenMetadata(_tokenData: Record<string, unknown>) {
@@ -138,11 +142,10 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
 		return `${this.apiUrl}/api/1/oauth/access_token`;
 	}
 
-	/**
-	 * Perform full re-authentication when tokens are invalid
-	 */
 	async reAuthenticate(): Promise<void> {
-		logger.info(`Performing full re-authentication for ${this.getServiceName()}`);
+		logger.info(
+			`Performing full re-authentication for ${this.getServiceName()}`,
+		);
 		await this.authenticate();
 	}
 	async initialize(settings: InstapaperSettings): Promise<void> {
@@ -254,9 +257,7 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
 				receivedBookmarks = [];
 			}
 			if (receivedBookmarks.length === limit) {
-				await new Promise((resolve) =>
-					setTimeout(resolve, this.RATE_LIMIT_DELAY),
-				);
+				await new Promise((resolve) => setTimeout(resolve, 1000));
 			}
 		} while (receivedBookmarks.length === limit);
 		return allArticles;

@@ -3,9 +3,9 @@ import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
 import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
+import { type ApiClient, createApiClient } from "../api-client";
 import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
 import type { TokenizedAdapter } from "../tokenized-adapter";
-import { createApiClient, type ApiClient } from "../api-client";
 
 export const linkaceConfigSchema = v.object({
 	url: v.string([v.url()]),

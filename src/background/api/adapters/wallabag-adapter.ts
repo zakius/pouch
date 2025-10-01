@@ -1,12 +1,12 @@
 import * as v from "valibot";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
+import { logger } from "../../../utils/logger";
 import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
+import { type ApiClient, createApiClient } from "../api-client";
 import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
 import type { TokenizedAdapter } from "../tokenized-adapter";
-import { createApiClient, type ApiClient } from "../api-client";
-import { logger } from "../../../utils/logger";
 
 export const wallabagConfigSchema = v.object({
 	url: v.string([v.url()]),
@@ -144,8 +144,9 @@ export class WallabagAdapter
 		const now = Date.now();
 		const expiresIn = tokenData.expires_in || 3600; // Default to 1 hour
 
-		const tokenType = tokenData.token_type 
-			? tokenData.token_type.charAt(0).toUpperCase() + tokenData.token_type.slice(1).toLowerCase()
+		const tokenType = tokenData.token_type
+			? tokenData.token_type.charAt(0).toUpperCase() +
+				tokenData.token_type.slice(1).toLowerCase()
 			: "Bearer";
 
 		return {
@@ -167,21 +168,20 @@ export class WallabagAdapter
 		return `${this.apiUrl}/oauth/v2/token`;
 	}
 
-	/**
-	 * Perform full re-authentication when refresh tokens are invalid
-	 */
 	async reAuthenticate(): Promise<void> {
-		logger.info(`Performing full re-authentication for ${this.getServiceName()}`);
+		logger.info(
+			`Performing full re-authentication for ${this.getServiceName()}`,
+		);
 		await this.authenticate();
 	}
 	async initialize(settings: WallabagSettings): Promise<void> {
 		this.config = settings.apiConfig;
 		this.apiUrl = this.config.url;
-		
+
 		if (!this.config.password) {
 			throw new Error("Password is required for Wallabag authentication");
 		}
-		
+
 		await this.authenticate();
 
 		this.apiClient = createApiClient(this, {
@@ -202,13 +202,13 @@ export class WallabagAdapter
 			username: this.config.username,
 			password: this.config.password || "",
 		});
-		
+
 		console.log("Wallabag authentication request:", {
 			url: this.getAuthEndpoint(),
 			body: requestBody.toString(),
 			hasPassword: !!this.config.password,
 		});
-		
+
 		const response = await fetch(this.getAuthEndpoint(), {
 			method: "POST",
 			headers: {
@@ -224,21 +224,29 @@ export class WallabagAdapter
 			);
 		}
 
-		const tokenData = await response.json() as Record<string, unknown>;
+		const tokenData = (await response.json()) as Record<string, unknown>;
 		console.log("Wallabag API response:", tokenData);
-		
+
 		if (tokenData.error) {
-			const errorMessage = (tokenData.error_description as string) || (tokenData.message as string) || (tokenData.error as string);
+			const errorMessage =
+				(tokenData.error_description as string) ||
+				(tokenData.message as string) ||
+				(tokenData.error as string);
 			throw new Error(`Wallabag authentication failed: ${errorMessage}`);
 		}
-		
+
 		let validatedTokenData: v.Output<typeof wallabagTokenResponseSchema>;
 		try {
 			validatedTokenData = v.parse(wallabagTokenResponseSchema, tokenData);
 		} catch (validationError: unknown) {
-			console.error("Validation error for Wallabag token response:", validationError);
+			console.error(
+				"Validation error for Wallabag token response:",
+				validationError,
+			);
 			console.error("Raw token data:", tokenData);
-			throw new Error(`Invalid token response from Wallabag API: ${validationError instanceof Error ? validationError.message : 'Unknown validation error'}`);
+			throw new Error(
+				`Invalid token response from Wallabag API: ${validationError instanceof Error ? validationError.message : "Unknown validation error"}`,
+			);
 		}
 
 		const tokenMetadata = this.createTokenMetadata(validatedTokenData);
@@ -265,7 +273,9 @@ export class WallabagAdapter
 
 	async testConnection(): Promise<boolean> {
 		try {
-			return await this.apiClient.testConnection("/api/entries.json?page=1&perPage=1");
+			return await this.apiClient.testConnection(
+				"/api/entries.json?page=1&perPage=1",
+			);
 		} catch (error) {
 			console.error("Wallabag connection test failed:", error);
 			return false;
@@ -295,7 +305,10 @@ export class WallabagAdapter
 		const firstResponse = await this.apiClient.get(
 			`/api/entries.json?page=1&perPage=${perPage}&detail=metadata`,
 		);
-		const validatedFirstData = v.parse(wallabagSyncResponseSchema, firstResponse.data);
+		const validatedFirstData = v.parse(
+			wallabagSyncResponseSchema,
+			firstResponse.data,
+		);
 
 		if ("error" in validatedFirstData) {
 			throw new Error(

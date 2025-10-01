@@ -26,13 +26,6 @@ export interface ParsedFilterList {
 	metadata: FilterListMetadata;
 }
 
-/**
- * Parse a filter list string and extract $removeparam rules and metadata in a single pass
- */
-/**
- * Parse expires value to Unix timestamp
- * Supports formats like "1 day", "7 days", "1 week", "1 month", etc.
- */
 function parseExpiresValue(expiresStr: string): number | undefined {
 	const trimmed = expiresStr.trim().toLowerCase();
 
@@ -221,9 +214,6 @@ export function parseFilterList(raw: string): {
 	};
 }
 
-/**
- * Parse a complete filter list string and return rules with metadata
- */
 export function parseCompleteFilterList(content: string): ParsedFilterList {
 	const { rules, metadata } = parseFilterList(content);
 	const totalLines = content.split("\n").length;
@@ -238,9 +228,6 @@ export function parseCompleteFilterList(content: string): ParsedFilterList {
 	};
 }
 
-/**
- * Check if a hostname matches a filter pattern
- */
 export function matchesPattern(
 	hostname: string,
 	pattern: string,

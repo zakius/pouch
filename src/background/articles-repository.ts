@@ -118,9 +118,11 @@ export class ArticlesRepository {
 			return articleWithCanonicalUrl;
 		} catch (error) {
 			logger.error("Error saving article through cache:", error);
-			
+
 			if (error instanceof Error && error.message.includes("No token found")) {
-				logger.warn("Authentication error detected, attempting to re-initialize API...");
+				logger.warn(
+					"Authentication error detected, attempting to re-initialize API...",
+				);
 				this.api = null; // Clear the cached API instance
 				try {
 					const newApi = await this.getApi();
@@ -128,21 +130,24 @@ export class ArticlesRepository {
 						url: urlToSave,
 						title: article.title,
 					});
-					
+
 					const retryArticleWithCanonicalUrl = {
 						...retryArticle,
 						canonicalUrl: canonicalUrl,
 					};
-					
+
 					await this.addArticle(retryArticleWithCanonicalUrl);
 					logger.info("Successfully saved article after re-authentication");
 					return retryArticleWithCanonicalUrl;
 				} catch (retryError) {
-					logger.error("Failed to save article even after re-authentication:", retryError);
+					logger.error(
+						"Failed to save article even after re-authentication:",
+						retryError,
+					);
 					throw retryError;
 				}
 			}
-			
+
 			throw error;
 		}
 	}

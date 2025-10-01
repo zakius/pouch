@@ -8,9 +8,6 @@ import { logger } from "./logger";
 let filterRules: FilterRule[] = [];
 let isInitialized = false;
 
-/**
- * Initialize the URL cleaner with an array of raw filter lists
- */
 export async function initializeWithRawFilterLists(
 	filterLists: Array<{ name: string; content: string }>,
 ): Promise<void> {

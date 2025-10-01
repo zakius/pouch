@@ -39,23 +39,14 @@ const CACHE_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 let filterListSources: FilterListSource[] = [];
 
-/**
- * Set the filter list sources (for dependency injection)
- */
 export function setFilterListSources(sources: FilterListSource[]): void {
 	filterListSources = sources;
 }
 
-/**
- * Get the current filter list sources
- */
 export function getFilterListSources(): FilterListSource[] {
 	return [...filterListSources];
 }
 
-/**
- * Reset to default filter list sources
- */
 export function resetFilterListSources(): void {
 	filterListSources = [
 		{
@@ -69,9 +60,6 @@ export function resetFilterListSources(): void {
 	];
 }
 
-/**
- * Load filter list content from various URL schemes
- */
 export async function loadFilterListContent(
 	url: string,
 ): Promise<FilterListContent> {
@@ -130,9 +118,6 @@ export async function loadFilterListContent(
 	}
 }
 
-/**
- * Load cached filter list results
- */
 export async function loadCachedFilterLists(): Promise<FilterRule[] | null> {
 	try {
 		const result = await browser.storage.local.get([
@@ -165,9 +150,6 @@ export async function loadCachedFilterLists(): Promise<FilterRule[] | null> {
 	}
 }
 
-/**
- * Save filter list results to cache
- */
 export async function saveCachedFilterLists(
 	rules: FilterRule[],
 	filterListVersions?: Record<string, string>,
@@ -186,9 +168,6 @@ export async function saveCachedFilterLists(
 	}
 }
 
-/**
- * Clear the filter list cache
- */
 export async function clearFilterListCache(): Promise<void> {
 	try {
 		await browser.storage.local.remove([
@@ -203,9 +182,6 @@ export async function clearFilterListCache(): Promise<void> {
 	}
 }
 
-/**
- * Load and parse all filter lists
- */
 export async function loadFilterLists(): Promise<{
 	rules: FilterRule[];
 	results: FilterListResult[];
@@ -244,18 +220,12 @@ export async function loadFilterLists(): Promise<{
 	return { rules: allRules, results, versions };
 }
 
-/**
- * Initialize filter list manager with default sources
- */
 export function initializeFilterListManager(): void {
 	if (filterListSources.length === 0) {
 		resetFilterListSources();
 	}
 }
 
-/**
- * Refresh filter lists (clear cache and reload)
- */
 export async function refreshFilterLists(): Promise<{
 	rules: FilterRule[];
 	results: FilterListResult[];
@@ -268,10 +238,6 @@ export async function refreshFilterLists(): Promise<{
 	return await loadFilterLists();
 }
 
-/**
- * Initialize the URL cleaner with remote filter lists
- * This is a convenience function that loads remote lists and initializes the cleaner
- */
 export async function initializeUrlCleanerWithRemoteLists(): Promise<void> {
 	initializeFilterListManager();
 

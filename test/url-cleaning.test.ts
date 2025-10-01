@@ -90,49 +90,42 @@ describe("Filter List URL Cleaning", () => {
 	});
 
 	test("should handle query parameter patterns", async () => {
-		// Test ?from=glia^$removeparam=from pattern
 		const input = "https://example.com/test?from=glia&keep=this";
 		const output = await cleanUrl(input);
 		expect(output).toBe("https://example.com/test?keep=this");
 	});
 
 	test("should not remove parameters with different values in query patterns", async () => {
-		// Test that ?from=glia^$removeparam=from only matches from=glia, not from=other
 		const input = "https://example.com/test?from=other&keep=this";
 		const output = await cleanUrl(input);
 		expect(output).toBe("https://example.com/test?from=other&keep=this");
 	});
 
 	test("should handle exception rules for utm_medium", async () => {
-		// Test that @@||rd.bizrate.com^$removeparam=utm_medium protects utm_medium on rd.bizrate.com
 		const input = "https://rd.bizrate.com/test?utm_medium=email&utm_source=newsletter&keep=this";
 		const output = await cleanUrl(input);
 		expect(output).toBe("https://rd.bizrate.com/test?utm_medium=email&keep=this");
 	});
 
 	test("should handle exception rules for utm_source", async () => {
-		// Test that @@||special-site.com^$removeparam=utm_source protects utm_source on special-site.com
 		const input = "https://special-site.com/test?utm_medium=email&utm_source=newsletter&keep=this";
 		const output = await cleanUrl(input);
 		expect(output).toBe("https://special-site.com/test?utm_source=newsletter&keep=this");
 	});
 
 	test("should apply global rules when no exception rules match", async () => {
-		// Test that global utm_medium and utm_source removal works on sites without exceptions
 		const input = "https://normal-site.com/test?utm_medium=email&utm_source=newsletter&keep=this";
 		const output = await cleanUrl(input);
 		expect(output).toBe("https://normal-site.com/test?keep=this");
 	});
 
     test("should apply global rules when no exception rules match", async () => {
-		// Test that global utm_medium and utm_source removal works on sites without exceptions
 		const input = "https://normal-site.com/test?utm_medium=email&utm_source=newsletter&keep=this&si=test";
 		const output = await cleanUrl(input);
 		expect(output).toBe("https://normal-site.com/test?keep=this");
 	});
 
 	test("should handle mixed query parameter and exception rules", async () => {
-		// Test that query parameter patterns work alongside exception rules
 		const input = "https://rd.bizrate.com/test?from=glia&utm_medium=email&utm_source=newsletter&keep=this";
 		const output = await cleanUrl(input);
 		expect(output).toBe("https://rd.bizrate.com/test?utm_medium=email&keep=this");

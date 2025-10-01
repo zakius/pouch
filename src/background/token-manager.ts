@@ -1,4 +1,3 @@
-
 import { logger } from "../utils/logger";
 
 export interface TokenMetadata {
@@ -50,9 +49,6 @@ export class TokenManager {
 		};
 	}
 
-	/**
-	 * Store a token for a service
-	 */
 	public async storeToken(
 		serviceName: string,
 		tokenData: Omit<TokenMetadata, "serviceName">,
@@ -72,21 +68,26 @@ export class TokenManager {
 		});
 	}
 
-	/**
-	 * Get a valid access token for a service
-	 */
 	public async getAccessToken(serviceName: string): Promise<string> {
 		const token = this.tokens.get(serviceName);
 		if (!token) {
-			logger.error(`No token found for service: ${serviceName}. Available services: ${Array.from(this.tokens.keys()).join(', ')}`);
-			throw new Error(`No token found for service: ${serviceName}. Please check your configuration and try re-authenticating.`);
+			logger.error(
+				`No token found for service: ${serviceName}. Available services: ${Array.from(this.tokens.keys()).join(", ")}`,
+			);
+			throw new Error(
+				`No token found for service: ${serviceName}. Please check your configuration and try re-authenticating.`,
+			);
 		}
 
 		if (this.needsRefresh(token)) {
-			logger.info(`Token for ${serviceName} needs refresh, attempting refresh...`);
+			logger.info(
+				`Token for ${serviceName} needs refresh, attempting refresh...`,
+			);
 			const refreshResult = await this.refreshToken(serviceName);
 			if (!refreshResult.success) {
-				logger.error(`Token refresh failed for service: ${serviceName}. ${refreshResult.error}`);
+				logger.error(
+					`Token refresh failed for service: ${serviceName}. ${refreshResult.error}`,
+				);
 				throw new Error(
 					`Token refresh failed for service: ${serviceName}. ${refreshResult.error}`,
 				);
@@ -95,23 +96,19 @@ export class TokenManager {
 
 		const updatedToken = this.tokens.get(serviceName);
 		if (!updatedToken) {
-			logger.error(`No token available for service: ${serviceName} after refresh attempt`);
+			logger.error(
+				`No token available for service: ${serviceName} after refresh attempt`,
+			);
 			throw new Error(`No token available for service: ${serviceName}`);
 		}
 
 		return updatedToken.accessToken;
 	}
 
-	/**
-	 * Get token metadata for a service
-	 */
 	public getTokenMetadata(serviceName: string): TokenMetadata | null {
 		return this.tokens.get(serviceName) || null;
 	}
 
-	/**
-	 * Check if a token is valid and not expired
-	 */
 	public isTokenValid(serviceName: string): boolean {
 		const token = this.tokens.get(serviceName);
 		if (!token) {
@@ -120,9 +117,6 @@ export class TokenManager {
 		return Date.now() < token.expiresAt;
 	}
 
-	/**
-	 * Refresh a token for a service
-	 */
 	public async refreshToken(
 		serviceName: string,
 		refreshConfig?: TokenRefreshConfig,
@@ -226,9 +220,6 @@ export class TokenManager {
 		}
 	}
 
-	/**
-	 * Clear a token for a service
-	 */
 	public async clearToken(serviceName: string): Promise<void> {
 		this.tokens.delete(serviceName);
 		this.clearRefreshTimer(serviceName);
@@ -236,17 +227,11 @@ export class TokenManager {
 		logger.info(`Token cleared for ${serviceName}`);
 	}
 
-	/**
-	 * Force re-authentication by clearing token and requiring fresh login
-	 */
 	public async forceReauth(serviceName: string): Promise<void> {
 		await this.clearToken(serviceName);
 		logger.info(`Forced re-authentication for ${serviceName}`);
 	}
 
-	/**
-	 * Clear all tokens
-	 */
 	public async clearAllTokens(): Promise<void> {
 		this.tokens.clear();
 		this.refreshTimers.forEach((timer) => {
@@ -257,9 +242,6 @@ export class TokenManager {
 		logger.info("All tokens cleared");
 	}
 
-	/**
-	 * Get health information for all tokens
-	 */
 	public getTokenHealth(): Record<
 		string,
 		{ isValid: boolean; expiresAt?: string; refreshCount?: number }
@@ -280,9 +262,6 @@ export class TokenManager {
 		return health;
 	}
 
-	/**
-	 * Load tokens from storage
-	 */
 	public async loadTokens(): Promise<void> {
 		try {
 			const result = await browser.storage.local.get(this.config.storageKey);
@@ -300,9 +279,6 @@ export class TokenManager {
 		}
 	}
 
-	/**
-	 * Save tokens to storage
-	 */
 	private async persistTokens(): Promise<void> {
 		try {
 			const tokensArray = Array.from(this.tokens.entries());
@@ -314,16 +290,10 @@ export class TokenManager {
 		}
 	}
 
-	/**
-	 * Check if a token needs refresh
-	 */
 	private needsRefresh(token: TokenMetadata): boolean {
 		return Date.now() >= token.expiresAt - this.config.refreshBufferMs;
 	}
 
-	/**
-	 * Schedule automatic token refresh
-	 */
 	private scheduleTokenRefresh(serviceName: string): void {
 		this.clearRefreshTimer(serviceName);
 
@@ -352,9 +322,6 @@ export class TokenManager {
 		);
 	}
 
-	/**
-	 * Clear refresh timer for a service
-	 */
 	private clearRefreshTimer(serviceName: string): void {
 		const timer = this.refreshTimers.get(serviceName);
 		if (timer) {
@@ -363,9 +330,6 @@ export class TokenManager {
 		}
 	}
 
-	/**
-	 * Create default refresh config for a service
-	 */
 	private createDefaultRefreshConfig(
 		serviceName: string,
 		_token: TokenMetadata,
@@ -373,9 +337,6 @@ export class TokenManager {
 		throw new Error(`No refresh config provided for service: ${serviceName}`);
 	}
 
-	/**
-	 * Update token from API response
-	 */
 	private updateTokenFromResponse(
 		serviceName: string,
 		tokenData: Record<string, unknown>,

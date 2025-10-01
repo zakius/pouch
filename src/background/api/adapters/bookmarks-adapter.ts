@@ -59,15 +59,17 @@ export class BookmarksAdapter implements ReadItLaterAPI<BookmarksSettings> {
 			title: this.POUCH_FOLDER_NAME,
 			parentId: "unfiled_____", // Other bookmarks folder in Firefox
 		});
-		
+
 		this.pouchFolderId = folder.id;
 		return folder.id;
 	}
 
 	private async findPouchFolder(): Promise<FirefoxBookmarkTreeNode | null> {
 		const tree = await browser.bookmarks.getTree();
-		
-		const findFolder = (nodes: FirefoxBookmarkTreeNode[]): FirefoxBookmarkTreeNode | null => {
+
+		const findFolder = (
+			nodes: FirefoxBookmarkTreeNode[],
+		): FirefoxBookmarkTreeNode | null => {
 			for (const node of nodes) {
 				if (node.title === this.POUCH_FOLDER_NAME && !node.url) {
 					return node;
@@ -85,7 +87,7 @@ export class BookmarksAdapter implements ReadItLaterAPI<BookmarksSettings> {
 
 	async saveArticle(article: SavingArticle): Promise<Article> {
 		const folderId = await this.ensurePouchFolder();
-		
+
 		const bookmark = await browser.bookmarks.create({
 			parentId: folderId,
 			title: article.title,
@@ -98,7 +100,7 @@ export class BookmarksAdapter implements ReadItLaterAPI<BookmarksSettings> {
 			url: bookmark.url || "",
 			created_at: new Date(bookmark.dateAdded || Date.now()).toISOString(),
 		};
-		
+
 		return savedArticle;
 	}
 
@@ -108,9 +110,9 @@ export class BookmarksAdapter implements ReadItLaterAPI<BookmarksSettings> {
 
 	async sync(): Promise<Article[]> {
 		const folderId = await this.ensurePouchFolder();
-		
+
 		const children = await browser.bookmarks.getChildren(folderId);
-		
+
 		const articles: Article[] = children
 			.filter((bookmark) => bookmark.url) // Only include bookmarks with URLs
 			.map((bookmark) => ({
@@ -119,7 +121,7 @@ export class BookmarksAdapter implements ReadItLaterAPI<BookmarksSettings> {
 				url: bookmark.url || "",
 				created_at: new Date(bookmark.dateAdded || Date.now()).toISOString(),
 			}));
-		
+
 		return articles;
 	}
 }
