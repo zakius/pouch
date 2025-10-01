@@ -95,7 +95,7 @@ export class BookmarksAdapter implements ReadItLaterAPI<BookmarksSettings> {
 		});
 
 		const savedArticle: Article = {
-			id: parseInt(bookmark.id),
+			id: parseInt(bookmark.id, 10),
 			title: bookmark.title,
 			url: bookmark.url || "",
 			created_at: new Date(bookmark.dateAdded || Date.now()).toISOString(),
@@ -116,7 +116,7 @@ export class BookmarksAdapter implements ReadItLaterAPI<BookmarksSettings> {
 		const articles: Article[] = children
 			.filter((bookmark) => bookmark.url) // Only include bookmarks with URLs
 			.map((bookmark) => ({
-				id: parseInt(bookmark.id),
+				id: parseInt(bookmark.id, 10),
 				title: bookmark.title,
 				url: bookmark.url || "",
 				created_at: new Date(bookmark.dateAdded || Date.now()).toISOString(),

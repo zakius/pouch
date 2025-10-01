@@ -79,7 +79,7 @@ export async function loadFilterListContent(
 
 		if (url.startsWith("file://")) {
 			try {
-				if (typeof process !== "undefined" && process.versions?.node) {
+				if (process?.versions?.node) {
 					const fs = await import("node:fs/promises");
 
 					const filePath = url.replace("file://", "");
