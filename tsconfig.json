@@ -9,13 +9,6 @@
 		"forceConsistentCasingInFileNames": true,
 		"allowJs": false,
 		"checkJs": false,
-		"noImplicitAny": true,
-		"strictNullChecks": true,
-		"strictFunctionTypes": true,
-		"strictBindCallApply": true,
-		"strictPropertyInitialization": true,
-		"noImplicitThis": true,
-		"alwaysStrict": true,
 		"noUnusedLocals": true,
 		"noUnusedParameters": true,
 		"noImplicitReturns": true,
@@ -23,15 +16,11 @@
 		"types": ["firefox-webext-browser", "node", "bun"],
 		"typeRoots": ["./types", "./node_modules/@types"],
 		"rootDir": "./src",
-		"baseUrl": ".",
-		"paths": {
-			"*": ["*", "types/*"]
-		},
 		"resolveJsonModule": true,
 		"isolatedModules": true,
 		"lib": ["ESNext", "DOM"],
 		"noEmit": true
 	},
-	"include": ["src/**/*.ts", "src/types/**/*.d.ts"],
+	"include": ["src/**/*.ts"],
 	"exclude": ["node_modules", "dist"]
 }
