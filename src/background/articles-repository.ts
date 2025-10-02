@@ -4,6 +4,7 @@ import { logger } from "../utils/logger";
 import type { Settings } from "../utils/settings";
 import { canonicalizeUrl } from "../utils/url-helpers";
 import type { ReadItLaterAPI } from "./api/read-it-later-adapter";
+import { FaviconManager } from "./favicon-manager";
 export class ArticlesRepository {
 	private api: ReadItLaterAPI | null = null;
 	private settings!: Settings;
@@ -115,6 +116,11 @@ export class ArticlesRepository {
 				articleWithCanonicalUrl,
 			);
 			await this.addArticle(articleWithCanonicalUrl);
+
+			// Preload favicon for the newly saved article
+			const faviconManager = FaviconManager.getInstance();
+			await faviconManager.preloadFaviconsForArticles([articleWithCanonicalUrl]);
+
 			return articleWithCanonicalUrl;
 		} catch (error) {
 			logger.error("Error saving article through cache:", error);
@@ -137,6 +143,11 @@ export class ArticlesRepository {
 					};
 
 					await this.addArticle(retryArticleWithCanonicalUrl);
+
+					// Preload favicon for the retry article
+					const faviconManager = FaviconManager.getInstance();
+					await faviconManager.preloadFaviconsForArticles([retryArticleWithCanonicalUrl]);
+
 					logger.info("Successfully saved article after re-authentication");
 					return retryArticleWithCanonicalUrl;
 				} catch (retryError) {
@@ -194,6 +205,15 @@ export class ArticlesRepository {
 						url: article.canonicalUrl,
 					}))
 				: articlesWithCanonicalUrls;
+
+			// Preload favicons for all articles in parallel
+			const faviconManager = FaviconManager.getInstance();
+			await faviconManager.preloadFaviconsForArticles(processedArticles);
+
+			// Note: Retry logic removed - simplified favicon loading handles failures gracefully
+
+			// Clean up unused favicons
+			await faviconManager.cleanupUnusedFavicons(processedArticles);
 
 			await this.updateArticles(processedArticles);
 			return {
