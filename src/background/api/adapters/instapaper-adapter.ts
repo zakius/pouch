@@ -4,7 +4,12 @@ import { baseSettingsSchema } from "../../../utils/base-settings-schema";
 import { logger } from "../../../utils/logger";
 import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
-import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
+import type {
+	ReadItLaterAPI,
+	SavingArticle,
+	SyncOptions,
+	SyncResult,
+} from "../read-it-later-adapter";
 import type { TokenizedAdapter } from "../tokenized-adapter";
 
 export const instapaperConfigSchema = v.object({
@@ -233,16 +238,25 @@ export class InstapaperAdapter
 			bookmark_id: id,
 		});
 	}
-	async sync(): Promise<Article[]> {
+	async sync(options?: SyncOptions): Promise<SyncResult> {
 		const limit = 500;
 		const allArticles: Article[] = [];
 		let receivedBookmarks: InstapaperBookmark[] = [];
+		let totalFetched = 0;
+
+		// Instapaper uses a different approach for incremental sync
+		// It uses the "have" parameter to get only new bookmarks
+		const mode = options?.mode || "overwrite";
+
 		do {
 			const have = allArticles.map((a) => a.id).join(",");
 			const params: { limit: number; have?: string } = { limit };
-			if (have) {
+
+			// For update mode, use the "have" parameter to get only new items
+			if (mode === "update" && have) {
 				params.have = have;
 			}
+
 			const data = await this._makeSignedRequest(
 				"/api/1/bookmarks/list",
 				params,
@@ -253,14 +267,27 @@ export class InstapaperAdapter
 				receivedBookmarks = validatedData.bookmarks;
 				const articles = receivedBookmarks.map((item) => this.mapArticle(item));
 				allArticles.push(...articles);
+				totalFetched += articles.length;
 			} else {
 				receivedBookmarks = [];
 			}
+
+			// Rate limiting for Instapaper API
 			if (receivedBookmarks.length === limit) {
 				await new Promise((resolve) => setTimeout(resolve, 1000));
 			}
 		} while (receivedBookmarks.length === limit);
-		return allArticles;
+
+		return {
+			articles: allArticles,
+			mode,
+			metadata: {
+				totalFetched,
+				totalProcessed: allArticles.length,
+				lastSyncTimestamp: new Date().toISOString(),
+				apiVersion: "1.0",
+			},
+		};
 	}
 	private mapArticle(item: InstapaperBookmark): Article {
 		return {

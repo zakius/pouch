@@ -1,7 +1,12 @@
 import * as v from "valibot";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
-import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
+import type {
+	ReadItLaterAPI,
+	SavingArticle,
+	SyncOptions,
+	SyncResult,
+} from "../read-it-later-adapter";
 
 export const bookmarksSettingsSchema = v.merge([
 	baseSettingsSchema,
@@ -108,7 +113,7 @@ export class BookmarksAdapter implements ReadItLaterAPI<BookmarksSettings> {
 		await browser.bookmarks.remove(id.toString());
 	}
 
-	async sync(): Promise<Article[]> {
+	async sync(options?: SyncOptions): Promise<SyncResult> {
 		const folderId = await this.ensurePouchFolder();
 
 		const children = await browser.bookmarks.getChildren(folderId);
@@ -122,6 +127,17 @@ export class BookmarksAdapter implements ReadItLaterAPI<BookmarksSettings> {
 				created_at: new Date(bookmark.dateAdded || Date.now()).toISOString(),
 			}));
 
-		return articles;
+		const mode = options?.mode || "overwrite";
+
+		return {
+			articles,
+			mode,
+			metadata: {
+				totalFetched: articles.length,
+				totalProcessed: articles.length,
+				lastSyncTimestamp: new Date().toISOString(),
+				apiVersion: "1.0",
+			},
+		};
 	}
 }

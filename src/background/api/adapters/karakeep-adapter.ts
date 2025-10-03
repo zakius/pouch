@@ -4,7 +4,12 @@ import { baseSettingsSchema } from "../../../utils/base-settings-schema";
 import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
 import { type ApiClient, createApiClient } from "../api-client";
-import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
+import type {
+	ReadItLaterAPI,
+	SavingArticle,
+	SyncOptions,
+	SyncResult,
+} from "../read-it-later-adapter";
 import type { TokenizedAdapter } from "../tokenized-adapter";
 
 export const karakeepConfigSchema = v.object({
@@ -161,8 +166,20 @@ export class KarakeepAdapter
 	async deleteArticle(id: number): Promise<void> {
 		await this.apiClient.delete(`/bookmarks/${id}`);
 	}
-	async sync(): Promise<Article[]> {
-		const response = await this.apiClient.get("/bookmarks");
+	async sync(options?: SyncOptions): Promise<SyncResult> {
+		// Build query parameters based on sync options
+		const queryParams = new URLSearchParams();
+
+		// Add incremental sync support if lastSyncTimestamp is provided
+		if (options?.lastSyncTimestamp && options.mode === "update") {
+			queryParams.set("createdAfter", options.lastSyncTimestamp);
+		}
+
+		const url = queryParams.toString()
+			? `/bookmarks?${queryParams.toString()}`
+			: "/bookmarks";
+
+		const response = await this.apiClient.get(url);
 		const validatedData = v.parse(karakeepSyncResponseSchema, response.data);
 
 		if ("error" in validatedData) {
@@ -171,7 +188,19 @@ export class KarakeepAdapter
 			);
 		}
 
-		return validatedData.map(this.mapArticle);
+		const articles = validatedData.map(this.mapArticle);
+		const mode = options?.mode || "overwrite";
+
+		return {
+			articles,
+			mode,
+			metadata: {
+				totalFetched: articles.length,
+				totalProcessed: articles.length,
+				lastSyncTimestamp: new Date().toISOString(),
+				apiVersion: "1.0",
+			},
+		};
 	}
 
 	public async cleanup(): Promise<void> {

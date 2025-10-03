@@ -41,6 +41,7 @@
 		"tabs",
 		"alarms",
 		"bookmarks",
+		"idle",
 		"*://*/*"
 	],
 	"browser_specific_settings": {

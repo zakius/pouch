@@ -4,7 +4,12 @@ import { baseSettingsSchema } from "../../../utils/base-settings-schema";
 import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
 import { type ApiClient, createApiClient } from "../api-client";
-import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
+import type {
+	ReadItLaterAPI,
+	SavingArticle,
+	SyncOptions,
+	SyncResult,
+} from "../read-it-later-adapter";
 import type { TokenizedAdapter } from "../tokenized-adapter";
 
 export const raindropConfigSchema = v.object({
@@ -180,14 +185,29 @@ export class RaindropAdapter
 			);
 		}
 	}
-	async sync(): Promise<Article[]> {
+	async sync(options?: SyncOptions): Promise<SyncResult> {
 		const perPage = 50;
 		let allArticles: Article[] = [];
 		let page = 0;
 		let totalPages = 1;
+		let totalFetched = 0;
+
+		// Build query parameters based on sync options
+		const queryParams = new URLSearchParams({
+			page: "0",
+			perpage: perPage.toString(),
+			sort: "-created",
+		});
+
+		// Add incremental sync support if lastSyncTimestamp is provided
+		if (options?.lastSyncTimestamp && options.mode === "update") {
+			queryParams.set("search", `created:>${options.lastSyncTimestamp}`);
+		}
+
 		do {
+			queryParams.set("page", page.toString());
 			const response = await this.apiClient.get(
-				`/raindrops/0?page=${page}&perpage=${perPage}&sort=-created`,
+				`/raindrops/0?${queryParams.toString()}`,
 			);
 			const validatedData = v.parse(raindropSyncResponseSchema, response.data);
 			if (!validatedData.result) {
@@ -199,12 +219,26 @@ export class RaindropAdapter
 				this.mapArticle(item),
 			);
 			allArticles = allArticles.concat(articles);
+			totalFetched += articles.length;
+
 			if (page === 0) {
 				totalPages = Math.ceil((validatedData.count || 0) / perPage);
 			}
 			page++;
 		} while (page < totalPages);
-		return allArticles;
+
+		const mode = options?.mode || "overwrite";
+
+		return {
+			articles: allArticles,
+			mode,
+			metadata: {
+				totalFetched,
+				totalProcessed: allArticles.length,
+				lastSyncTimestamp: new Date().toISOString(),
+				apiVersion: "1.0",
+			},
+		};
 	}
 
 	public async cleanup(): Promise<void> {

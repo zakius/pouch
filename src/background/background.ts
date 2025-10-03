@@ -67,7 +67,7 @@ interface Tab {
 	url?: string;
 	title?: string;
 }
-const REFRESH_INTERVAL = 5;
+const REFRESH_INTERVAL = 30; // 30 minutes - smart sync will handle full syncs when needed
 let articlesRepository: ArticlesRepository;
 let initializePromise: Promise<void> | null = null;
 async function getArticlesRepository(): Promise<ArticlesRepository> {
@@ -153,11 +153,16 @@ browser.runtime.onMessage.addListener(
 						const { FaviconManager } = await import("./favicon-manager");
 						const faviconManager = FaviconManager.getInstance();
 						try {
-							const favicon = await faviconManager.loadFavicon(message.payload.hostname);
+							const favicon = await faviconManager.loadFavicon(
+								message.payload.hostname,
+							);
 							return sendResponse({ success: true, favicon });
 						} catch (error) {
 							logger.error("Failed to load favicon:", error);
-							return sendResponse({ success: false, error: "Failed to load favicon" });
+							return sendResponse({
+								success: false,
+								error: "Failed to load favicon",
+							});
 						}
 					}
 					default:
@@ -303,7 +308,14 @@ async function initialize(): Promise<void> {
 
 		const articlesRepository = await getArticlesRepository();
 		try {
-			await articlesRepository.syncWithAPI();
+			const result = await articlesRepository.syncWithAPI({
+				mode: "overwrite",
+			});
+			logger.info("Initial sync completed", {
+				mode: result.syncResult.mode,
+				total: result.total,
+				metadata: result.syncResult.metadata,
+			});
 		} catch (error) {
 			logger.warn("Failed to sync during initialization:", error);
 		}
@@ -345,7 +357,14 @@ browser.alarms.onAlarm.addListener(async (alarm) => {
 	if (alarm.name === "refresh") {
 		try {
 			const articlesRepository = await getArticlesRepository();
-			await articlesRepository.syncWithAPI();
+			// Let the adapter decide the sync mode based on history and idle state
+			const result = await articlesRepository.syncWithAPI();
+			logger.info("Periodic sync completed", {
+				mode: result.syncResult.mode,
+				total: result.total,
+				metadata: result.syncResult.metadata,
+				syncDecision: result.syncResult.metadata?.syncDecision,
+			});
 		} catch (error) {
 			logger.error("Error refreshing articles:", error);
 		}

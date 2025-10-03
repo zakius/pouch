@@ -1,7 +1,12 @@
 import * as v from "valibot";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
-import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
+import type {
+	ReadItLaterAPI,
+	SavingArticle,
+	SyncOptions,
+	SyncResult,
+} from "../read-it-later-adapter";
 
 const STORAGE_KEY = "pouch-articles";
 export const syncSettingsSchema = v.merge([
@@ -44,7 +49,18 @@ export class SyncAdapter implements ReadItLaterAPI<SyncSettings> {
 		const filteredArticles = articles.filter((a) => a.id !== id);
 		await this._setArticlesInStorage(filteredArticles);
 	}
-	async sync(): Promise<Article[]> {
-		return this._getArticlesFromStorage();
+	async sync(options?: SyncOptions): Promise<SyncResult> {
+		const articles = await this._getArticlesFromStorage();
+		const mode = options?.mode || "overwrite";
+
+		return {
+			articles,
+			mode,
+			metadata: {
+				totalFetched: articles.length,
+				totalProcessed: articles.length,
+				lastSyncTimestamp: new Date().toISOString(),
+			},
+		};
 	}
 }

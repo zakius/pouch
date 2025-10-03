@@ -5,7 +5,13 @@ import { logger } from "../../../utils/logger";
 import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
 import { type ApiClient, createApiClient } from "../api-client";
-import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
+import type {
+	ReadItLaterAPI,
+	SavingArticle,
+	SyncMode,
+	SyncOptions,
+	SyncResult,
+} from "../read-it-later-adapter";
 import type { TokenizedAdapter } from "../tokenized-adapter";
 
 export const wallabagConfigSchema = v.object({
@@ -299,16 +305,110 @@ export class WallabagAdapter
 	async deleteArticle(id: number): Promise<void> {
 		await this.apiClient.delete(`/api/entries/${id}.json`);
 	}
-	async sync(): Promise<Article[]> {
+
+	private makeSyncDecision(options?: SyncOptions): {
+		mode: SyncMode;
+		reason: string;
+		timeSinceLastFullSync?: number;
+	} {
+		// If mode is explicitly provided, use it
+		if (options?.mode) {
+			return {
+				mode: options.mode,
+				reason: "explicit_mode",
+				timeSinceLastFullSync: options.lastFullSyncTimestamp
+					? Date.now() - options.lastFullSyncTimestamp
+					: undefined,
+			};
+		}
+
+		// If no last full sync timestamp, this is the first sync
+		if (!options?.lastFullSyncTimestamp) {
+			return {
+				mode: "overwrite",
+				reason: "first_sync",
+			};
+		}
+
+		const now = Date.now();
+		const timeSinceLastFullSync = now - options.lastFullSyncTimestamp;
+		const twentyFourHours = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+
+		// Do full sync if more than 24h since last full sync AND browser is idle
+		if (timeSinceLastFullSync >= twentyFourHours && options.isBrowserIdle) {
+			return {
+				mode: "overwrite",
+				reason: "24h_idle",
+				timeSinceLastFullSync,
+			};
+		}
+
+		// Otherwise do incremental sync
+		return {
+			mode: "update",
+			reason: "incremental",
+			timeSinceLastFullSync,
+		};
+	}
+	async sync(options?: SyncOptions): Promise<SyncResult> {
+		// Make sync mode decision based on provided data
+		const syncDecision = this.makeSyncDecision(options);
+		const mode = syncDecision.mode;
+
+		logger.info("Wallabag sync decision:", {
+			mode,
+			reason: syncDecision.reason,
+			timeSinceLastFullSync: syncDecision.timeSinceLastFullSync,
+			isBrowserIdle: options?.isBrowserIdle,
+		});
+
 		const perPage = 30;
 		const allArticles: Article[] = [];
+		let totalFetched = 0;
+
+		// Build query parameters based on sync options
+		const baseParams = (() => {
+			const params = new URLSearchParams({
+				page: "1",
+				perPage: perPage.toString(),
+				detail: "metadata",
+			});
+
+			// Add incremental sync support if lastSyncTimestamp is provided
+			// Note: Wallabag doesn't support full delta sync, so we only fetch newer items
+			// Remotely deleted items will be caught during the next full rebuild (startup)
+			if (options?.lastSyncTimestamp && mode === "update") {
+				// Convert ISO string to Unix timestamp for Wallabag API
+				const unixTimestamp = Math.floor(
+					new Date(options.lastSyncTimestamp).getTime() / 1000,
+				);
+				params.set("since", unixTimestamp.toString());
+				logger.debug("Using incremental sync with since parameter:", {
+					lastSyncTimestamp: options.lastSyncTimestamp,
+					unixTimestamp,
+					mode,
+				});
+			}
+
+			return params;
+		})();
+
 		const firstResponse = await this.apiClient.get(
-			`/api/entries.json?page=1&perPage=${perPage}&detail=metadata`,
+			`/api/entries.json?${baseParams.toString()}`,
 		);
-		const validatedFirstData = v.parse(
-			wallabagSyncResponseSchema,
-			firstResponse.data,
-		);
+
+		const validatedFirstData = (() => {
+			try {
+				return v.parse(wallabagSyncResponseSchema, firstResponse.data);
+			} catch (validationError) {
+				logger.error("Wallabag API response validation failed:", {
+					error: validationError,
+					responseData: firstResponse.data,
+					url: `/api/entries.json?${baseParams.toString()}`,
+				});
+				throw validationError;
+			}
+		})();
 
 		if ("error" in validatedFirstData) {
 			throw new Error(
@@ -316,18 +416,41 @@ export class WallabagAdapter
 			);
 		}
 
-		allArticles.push(
-			...validatedFirstData._embedded.items.map((item) =>
-				this.mapArticle(item),
-			),
+		const firstPageArticles = validatedFirstData._embedded.items.map((item) =>
+			this.mapArticle(item),
 		);
+		allArticles.push(...firstPageArticles);
+		totalFetched += firstPageArticles.length;
+
 		const total = validatedFirstData.total;
 		const totalPages = Math.ceil(total / perPage);
-		for (let page = 2; page <= totalPages; page++) {
+
+		const additionalPages = Array.from(
+			{ length: totalPages - 1 },
+			(_, index) => index + 2,
+		);
+
+		for (const page of additionalPages) {
+			const pageParams = new URLSearchParams(baseParams);
+			pageParams.set("page", page.toString());
+
 			const response = await this.apiClient.get(
-				`/api/entries.json?page=${page}&perPage=${perPage}&detail=metadata`,
+				`/api/entries.json?${pageParams.toString()}`,
 			);
-			const validatedData = v.parse(wallabagSyncResponseSchema, response.data);
+
+			const validatedData = (() => {
+				try {
+					return v.parse(wallabagSyncResponseSchema, response.data);
+				} catch (validationError) {
+					logger.error("Wallabag API pagination response validation failed:", {
+						error: validationError,
+						responseData: response.data,
+						url: `/api/entries.json?${pageParams.toString()}`,
+						page,
+					});
+					throw validationError;
+				}
+			})();
 
 			if ("error" in validatedData) {
 				throw new Error(
@@ -335,11 +458,29 @@ export class WallabagAdapter
 				);
 			}
 
-			allArticles.push(
-				...validatedData._embedded.items.map((item) => this.mapArticle(item)),
+			const pageArticles = validatedData._embedded.items.map((item) =>
+				this.mapArticle(item),
 			);
+			allArticles.push(...pageArticles);
+			totalFetched += pageArticles.length;
 		}
-		return allArticles;
+
+		return {
+			articles: allArticles,
+			mode,
+			metadata: {
+				totalFetched,
+				totalProcessed: allArticles.length,
+				lastSyncTimestamp: new Date().toISOString(),
+				apiVersion: "2.0",
+				syncDecision: {
+					reason: syncDecision.reason,
+					wasFullSync: mode === "overwrite",
+					timeSinceLastFullSync: syncDecision.timeSinceLastFullSync,
+					isBrowserIdle: options?.isBrowserIdle,
+				},
+			},
+		};
 	}
 	private mapArticle(item: WallabagItem): Article {
 		return {

@@ -18,7 +18,11 @@ export class FaviconManager {
 	async loadFavicon(hostname: string): Promise<string> {
 		// Check if already loading this hostname
 		if (this.loadingPromises.has(hostname)) {
-			logger.debug("Already loading favicon for", hostname, "- waiting for existing request");
+			logger.debug(
+				"Already loading favicon for",
+				hostname,
+				"- waiting for existing request",
+			);
 			const existingPromise = this.loadingPromises.get(hostname);
 			if (existingPromise) {
 				return await existingPromise;
@@ -63,15 +67,23 @@ export class FaviconManager {
 			for (let i = 0; i < services.length; i++) {
 				const serviceUrl = services[i];
 				const serviceName = this.getServiceName(serviceUrl);
-				
-				logger.debug(`Trying service ${i + 1}/${services.length}: ${serviceName} for ${hostname}`);
-				
+
+				logger.debug(
+					`Trying service ${i + 1}/${services.length}: ${serviceName} for ${hostname}`,
+				);
+
 				try {
-					const imageData = await this.loadImageFromUrl(serviceUrl, hostname, serviceName);
+					const imageData = await this.loadImageFromUrl(
+						serviceUrl,
+						hostname,
+						serviceName,
+					);
 					if (imageData) {
 						// Cache the successful result
 						await this.cacheFavicon(hostname, imageData);
-						logger.debug(`✅ Successfully loaded favicon for ${hostname} from ${serviceName}`);
+						logger.debug(
+							`✅ Successfully loaded favicon for ${hostname} from ${serviceName}`,
+						);
 						return imageData;
 					} else {
 						logger.debug(`❌ ${serviceName} returned no data for ${hostname}`);
@@ -80,7 +92,6 @@ export class FaviconManager {
 					logger.debug(`❌ ${serviceName} failed for ${hostname}:`, error);
 				}
 			}
-
 		} catch (error) {
 			logger.debug("Failed to load favicon for", hostname, error);
 		}
@@ -92,96 +103,111 @@ export class FaviconManager {
 		return fallback;
 	}
 
-	private async loadImageFromUrl(url: string, hostname: string, serviceName: string): Promise<string | null> {
+	private async loadImageFromUrl(
+		url: string,
+		hostname: string,
+		serviceName: string,
+	): Promise<string | null> {
 		return new Promise((resolve) => {
 			const img = new Image();
 			let resolved = false;
-			
+
 			const cleanup = () => {
 				if (!resolved) {
 					resolved = true;
 				}
 			};
-			
+
 			img.onload = () => {
 				cleanup();
-				
+
 				// Basic validation: check dimensions
 				if (img.naturalWidth === 0 || img.naturalHeight === 0) {
 					logger.debug(`${serviceName} returned 0x0 image for ${hostname}`);
 					resolve(null);
 					return;
 				}
-				
+
 				// Check if image is too large (likely an error page)
 				if (img.naturalWidth > 512 || img.naturalHeight > 512) {
-					logger.debug(`${serviceName} returned oversized image for ${hostname}: ${img.naturalWidth}x${img.naturalHeight}`);
+					logger.debug(
+						`${serviceName} returned oversized image for ${hostname}: ${img.naturalWidth}x${img.naturalHeight}`,
+					);
 					resolve(null);
 					return;
 				}
-				
+
 				// Convert to data URI
 				try {
-					const canvas = document.createElement('canvas');
-					const ctx = canvas.getContext('2d');
-					
+					const canvas = document.createElement("canvas");
+					const ctx = canvas.getContext("2d");
+
 					if (!ctx) {
-						logger.debug(`${serviceName} failed to get canvas context for ${hostname}`);
+						logger.debug(
+							`${serviceName} failed to get canvas context for ${hostname}`,
+						);
 						resolve(null);
 						return;
 					}
-					
+
 					canvas.width = img.naturalWidth;
 					canvas.height = img.naturalHeight;
 					ctx.drawImage(img, 0, 0);
-					
-					const dataUri = canvas.toDataURL('image/png');
-					logger.debug(`${serviceName} successfully converted image for ${hostname}: ${img.naturalWidth}x${img.naturalHeight}`);
+
+					const dataUri = canvas.toDataURL("image/png");
+					logger.debug(
+						`${serviceName} successfully converted image for ${hostname}: ${img.naturalWidth}x${img.naturalHeight}`,
+					);
 					resolve(dataUri);
-					
 				} catch (error) {
-					logger.debug(`${serviceName} error converting image for ${hostname}:`, error);
+					logger.debug(
+						`${serviceName} error converting image for ${hostname}:`,
+						error,
+					);
 					resolve(null);
 				}
 			};
-			
+
 			img.onerror = () => {
 				cleanup();
 				logger.debug(`${serviceName} failed to load image for ${hostname}`);
 				resolve(null);
 			};
-			
+
 			// Timeout after 3 seconds (reduced since we're trying multiple services in parallel)
 			setTimeout(() => {
 				cleanup();
 				logger.debug(`${serviceName} timeout loading image for ${hostname}`);
 				resolve(null);
 			}, 3000);
-			
+
 			// Set crossOrigin for CORS
-			img.crossOrigin = 'anonymous';
+			img.crossOrigin = "anonymous";
 			img.src = url;
 		});
 	}
 
 	private getServiceName(url: string): string {
-		if (url.includes('icon.horse')) return 'IconHorse';
-		if (url.includes('statvoo.com')) return 'Statvoo';
-		if (url.includes('unavatar.io')) return 'Unavatar';
-		if (url.includes('favicone.com')) return 'Favicone';
-		if (url.includes('yandex.net')) return 'Yandex';
-		if (url.includes('duckduckgo.com')) return 'DuckDuckGo';
-		if (url.includes('google.com/s2/favicons')) return 'Google';
-		return 'Unknown';
+		if (url.includes("icon.horse")) return "IconHorse";
+		if (url.includes("statvoo.com")) return "Statvoo";
+		if (url.includes("unavatar.io")) return "Unavatar";
+		if (url.includes("favicone.com")) return "Favicone";
+		if (url.includes("yandex.net")) return "Yandex";
+		if (url.includes("duckduckgo.com")) return "DuckDuckGo";
+		if (url.includes("google.com/s2/favicons")) return "Google";
+		return "Unknown";
 	}
 
-	private async cacheFavicon(hostname: string, faviconData: string): Promise<void> {
+	private async cacheFavicon(
+		hostname: string,
+		faviconData: string,
+	): Promise<void> {
 		try {
 			const result = await browser.storage.local.get(FAVICON_CACHE_KEY);
 			const faviconCache = result[FAVICON_CACHE_KEY] || {};
-			
+
 			faviconCache[hostname] = faviconData;
-			
+
 			// Clean up cache if it's too large
 			const entries = Object.entries(faviconCache);
 			if (entries.length > MAX_CACHE_SIZE) {
@@ -208,7 +234,9 @@ export class FaviconManager {
 		}
 	}
 
-	async preloadFaviconsForArticles(articles: Array<{ url: string }>): Promise<void> {
+	async preloadFaviconsForArticles(
+		articles: Array<{ url: string }>,
+	): Promise<void> {
 		// Extract unique hostnames
 		const hostnames = new Set<string>();
 		for (const article of articles) {
@@ -224,10 +252,14 @@ export class FaviconManager {
 		const hostnameArray = Array.from(hostnames);
 		const result = await browser.storage.local.get(FAVICON_CACHE_KEY);
 		const faviconCache = result[FAVICON_CACHE_KEY] || {};
-		
-		const uncachedHostnames = hostnameArray.filter(hostname => !faviconCache[hostname]);
 
-		logger.debug(`Preloading favicons: ${uncachedHostnames.length} uncached domains (${hostnames.size - uncachedHostnames.length} already cached)`);
+		const uncachedHostnames = hostnameArray.filter(
+			(hostname) => !faviconCache[hostname],
+		);
+
+		logger.debug(
+			`Preloading favicons: ${uncachedHostnames.length} uncached domains (${hostnames.size - uncachedHostnames.length} already cached)`,
+		);
 
 		if (uncachedHostnames.length === 0) {
 			logger.debug("All favicons already cached, skipping preload");
@@ -241,20 +273,25 @@ export class FaviconManager {
 
 		// Create worker pool with proper queue management
 		for (let i = 0; i < WORKER_POOL_SIZE; i++) {
-			workers.push(this.createFaviconWorker(uncachedHostnames, () => {
-				const currentIndex = hostnameIndex;
-				hostnameIndex++;
-				return currentIndex;
-			}));
+			workers.push(
+				this.createFaviconWorker(uncachedHostnames, () => {
+					const currentIndex = hostnameIndex;
+					hostnameIndex++;
+					return currentIndex;
+				}),
+			);
 		}
 
 		// Wait for all workers to complete
 		await Promise.allSettled(workers);
-		
+
 		logger.debug("Completed favicon preloading for all uncached domains");
 	}
 
-	private async createFaviconWorker(hostnames: string[], getNextIndex: () => number): Promise<void> {
+	private async createFaviconWorker(
+		hostnames: string[],
+		getNextIndex: () => number,
+	): Promise<void> {
 		while (true) {
 			const index = getNextIndex();
 			if (index >= hostnames.length) {
@@ -270,7 +307,9 @@ export class FaviconManager {
 		}
 	}
 
-	async cleanupUnusedFavicons(currentArticles: Array<{ url: string }>): Promise<void> {
+	async cleanupUnusedFavicons(
+		currentArticles: Array<{ url: string }>,
+	): Promise<void> {
 		try {
 			const result = await browser.storage.local.get(FAVICON_CACHE_KEY);
 			const faviconCache = result[FAVICON_CACHE_KEY] || {};

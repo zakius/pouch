@@ -3,15 +3,23 @@ import { getAdapter } from "../utils/adapter-factory";
 import { logger } from "../utils/logger";
 import type { Settings } from "../utils/settings";
 import { canonicalizeUrl } from "../utils/url-helpers";
-import type { ReadItLaterAPI } from "./api/read-it-later-adapter";
+import type {
+	ReadItLaterAPI,
+	SyncMode,
+	SyncOptions,
+	SyncResult,
+} from "./api/read-it-later-adapter";
 import { FaviconManager } from "./favicon-manager";
 export class ArticlesRepository {
 	private api: ReadItLaterAPI | null = null;
 	private settings!: Settings;
+	private lastFullSyncTimestamp: number | null = null;
+	private lastSyncTimestamp: string | null = null;
 	async initialize(settings: Settings): Promise<void> {
 		logger.info("Initializing ArticlesRepository with settings:", settings);
 		this.settings = settings;
 		this.api = null;
+		await this.loadSyncTimestamps();
 	}
 	private async getApi(): Promise<ReadItLaterAPI> {
 		if (this.api) {
@@ -117,9 +125,13 @@ export class ArticlesRepository {
 			);
 			await this.addArticle(articleWithCanonicalUrl);
 
-			// Preload favicon for the newly saved article
+			// Preload favicon for the newly saved article (async, non-blocking)
 			const faviconManager = FaviconManager.getInstance();
-			await faviconManager.preloadFaviconsForArticles([articleWithCanonicalUrl]);
+			faviconManager.preloadFaviconsForArticles([
+				articleWithCanonicalUrl,
+			]).catch((error) => {
+				logger.debug("Favicon preloading failed (non-critical):", error);
+			});
 
 			return articleWithCanonicalUrl;
 		} catch (error) {
@@ -144,9 +156,13 @@ export class ArticlesRepository {
 
 					await this.addArticle(retryArticleWithCanonicalUrl);
 
-					// Preload favicon for the retry article
+					// Preload favicon for the retry article (async, non-blocking)
 					const faviconManager = FaviconManager.getInstance();
-					await faviconManager.preloadFaviconsForArticles([retryArticleWithCanonicalUrl]);
+					faviconManager.preloadFaviconsForArticles([
+						retryArticleWithCanonicalUrl,
+					]).catch((error) => {
+						logger.debug("Favicon preloading failed (non-critical):", error);
+					});
 
 					logger.info("Successfully saved article after re-authentication");
 					return retryArticleWithCanonicalUrl;
@@ -181,16 +197,39 @@ export class ArticlesRepository {
 			throw error;
 		}
 	}
-	async syncWithAPI(): Promise<{ items: Article[]; total: number }> {
+	async syncWithAPI(
+		options?: SyncOptions,
+	): Promise<{ items: Article[]; total: number; syncResult: SyncResult }> {
 		try {
 			const api = await this.getApi();
-			logger.info("Starting cache sync with API");
 
-			const allArticles = await api.sync();
-			logger.debug(`Synced ${allArticles.length} articles from API`);
+			// Prepare sync options with history data
+			const syncOptions: SyncOptions = {
+				...options,
+				lastSyncTimestamp: this.lastSyncTimestamp ?? undefined,
+				lastFullSyncTimestamp: this.lastFullSyncTimestamp ?? undefined,
+				isBrowserIdle: options?.isBrowserIdle ?? (await this.isBrowserIdle()),
+			};
+
+			logger.info("Starting cache sync with API", {
+				providedMode: options?.mode,
+				lastSync: this.lastSyncTimestamp,
+				lastFullSync: this.lastFullSyncTimestamp
+					? new Date(this.lastFullSyncTimestamp).toISOString()
+					: null,
+				isBrowserIdle: syncOptions.isBrowserIdle,
+			});
+
+			const syncResult = await api.sync(syncOptions);
+			logger.debug(
+				`Synced ${syncResult.articles.length} articles from API using ${syncResult.mode} mode`,
+				{
+					metadata: syncResult.metadata,
+				},
+			);
 
 			const articlesWithCanonicalUrls = await Promise.all(
-				allArticles.map(async (article) => {
+				syncResult.articles.map(async (article) => {
 					const canonicalUrl = await canonicalizeUrl(article.url);
 					return {
 						...article,
@@ -215,10 +254,22 @@ export class ArticlesRepository {
 			// Clean up unused favicons
 			await faviconManager.cleanupUnusedFavicons(processedArticles);
 
-			await this.updateArticles(processedArticles);
+			// Handle different sync modes
+			if (syncResult.mode === "overwrite") {
+				// Replace all articles with the new ones
+				await this.updateArticles(processedArticles);
+			} else if (syncResult.mode === "update") {
+				// Merge new articles with existing ones
+				await this.mergeArticles(processedArticles);
+			}
+
+			// Update sync timestamps
+			await this.updateSyncTimestamp(syncResult.mode);
+
 			return {
 				items: processedArticles,
 				total: processedArticles.length,
+				syncResult,
 			};
 		} catch (error) {
 			logger.error("Error syncing cache with API:", error);
@@ -226,15 +277,27 @@ export class ArticlesRepository {
 			return {
 				items: currentArticles,
 				total: currentArticles.length,
+				syncResult: {
+					articles: currentArticles,
+					mode: "overwrite",
+					metadata: {
+						totalFetched: 0,
+						totalProcessed: 0,
+						lastSyncTimestamp: new Date().toISOString(),
+					},
+				},
 			};
 		}
 	}
 	private async addArticle(article: Article): Promise<void> {
 		logger.debug("Adding article to cache:", article);
-		const articles = await this.getAllArticles();
-		articles.push(article);
-		logger.debug("Articles:", articles);
-		await browser.storage.local.set({ articles: articles });
+		
+		// More efficient: add to beginning of array (newest first)
+		const result = await browser.storage.local.get("articles");
+		const existingArticles = result.articles || [];
+		const updatedArticles = [article, ...existingArticles];
+		
+		await browser.storage.local.set({ articles: updatedArticles });
 		logger.debug("Article added to cache:", article);
 	}
 	private async removeArticle(id: number): Promise<void> {
@@ -251,7 +314,102 @@ export class ArticlesRepository {
 		logger.debug("Updating articles in cache:", newArticles.length);
 		await browser.storage.local.set({ articles: newArticles });
 	}
+
+	async mergeArticles(newArticles: Article[]): Promise<void> {
+		logger.debug("Merging articles in cache:", newArticles.length);
+		const existingArticles = await this.getAllArticles();
+		const existingMap = new Map(
+			existingArticles.map((article) => [article.id, article]),
+		);
+
+		// Add or update articles
+		for (const newArticle of newArticles) {
+			existingMap.set(newArticle.id, newArticle);
+		}
+
+		const mergedArticles = Array.from(existingMap.values());
+		await browser.storage.local.set({ articles: mergedArticles });
+		logger.debug("Merged articles count:", mergedArticles.length);
+	}
+
 	async clear(): Promise<void> {
 		await browser.storage.local.remove("articles");
+	}
+
+	private async loadSyncTimestamps(): Promise<void> {
+		try {
+			const result = await browser.storage.local.get([
+				"lastFullSyncTimestamp",
+				"lastSyncTimestamp",
+			]);
+			this.lastFullSyncTimestamp = result.lastFullSyncTimestamp || null;
+			this.lastSyncTimestamp = result.lastSyncTimestamp || null;
+			logger.debug("Loaded sync timestamps:", {
+				lastSync: this.lastSyncTimestamp,
+				lastFullSync: this.lastFullSyncTimestamp
+					? new Date(this.lastFullSyncTimestamp).toISOString()
+					: null,
+			});
+		} catch (error) {
+			logger.error("Failed to load sync timestamps:", error);
+			this.lastFullSyncTimestamp = null;
+			this.lastSyncTimestamp = null;
+		}
+	}
+
+	private async saveSyncTimestamps(): Promise<void> {
+		try {
+			await browser.storage.local.set({
+				lastFullSyncTimestamp: this.lastFullSyncTimestamp,
+				lastSyncTimestamp: this.lastSyncTimestamp,
+			});
+		} catch (error) {
+			logger.error("Failed to save sync timestamps:", error);
+		}
+	}
+
+	private async isBrowserIdle(): Promise<boolean> {
+		try {
+			// Check if browser is idle using the idle API
+			// Use 5 minutes (300 seconds) as a more conservative threshold
+			// This ensures we only do full sync when the user is truly away
+			const state = await browser.idle.queryState(300); // 5 minutes idle threshold
+			logger.debug("Browser idle state:", { state, isIdle: state === "idle" });
+			return state === "idle";
+		} catch (error) {
+			logger.debug("Could not check browser idle state:", error);
+			// If idle API is not available, assume not idle
+			return false;
+		}
+	}
+
+	private async updateSyncTimestamp(mode: SyncMode): Promise<void> {
+		const now = new Date().toISOString();
+
+		// Always update lastSyncTimestamp for any sync
+		const oldLastSync = this.lastSyncTimestamp;
+		this.lastSyncTimestamp = now;
+
+		// Update lastFullSyncTimestamp only for overwrite syncs
+		if (mode === "overwrite") {
+			const oldFullSync = this.lastFullSyncTimestamp;
+			this.lastFullSyncTimestamp = Date.now();
+			await this.saveSyncTimestamps();
+			logger.debug("Updated sync timestamps:", {
+				oldLastSync,
+				newLastSync: this.lastSyncTimestamp,
+				oldFullSync: oldFullSync ? new Date(oldFullSync).toISOString() : null,
+				newFullSync: new Date(this.lastFullSyncTimestamp).toISOString(),
+				mode,
+			});
+		} else {
+			// For update syncs, just save the lastSyncTimestamp
+			await this.saveSyncTimestamps();
+			logger.debug("Updated sync timestamp:", {
+				oldLastSync,
+				newLastSync: this.lastSyncTimestamp,
+				mode,
+			});
+		}
 	}
 }

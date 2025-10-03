@@ -4,38 +4,67 @@ import { logger } from "../utils/logger";
 // Cache key for browser storage
 const FAVICON_CACHE_KEY = "faviconCache";
 
+// In-memory favicon cache for immediate access
+let faviconCache: Record<string, string> = {};
+
+// Load favicon cache into memory for immediate access
+async function loadFaviconCache(): Promise<void> {
+	try {
+		const result = await browser.storage.local.get(FAVICON_CACHE_KEY);
+		faviconCache = result[FAVICON_CACHE_KEY] || {};
+		logger.debug("Loaded favicon cache:", Object.keys(faviconCache).length, "entries");
+	} catch (error) {
+		logger.debug("Failed to load favicon cache:", error);
+		faviconCache = {};
+	}
+}
+
 async function getCachedFavicon(hostname: string): Promise<string> {
 	try {
 		// Check persistent cache
 		const result = await browser.storage.local.get(FAVICON_CACHE_KEY);
 		const faviconCache = result[FAVICON_CACHE_KEY] || {};
-		
-		logger.debug("Checking cache for", hostname, "available keys:", Object.keys(faviconCache));
-		
+
+		logger.debug(
+			"Checking cache for",
+			hostname,
+			"available keys:",
+			Object.keys(faviconCache),
+		);
+
 		if (faviconCache[hostname]) {
-			logger.debug("Using cached favicon for", hostname, "length:", faviconCache[hostname].length);
-			
+			logger.debug(
+				"Using cached favicon for",
+				hostname,
+				"length:",
+				faviconCache[hostname].length,
+			);
+
 			// Debug smallweb specifically
 			if (hostname.includes("smallweb")) {
 				console.log("smallweb cached favicon found:", {
 					hostname,
 					length: faviconCache[hostname].length,
 					prefix: faviconCache[hostname].substring(0, 100),
-					hasDataPrefix: faviconCache[hostname].startsWith("data:")
+					hasDataPrefix: faviconCache[hostname].startsWith("data:"),
 				});
 			}
-			
+
 			return faviconCache[hostname];
 		}
-		
+
 		// If not cached, try to load it on-demand
-		logger.debug("No cached favicon found for", hostname, "attempting to load on-demand");
+		logger.debug(
+			"No cached favicon found for",
+			hostname,
+			"attempting to load on-demand",
+		);
 		try {
 			const response = await browser.runtime.sendMessage({
 				type: "loadFavicon",
-				payload: { hostname }
+				payload: { hostname },
 			});
-			
+
 			if (response?.success) {
 				logger.debug("Successfully loaded favicon on-demand for", hostname);
 				return response.favicon;
@@ -85,6 +114,10 @@ let totalPages = 1;
 async function initializePopup(): Promise<void> {
 	try {
 		logger.debug("Initializing popup...");
+		
+		// Load favicon cache for immediate access
+		await loadFaviconCache();
+		
 		const tabs = await browser.tabs.query({
 			active: true,
 			currentWindow: true,
@@ -192,17 +225,11 @@ async function displayArticles(articles: Article[]): Promise<void> {
 		pageSelect.appendChild(option);
 	}
 	articlesContainer.innerHTML = "";
-	
-	// Create all article elements in parallel for better performance
-	const articleElementPromises = articles.map(async (article) => {
+
+	// Create all article elements immediately (favicon loading is now non-blocking)
+	for (const article of articles) {
 		logger.debug("Creating element for article:", article.title);
-		return await createArticleElement(article);
-	});
-	
-	const articleElements = await Promise.all(articleElementPromises);
-	
-	// Append all elements to the container
-	for (const articleElement of articleElements) {
+		const articleElement = createArticleElement(article);
 		articlesContainer.appendChild(articleElement);
 	}
 }
@@ -242,7 +269,7 @@ function showError(message: string, showSettingsLink = false): void {
 			});
 	}
 }
-async function createArticleElement(article: Article): Promise<HTMLElement> {
+function createArticleElement(article: Article): HTMLElement {
 	logger.debug("Creating article element:", article);
 	const articleElement = document.createElement("div");
 	articleElement.className = "article";
@@ -255,54 +282,44 @@ async function createArticleElement(article: Article): Promise<HTMLElement> {
 	titleWrapper.className = "article-title-wrapper";
 	const favicon = document.createElement("img");
 	favicon.className = "article-favicon";
-	
+
+	favicon.crossOrigin = "anonymous";
+	favicon.loading = "lazy";
+
+	// Try to get favicon immediately (cached or load)
 	try {
 		const url = new URL(article.url);
-		const faviconSrc = await getCachedFavicon(url.hostname);
-		logger.debug("Setting favicon src for", url.hostname, "to:", faviconSrc.substring(0, 50) + "...");
 		
-		// Debug smallweb specifically
-		if (url.hostname.includes("smallweb")) {
-			console.log("smallweb favicon being set:", {
-				hostname: url.hostname,
-				faviconSrc: faviconSrc.substring(0, 100),
-				hasDataPrefix: faviconSrc.startsWith("data:")
+		// Check in-memory cache first (immediate access)
+		if (faviconCache[url.hostname]) {
+			// Use cached favicon immediately
+			logger.debug("Using cached favicon for", url.hostname);
+			favicon.src = faviconCache[url.hostname];
+		} else {
+			// Not cached, set default and try to load
+			favicon.src = "icons/icon.svg";
+			
+			// Try to load favicon on-demand
+			getCachedFavicon(url.hostname).then((faviconSrc) => {
+				if (faviconSrc !== "icons/icon.svg") {
+					logger.debug("Loaded favicon for", url.hostname);
+					favicon.src = faviconSrc;
+					// Update in-memory cache for next time
+					faviconCache[url.hostname] = faviconSrc;
+				}
+			}).catch((error) => {
+				logger.debug("Failed to load favicon for", url.hostname, error);
 			});
 		}
-		
-		favicon.src = faviconSrc;
-		favicon.crossOrigin = "anonymous";
-		favicon.loading = "lazy";
-		
+
 		// Add error handling for the image
 		favicon.onerror = () => {
-			logger.debug("Favicon failed to load for", url.hostname, "src:", faviconSrc.substring(0, 50) + "...");
-			
-			// Debug smallweb error
-			if (url.hostname.includes("smallweb")) {
-				console.log("smallweb favicon failed to load:", {
-					hostname: url.hostname,
-					faviconSrc: faviconSrc.substring(0, 100),
-					naturalWidth: favicon.naturalWidth,
-					naturalHeight: favicon.naturalHeight
-				});
-			}
-			
+			logger.debug("Favicon failed to load for", url.hostname);
 			favicon.src = "icons/icon.svg";
 		};
-		
+
 		favicon.onload = () => {
 			logger.debug("Favicon successfully loaded for", url.hostname);
-			
-			// Debug smallweb success
-			if (url.hostname.includes("smallweb")) {
-				console.log("smallweb favicon loaded successfully:", {
-					hostname: url.hostname,
-					naturalWidth: favicon.naturalWidth,
-					naturalHeight: favicon.naturalHeight,
-					complete: favicon.complete
-				});
-			}
 		};
 	} catch (_e) {
 		logger.debug("Error getting favicon for", article.url, _e);

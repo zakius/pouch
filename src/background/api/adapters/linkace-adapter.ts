@@ -4,7 +4,12 @@ import { baseSettingsSchema } from "../../../utils/base-settings-schema";
 import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
 import { type ApiClient, createApiClient } from "../api-client";
-import type { ReadItLaterAPI, SavingArticle } from "../read-it-later-adapter";
+import type {
+	ReadItLaterAPI,
+	SavingArticle,
+	SyncOptions,
+	SyncResult,
+} from "../read-it-later-adapter";
 import type { TokenizedAdapter } from "../tokenized-adapter";
 
 export const linkaceConfigSchema = v.object({
@@ -192,15 +197,27 @@ export class LinkaceAdapter
 		await this.apiClient.delete(`/api/v2/links/${id}`);
 	}
 
-	async sync(): Promise<Article[]> {
+	async sync(options?: SyncOptions): Promise<SyncResult> {
 		const perPage = 30;
 		const allArticles: Article[] = [];
 		let currentPage = 1;
 		let hasMorePages = true;
+		let totalFetched = 0;
+
+		// Build base query parameters
+		const baseParams = new URLSearchParams({
+			per_page: perPage.toString(),
+		});
+
+		// Add incremental sync support if lastSyncTimestamp is provided
+		if (options?.lastSyncTimestamp && options.mode === "update") {
+			baseParams.set("created_after", options.lastSyncTimestamp);
+		}
 
 		while (hasMorePages) {
+			baseParams.set("page", currentPage.toString());
 			const response = await this.apiClient.get(
-				`/api/v2/links?page=${currentPage}&per_page=${perPage}`,
+				`/api/v2/links?${baseParams.toString()}`,
 			);
 			const validatedData = v.parse(linkaceSyncResponseSchema, response.data);
 
@@ -208,9 +225,11 @@ export class LinkaceAdapter
 				throw new Error(`Failed to sync articles: ${validatedData.message}`);
 			}
 
-			allArticles.push(
-				...validatedData.data.map((item) => this.mapArticle(item)),
+			const pageArticles = validatedData.data.map((item) =>
+				this.mapArticle(item),
 			);
+			allArticles.push(...pageArticles);
+			totalFetched += pageArticles.length;
 
 			if (validatedData.meta) {
 				hasMorePages = currentPage < validatedData.meta.last_page;
@@ -221,7 +240,18 @@ export class LinkaceAdapter
 			currentPage++;
 		}
 
-		return allArticles;
+		const mode = options?.mode || "overwrite";
+
+		return {
+			articles: allArticles,
+			mode,
+			metadata: {
+				totalFetched,
+				totalProcessed: allArticles.length,
+				lastSyncTimestamp: new Date().toISOString(),
+				apiVersion: "2.0",
+			},
+		};
 	}
 
 	public async cleanup(): Promise<void> {
