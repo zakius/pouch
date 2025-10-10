@@ -44,12 +44,6 @@ interface TestConnectionMessage {
 		settings: Settings;
 	};
 }
-interface LoadFaviconMessage {
-	type: "loadFavicon";
-	payload: {
-		hostname: string;
-	};
-}
 type Message =
 	| SaveArticleMessage
 	| CheckArticleMessage
@@ -57,7 +51,6 @@ type Message =
 	| DeleteArticleMessage
 	| SaveSettingsMessage
 	| TestConnectionMessage
-	| LoadFaviconMessage;
 interface OnClickData {
 	menuItemId: string | number;
 	linkUrl?: string;
@@ -146,22 +139,6 @@ browser.runtime.onMessage.addListener(
 							return sendResponse({
 								success: false,
 								error: "Connection failed",
-							});
-						}
-					}
-					case "loadFavicon": {
-						const { FaviconManager } = await import("./favicon-manager");
-						const faviconManager = FaviconManager.getInstance();
-						try {
-							const favicon = await faviconManager.loadFavicon(
-								message.payload.hostname,
-							);
-							return sendResponse({ success: true, favicon });
-						} catch (error) {
-							logger.error("Failed to load favicon:", error);
-							return sendResponse({
-								success: false,
-								error: "Failed to load favicon",
 							});
 						}
 					}

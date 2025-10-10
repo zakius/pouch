@@ -171,12 +171,6 @@ body {
 	align-items: center;
 }
 
-.article-favicon {
-	width: 16px;
-	height: 16px;
-	margin-right: 8px;
-	flex-shrink: 0;
-}
 
 .article-title {
 	margin: 0;
