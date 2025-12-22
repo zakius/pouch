@@ -8,7 +8,6 @@ const nextButton = document.getElementById("next-page") as HTMLButtonElement | n
 const pageInfo = document.getElementById("page-info") as HTMLElement | null;
 const pageSelect = document.getElementById("page-select") as HTMLSelectElement | null;
 const savePageButton = document.getElementById("save-page-button") as HTMLButtonElement | null;
-const settingsButton = document.getElementById("settings-button") as HTMLButtonElement | null;
 const articleListContainer = document.getElementById("article-list");
 const emptyMessage = document.getElementById("empty-message");
 const noResultsMessage = document.getElementById("no-results-message");
@@ -28,23 +27,10 @@ async function initializePopup(): Promise<void> {
       currentWindow: true,
     });
     currentTab = tabs[0];
-    if (
-      !searchInput ||
-      !prevButton ||
-      !nextButton ||
-      !pageSelect ||
-      !savePageButton ||
-      !settingsButton
-    )
-      return;
+    if (!searchInput || !pageSelect) return;
     searchInput.addEventListener("input", handleSearch);
-    prevButton.addEventListener("click", () => changePage(-1));
-    nextButton.addEventListener("click", () => changePage(1));
     pageSelect.addEventListener("change", handlePageSelect);
-    savePageButton.addEventListener("click", handleSavePageClick);
-    settingsButton.addEventListener("click", () => {
-      void browser.runtime.openOptionsPage();
-    });
+    document.body.addEventListener("click", handleBodyClick);
     await loadRecentArticles();
     await updateSavePageButtonState();
   } catch (error: unknown) {
@@ -179,6 +165,91 @@ function handleSearch(): void {
   currentPage = 1;
   void loadRecentArticles();
 }
+function handleBodyClick(event: MouseEvent): void {
+  const target = event.target as HTMLElement;
+  if (!target) return;
+
+  const deleteButton = target.classList.contains("delete-button")
+    ? (target as HTMLButtonElement)
+    : (target.closest(".delete-button") as HTMLButtonElement | null);
+  if (deleteButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    void handleDeleteArticle(deleteButton);
+    return;
+  }
+
+  if (target.id === "settings-button" || target.closest("#settings-button")) {
+    event.preventDefault();
+    void browser.runtime.openOptionsPage();
+    return;
+  }
+
+  if (target.id === "save-page-button" || target.closest("#save-page-button")) {
+    event.preventDefault();
+    void handleSavePageClick();
+    return;
+  }
+
+  if (target.id === "prev-page" || target.closest("#prev-page")) {
+    event.preventDefault();
+    const button = (
+      target.id === "prev-page" ? target : target.closest("#prev-page")
+    ) as HTMLButtonElement;
+    if (button && !button.disabled) {
+      changePage(-1);
+    }
+    return;
+  }
+
+  if (target.id === "next-page" || target.closest("#next-page")) {
+    event.preventDefault();
+    const button = (
+      target.id === "next-page" ? target : target.closest("#next-page")
+    ) as HTMLButtonElement;
+    if (button && !button.disabled) {
+      changePage(1);
+    }
+    return;
+  }
+
+  if (target.id === "open-settings-link" || target.classList.contains("settings-link")) {
+    event.preventDefault();
+    void browser.runtime.openOptionsPage();
+    return;
+  }
+}
+
+async function handleDeleteArticle(button: HTMLButtonElement): Promise<void> {
+  if (isSavingOrDeleting) return;
+  const articleIdStr = button.dataset.articleId;
+  if (!articleIdStr) {
+    logger.warn("Delete button missing article ID");
+    return;
+  }
+  const articleId = Number.parseInt(articleIdStr, 10);
+  if (Number.isNaN(articleId) || articleId < 0) {
+    logger.warn("Invalid article ID:", articleIdStr);
+    return;
+  }
+  isSavingOrDeleting = true;
+  button.disabled = true;
+  try {
+    await browser.runtime.sendMessage({
+      type: "deleteArticle",
+      payload: { articleId },
+    });
+    logger.debug("Article deleted, reloading list");
+    await loadRecentArticles();
+  } catch (error) {
+    logger.error("Error deleting article:", error);
+    showError("Failed to delete article. Please try again.", false);
+  } finally {
+    isSavingOrDeleting = false;
+    button.disabled = false;
+  }
+}
+
 function changePage(offset: number): void {
   const newPage = currentPage + offset;
   if (newPage >= 1 && (totalPages === 0 || newPage <= totalPages)) {
@@ -211,11 +282,8 @@ function showError(message: string, showSettingsLink = false): void {
     const link = document.createElement("a");
     link.href = "#";
     link.id = "open-settings-link";
+    link.className = "settings-link";
     link.textContent = "Check Settings";
-    link.addEventListener("click", (e) => {
-      e.preventDefault();
-      void browser.runtime.openOptionsPage();
-    });
     errorDiv.appendChild(link);
   }
   articlesContainer.appendChild(errorDiv);
@@ -261,25 +329,7 @@ function createArticleElement(article: Article): HTMLElement {
   removeButton.textContent = "×";
   removeButton.className = "delete-button";
   removeButton.title = "Delete article";
-  removeButton.addEventListener("click", async () => {
-    if (isSavingOrDeleting) return;
-    isSavingOrDeleting = true;
-    removeButton.disabled = true;
-    try {
-      await browser.runtime.sendMessage({
-        type: "deleteArticle",
-        payload: { articleId: article.id },
-      });
-      logger.debug("Article deleted, reloading list");
-      await loadRecentArticles();
-    } catch (error) {
-      logger.error("Error deleting article:", error);
-      showError("Failed to delete article. Please try again.", false);
-    } finally {
-      isSavingOrDeleting = false;
-      removeButton.disabled = false;
-    }
-  });
+  removeButton.dataset.articleId = String(article.id);
   articleElement.appendChild(removeButton);
   return articleElement;
 }
