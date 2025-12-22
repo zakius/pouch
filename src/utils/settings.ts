@@ -4,7 +4,6 @@ import { instapaperSettingsSchema } from "../background/api/adapters/instapaper-
 import { karakeepSettingsSchema } from "../background/api/adapters/karakeep-adapter";
 import { linkwardenSettingsSchema } from "../background/api/adapters/linkwarden-adapter";
 import { raindropSettingsSchema } from "../background/api/adapters/raindrop-adapter";
-import { syncSettingsSchema } from "../background/api/adapters/sync-adapter";
 import { wallabagSettingsSchema } from "../background/api/adapters/wallabag-adapter";
 import type { baseSettingsSchema } from "./base-settings-schema";
 import { LogLevel } from "./log-levels";
@@ -16,12 +15,11 @@ export const settingsSchema = v.variant("backend", [
   instapaperSettingsSchema,
   karakeepSettingsSchema,
   linkwardenSettingsSchema,
-  syncSettingsSchema,
 ]);
 export type Settings = v.InferInput<typeof settingsSchema>;
 export type BaseSettings = v.InferInput<typeof baseSettingsSchema>;
 export const DEFAULT_SETTINGS: Settings = {
-  backend: "sync",
+  backend: "bookmarks",
   apiConfig: {},
   logLevel: LogLevel.ERROR,
   normalizeOnSave: false,

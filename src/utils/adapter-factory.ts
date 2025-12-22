@@ -4,7 +4,6 @@ import { KarakeepAdapter } from "../background/api/adapters/karakeep-adapter";
 import { LinkaceAdapter } from "../background/api/adapters/linkace-adapter";
 import { LinkwardenAdapter } from "../background/api/adapters/linkwarden-adapter";
 import { RaindropAdapter } from "../background/api/adapters/raindrop-adapter";
-import { SyncAdapter } from "../background/api/adapters/sync-adapter";
 import { WallabagAdapter } from "../background/api/adapters/wallabag-adapter";
 import type { ReadItLaterAPI } from "../background/api/read-it-later-adapter";
 
@@ -16,7 +15,6 @@ const adapters = {
   karakeep: KarakeepAdapter,
   linkace: LinkaceAdapter,
   linkwarden: LinkwardenAdapter,
-  sync: SyncAdapter,
 };
 
 const adapterCache = new Map<keyof typeof adapters, ReadItLaterAPI>();

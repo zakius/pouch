@@ -14,6 +14,7 @@ export class ArticlesRepository {
   private settings!: Settings;
   private lastFullSyncTimestamp: number | null = null;
   private lastSyncTimestamp: string | null = null;
+  private syncInProgress: Promise<void> | null = null;
   async initialize(settings: Settings): Promise<void> {
     logger.info("Initializing ArticlesRepository with settings:", settings);
     this.settings = settings;
@@ -98,6 +99,11 @@ export class ArticlesRepository {
     };
   }
   async saveArticle(article: Pick<Article, "url" | "title">): Promise<Article> {
+    if (this.syncInProgress) {
+      logger.debug("Sync in progress, waiting before saving article");
+      await this.syncInProgress;
+    }
+
     const api = await this.getApi();
     logger.info("Saving article:", article);
 
@@ -152,6 +158,11 @@ export class ArticlesRepository {
     }
   }
   async deleteArticle(id: number): Promise<{ success: boolean; id: string | number }> {
+    if (this.syncInProgress) {
+      logger.debug("Sync in progress, waiting before deleting article");
+      await this.syncInProgress;
+    }
+
     const api = await this.getApi();
     logger.debug("Deleting article through cache:", id);
     if (!id) {
@@ -171,70 +182,9 @@ export class ArticlesRepository {
   async syncWithAPI(
     options?: SyncOptions,
   ): Promise<{ items: Article[]; total: number; syncResult: SyncResult }> {
-    try {
-      const api = await this.getApi();
-
-      // Prepare sync options with history data
-      const syncOptions: SyncOptions = {
-        ...options,
-        lastSyncTimestamp: this.lastSyncTimestamp ?? undefined,
-        lastFullSyncTimestamp: this.lastFullSyncTimestamp ?? undefined,
-        isBrowserIdle: options?.isBrowserIdle ?? (await this.isBrowserIdle()),
-      };
-
-      logger.info("Starting cache sync with API", {
-        providedMode: options?.mode,
-        lastSync: this.lastSyncTimestamp,
-        lastFullSync: this.lastFullSyncTimestamp
-          ? new Date(this.lastFullSyncTimestamp).toISOString()
-          : null,
-        isBrowserIdle: syncOptions.isBrowserIdle,
-      });
-
-      const syncResult = await api.sync(syncOptions);
-      logger.debug(
-        `Synced ${syncResult.articles.length} articles from API using ${syncResult.mode} mode`,
-        {
-          metadata: syncResult.metadata,
-        },
-      );
-
-      const articlesWithCanonicalUrls = await Promise.all(
-        syncResult.articles.map(async (article) => {
-          const canonicalUrl = await canonicalizeUrl(article.url);
-          return {
-            ...article,
-            canonicalUrl: canonicalUrl,
-          };
-        }),
-      );
-
-      const processedArticles = this.settings.normalizeOnSave
-        ? articlesWithCanonicalUrls.map((article) => ({
-            ...article,
-            url: article.canonicalUrl,
-          }))
-        : articlesWithCanonicalUrls;
-
-      // Handle different sync modes
-      if (syncResult.mode === "overwrite") {
-        // Replace all articles with the new ones
-        await this.updateArticles(processedArticles);
-      } else if (syncResult.mode === "update") {
-        // Merge new articles with existing ones
-        await this.mergeArticles(processedArticles);
-      }
-
-      // Update sync timestamps
-      await this.updateSyncTimestamp(syncResult.mode);
-
-      return {
-        items: processedArticles,
-        total: processedArticles.length,
-        syncResult,
-      };
-    } catch (error) {
-      logger.error("Error syncing cache with API:", error);
+    if (this.syncInProgress) {
+      logger.debug("Sync already in progress, waiting for completion");
+      await this.syncInProgress;
       const currentArticles = await this.getAllArticles();
       return {
         items: currentArticles,
@@ -250,15 +200,116 @@ export class ArticlesRepository {
         },
       };
     }
+
+    const syncPromise = (async (): Promise<{
+      items: Article[];
+      total: number;
+      syncResult: SyncResult;
+    }> => {
+      try {
+        const api = await this.getApi();
+
+        // Prepare sync options with history data
+        const syncOptions: SyncOptions = {
+          ...options,
+          lastSyncTimestamp: this.lastSyncTimestamp ?? undefined,
+          lastFullSyncTimestamp: this.lastFullSyncTimestamp ?? undefined,
+          isBrowserIdle: options?.isBrowserIdle ?? (await this.isBrowserIdle()),
+        };
+
+        logger.info("Starting cache sync with API", {
+          providedMode: options?.mode,
+          lastSync: this.lastSyncTimestamp,
+          lastFullSync: this.lastFullSyncTimestamp
+            ? new Date(this.lastFullSyncTimestamp).toISOString()
+            : null,
+          isBrowserIdle: syncOptions.isBrowserIdle,
+        });
+
+        const syncResult = await api.sync(syncOptions);
+        logger.debug(
+          `Synced ${syncResult.articles.length} articles from API using ${syncResult.mode} mode`,
+          {
+            metadata: syncResult.metadata,
+          },
+        );
+
+        const articlesWithCanonicalUrls = await Promise.all(
+          syncResult.articles.map(async (article) => {
+            const canonicalUrl = await canonicalizeUrl(article.url);
+            return {
+              ...article,
+              canonicalUrl: canonicalUrl,
+            };
+          }),
+        );
+
+        const processedArticles = this.settings.normalizeOnSave
+          ? articlesWithCanonicalUrls.map((article) => ({
+              ...article,
+              url: article.canonicalUrl,
+            }))
+          : articlesWithCanonicalUrls;
+
+        // Handle different sync modes
+        if (syncResult.mode === "overwrite") {
+          // Replace all articles with the new ones
+          await this.updateArticles(processedArticles);
+        } else if (syncResult.mode === "update") {
+          // Merge new articles with existing ones
+          await this.mergeArticles(processedArticles);
+        }
+
+        // Update sync timestamps
+        await this.updateSyncTimestamp(syncResult.mode);
+
+        return {
+          items: processedArticles,
+          total: processedArticles.length,
+          syncResult,
+        };
+      } catch (error) {
+        logger.error("Error syncing cache with API:", error);
+        const currentArticles = await this.getAllArticles();
+        return {
+          items: currentArticles,
+          total: currentArticles.length,
+          syncResult: {
+            articles: currentArticles,
+            mode: "overwrite",
+            metadata: {
+              totalFetched: 0,
+              totalProcessed: 0,
+              lastSyncTimestamp: new Date().toISOString(),
+            },
+          },
+        };
+      } finally {
+        this.syncInProgress = null;
+      }
+    })();
+
+    this.syncInProgress = syncPromise.then(() => undefined);
+    return syncPromise;
   }
   private async addArticle(article: Article): Promise<void> {
     logger.debug("Adding article to cache:", article);
 
-    // More efficient: add to beginning of array (newest first)
     const result = await browser.storage.local.get("articles");
     const existingArticles = result.articles || [];
-    const updatedArticles = [article, ...existingArticles];
 
+    const canonicalUrl = article.canonicalUrl || article.url;
+    const isDuplicate = existingArticles.some((a: Article) => {
+      const aCanonicalUrl = a.canonicalUrl || a.url;
+      return aCanonicalUrl === canonicalUrl;
+    });
+
+    if (isDuplicate) {
+      logger.debug("Article already exists in cache, skipping add:", canonicalUrl);
+      return;
+    }
+
+    const updatedArticles = [article, ...existingArticles];
     await browser.storage.local.set({ articles: updatedArticles });
     logger.debug("Article added to cache:", article);
   }
@@ -281,9 +332,24 @@ export class ArticlesRepository {
     logger.debug("Merging articles in cache:", newArticles.length);
     const existingArticles = await this.getAllArticles();
     const existingMap = new Map(existingArticles.map((article) => [article.id, article]));
+    const existingCanonicalMap = new Map(
+      existingArticles.map((article) => {
+        const canonicalUrl = article.canonicalUrl || article.url;
+        return [canonicalUrl, article];
+      }),
+    );
 
-    // Add or update articles
     for (const newArticle of newArticles) {
+      const canonicalUrl = newArticle.canonicalUrl || newArticle.url;
+      const existingByCanonical = existingCanonicalMap.get(canonicalUrl);
+
+      if (existingByCanonical && existingByCanonical.id !== newArticle.id) {
+        const existingById = existingMap.get(existingByCanonical.id);
+        if (existingById && existingById.id === existingByCanonical.id) {
+          continue;
+        }
+      }
+
       existingMap.set(newArticle.id, newArticle);
     }
 
