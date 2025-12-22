@@ -79,6 +79,19 @@ async function createArchive(): Promise<void> {
 	}
 }
 
+async function lintExtension(): Promise<void> {
+	const distDir = "dist/unpackaged";
+	try {
+		await execAsync(`web-ext lint --source-dir=${distDir}`, {
+			env: process.env,
+		});
+		console.log("Extension linted successfully");
+	} catch (error) {
+		console.error("Linting failed:", error);
+		throw error;
+	}
+}
+
 async function signFirefoxExtension(): Promise<void> {
 	const { AMO_API_KEY, AMO_API_SECRET } = process.env;
 
@@ -256,6 +269,7 @@ async function main() {
 	const skipSigning = !process.argv.includes("--sign");
 	const prepareOnly = process.argv.includes("--prepare-only") || watchMode;
 	const shouldSign = process.argv.includes("--sign");
+	const shouldLint = process.argv.includes("--lint");
 
 	if (shouldSign) {
 		await bumpPatchVersion();
@@ -265,6 +279,13 @@ async function main() {
 		console.error("Build failed:", error);
 		process.exit(1);
 	});
+
+	if (shouldLint) {
+		await lintExtension().catch((error) => {
+			console.error("Lint failed:", error);
+			process.exit(1);
+		});
+	}
 
 	if (watchMode) {
 		await watchAndBuild();
