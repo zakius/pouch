@@ -106,6 +106,7 @@ async function handleSaveSettings(): Promise<void> {
     return;
   }
   configCache[settings.backend] = settings.apiConfig;
+  dom.saveButton.disabled = true;
   try {
     const response = await browser.runtime.sendMessage({
       type: "saveSettings",
@@ -119,6 +120,8 @@ async function handleSaveSettings(): Promise<void> {
   } catch (error: unknown) {
     logger.warn("Failed to notify background script about settings update:", error);
     showStatus(`Error saving settings: ${(error as Error).message}`, "error");
+  } finally {
+    dom.saveButton.disabled = false;
   }
 }
 async function handleTestConnection(): Promise<void> {
@@ -128,6 +131,7 @@ async function handleTestConnection(): Promise<void> {
     return;
   }
   showStatus("Testing connection...", "info");
+  dom.testConnectionButton.disabled = true;
   try {
     const response = await browser.runtime.sendMessage({
       type: "testConnection",
@@ -141,6 +145,8 @@ async function handleTestConnection(): Promise<void> {
   } catch (error) {
     logger.error("Error testing connection:", error);
     showStatus(`Error testing connection: ${(error as Error).message}`, "error");
+  } finally {
+    dom.testConnectionButton.disabled = false;
   }
 }
 function getSettingsFromForm(): Settings | null {

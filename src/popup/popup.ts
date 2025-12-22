@@ -18,6 +18,7 @@ const itemsPerPage = 10;
 let currentPage = 1;
 let totalPages = 1;
 let isLoadingArticles = false;
+let isSavingOrDeleting = false;
 async function initializePopup(): Promise<void> {
   try {
     logger.debug("Initializing popup...");
@@ -106,6 +107,7 @@ async function loadRecentArticles(): Promise<void> {
     await displayArticles(response.items || []);
   } catch (error) {
     logger.error("Runtime error:", error);
+    showError("Could not connect to the background service.", false);
     throw new Error("Could not connect to the background service.");
   } finally {
     isLoadingArticles = false;
@@ -198,13 +200,14 @@ function handlePageSelect(event: Event): void {
   void loadRecentArticles();
 }
 function showError(message: string, showSettingsLink = false): void {
-  if (!articlesContainer) return;
+  if (!articlesContainer || !articleListContainer) return;
   articlesContainer.innerHTML = "";
   const errorDiv = document.createElement("div");
   errorDiv.className = "error-message";
   const messageText = document.createTextNode(message);
   errorDiv.appendChild(messageText);
   if (showSettingsLink) {
+    errorDiv.appendChild(document.createTextNode(" "));
     const link = document.createElement("a");
     link.href = "#";
     link.id = "open-settings-link";
@@ -213,10 +216,11 @@ function showError(message: string, showSettingsLink = false): void {
       e.preventDefault();
       void browser.runtime.openOptionsPage();
     });
-    errorDiv.appendChild(document.createTextNode(" "));
     errorDiv.appendChild(link);
   }
   articlesContainer.appendChild(errorDiv);
+  if (emptyMessage) emptyMessage.style.display = "none";
+  if (noResultsMessage) noResultsMessage.style.display = "none";
 }
 function createArticleElement(article: Article): HTMLElement {
   logger.debug("Creating article element:", article);
@@ -256,19 +260,25 @@ function createArticleElement(article: Article): HTMLElement {
   const removeButton = document.createElement("button");
   removeButton.textContent = "×";
   removeButton.className = "delete-button";
-  removeButton.addEventListener("click", () => {
-    browser.runtime
-      .sendMessage({
+  removeButton.title = "Delete article";
+  removeButton.addEventListener("click", async () => {
+    if (isSavingOrDeleting) return;
+    isSavingOrDeleting = true;
+    removeButton.disabled = true;
+    try {
+      await browser.runtime.sendMessage({
         type: "deleteArticle",
         payload: { articleId: article.id },
-      })
-      .then(() => {
-        logger.debug("Article deleted, reloading list");
-        void loadRecentArticles();
-      })
-      .catch((error) => {
-        logger.error("Error deleting article:", error);
       });
+      logger.debug("Article deleted, reloading list");
+      await loadRecentArticles();
+    } catch (error) {
+      logger.error("Error deleting article:", error);
+      showError("Failed to delete article. Please try again.", false);
+    } finally {
+      isSavingOrDeleting = false;
+      removeButton.disabled = false;
+    }
   });
   articleElement.appendChild(removeButton);
   return articleElement;
@@ -300,45 +310,44 @@ async function updateSavePageButtonState(): Promise<void> {
     });
 }
 async function handleSavePageClick(): Promise<void> {
-  if (!currentTab?.url) return;
+  if (!currentTab?.url || !savePageButton || isSavingOrDeleting) return;
   const url = currentTab.url.trim();
   if (!url || url.length === 0) {
     logger.warn("Cannot save article: empty URL");
     return;
   }
   const title = (currentTab.title || "").trim();
-  if (savedArticleForCurrentPage) {
-    if (typeof savedArticleForCurrentPage.id !== "number" || savedArticleForCurrentPage.id < 0) {
-      logger.error("Invalid article ID:", savedArticleForCurrentPage.id);
-      return;
-    }
-    browser.runtime
-      .sendMessage({
+  isSavingOrDeleting = true;
+  savePageButton.disabled = true;
+  try {
+    if (savedArticleForCurrentPage) {
+      if (typeof savedArticleForCurrentPage.id !== "number" || savedArticleForCurrentPage.id < 0) {
+        logger.error("Invalid article ID:", savedArticleForCurrentPage.id);
+        return;
+      }
+      await browser.runtime.sendMessage({
         type: "deleteArticle",
         payload: { articleId: savedArticleForCurrentPage.id },
-      })
-      .then(async () => {
-        logger.debug("Article deleted, reloading list and button state");
-        await updateSavePageButtonState();
-        await loadRecentArticles();
-      })
-      .catch((error) => {
-        logger.error("Error deleting article:", error);
       });
-  } else {
-    browser.runtime
-      .sendMessage({
+      logger.debug("Article deleted, reloading list and button state");
+      await updateSavePageButtonState();
+      await loadRecentArticles();
+    } else {
+      await browser.runtime.sendMessage({
         type: "saveArticle",
         payload: { url, title },
-      })
-      .then(async () => {
-        logger.debug("Article saved, reloading list and button state");
-        await updateSavePageButtonState();
-        await loadRecentArticles();
-      })
-      .catch((error) => {
-        logger.error("Error saving article:", error);
       });
+      logger.debug("Article saved, reloading list and button state");
+      await updateSavePageButtonState();
+      await loadRecentArticles();
+    }
+  } catch (error) {
+    logger.error("Error saving/deleting article:", error);
+    const action = savedArticleForCurrentPage ? "delete" : "save";
+    showError(`Failed to ${action} article. Please try again.`, false);
+  } finally {
+    isSavingOrDeleting = false;
+    savePageButton.disabled = false;
   }
 }
 document.addEventListener("DOMContentLoaded", initializePopup);
