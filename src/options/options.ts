@@ -66,8 +66,7 @@ async function initialize(): Promise<void> {
     dom.backendSelect.addEventListener("change", () =>
       loadBackend(dom.backendSelect.value as Settings["backend"]),
     );
-    dom.saveButton.addEventListener("click", handleSaveSettings);
-    dom.testConnectionButton.addEventListener("click", handleTestConnection);
+    document.body.addEventListener("click", handleBodyClick);
   } catch (error) {
     logger.error("Error initializing options:", error);
     showStatus(`Error initializing options: ${(error as Error).message}`, "error");
@@ -99,6 +98,31 @@ async function loadBackend(backend: Settings["backend"]): Promise<void> {
   }
   dom.configContainer.appendChild(form);
 }
+function handleBodyClick(event: MouseEvent): void {
+  const target = event.target as HTMLElement;
+  if (!target) return;
+
+  if (target.id === "save" || target.closest("#save")) {
+    event.preventDefault();
+    const button = (target.id === "save" ? target : target.closest("#save")) as HTMLButtonElement;
+    if (button && !button.disabled) {
+      void handleSaveSettings();
+    }
+    return;
+  }
+
+  if (target.id === "test-connection" || target.closest("#test-connection")) {
+    event.preventDefault();
+    const button = (target.id === "test-connection"
+      ? target
+      : target.closest("#test-connection")) as HTMLButtonElement;
+    if (button && !button.disabled) {
+      void handleTestConnection();
+    }
+    return;
+  }
+}
+
 async function handleSaveSettings(): Promise<void> {
   assertDom(dom);
   const settings = getSettingsFromForm();
