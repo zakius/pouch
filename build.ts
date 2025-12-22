@@ -5,7 +5,6 @@ import {
 	copyFile,
 	mkdir,
 	readdir,
-	rename,
 	rm,
 	watch,
 	writeFile,
@@ -70,13 +69,9 @@ async function createArchive(): Promise<void> {
 	await mkdir(archiveDir, { recursive: true });
 
 	try {
-		const archivePath = join(archiveDir, "extension.zip");
-		const tempZipPath = join(distDir, "extension.zip");
-		await execAsync("zip -r extension.zip .", {
-			cwd: distDir,
+		await execAsync(`web-ext build --source-dir=${distDir} --artifacts-dir=${archiveDir}`, {
 			env: process.env,
 		});
-		await rename(tempZipPath, archivePath);
 		console.log("Created extension.zip in dist/packages/");
 	} catch (error) {
 		console.error("Failed to create archive:", error);
