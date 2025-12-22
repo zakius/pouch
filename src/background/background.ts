@@ -368,8 +368,8 @@ async function initialize(): Promise<void> {
       title: "Save page",
       contexts: ["browser_action"],
     });
-    browser.alarms.create("refresh", { periodInMinutes: REFRESH_INTERVAL });
-    browser.alarms.create("refresh-filters", { periodInMinutes: 24 * 60 });
+    void browser.alarms.create("refresh", { periodInMinutes: REFRESH_INTERVAL });
+    void browser.alarms.create("refresh-filters", { periodInMinutes: 24 * 60 });
     browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
       if (
         (changeInfo.status === "complete" || "favIconUrl" in changeInfo) &&
