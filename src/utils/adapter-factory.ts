@@ -9,33 +9,31 @@ import { WallabagAdapter } from "../background/api/adapters/wallabag-adapter";
 import type { ReadItLaterAPI } from "../background/api/read-it-later-adapter";
 
 const adapters = {
-	bookmarks: BookmarksAdapter,
-	wallabag: WallabagAdapter,
-	instapaper: InstapaperAdapter,
-	raindrop: RaindropAdapter,
-	karakeep: KarakeepAdapter,
-	linkace: LinkaceAdapter,
-	linkwarden: LinkwardenAdapter,
-	sync: SyncAdapter,
+  bookmarks: BookmarksAdapter,
+  wallabag: WallabagAdapter,
+  instapaper: InstapaperAdapter,
+  raindrop: RaindropAdapter,
+  karakeep: KarakeepAdapter,
+  linkace: LinkaceAdapter,
+  linkwarden: LinkwardenAdapter,
+  sync: SyncAdapter,
 };
 
 const adapterCache = new Map<keyof typeof adapters, ReadItLaterAPI>();
 
-export const availableBackends = Object.keys(
-	adapters,
-) as (keyof typeof adapters)[];
+export const availableBackends = Object.keys(adapters) as (keyof typeof adapters)[];
 
 export function getAdapter(backend: keyof typeof adapters): ReadItLaterAPI {
-	const cachedAdapter = adapterCache.get(backend);
-	if (cachedAdapter) {
-		return cachedAdapter;
-	}
+  const cachedAdapter = adapterCache.get(backend);
+  if (cachedAdapter) {
+    return cachedAdapter;
+  }
 
-	const AdapterClass = adapters[backend];
-	if (AdapterClass) {
-		const instance = new AdapterClass();
-		adapterCache.set(backend, instance);
-		return instance;
-	}
-	throw new Error("Invalid backend specified");
+  const AdapterClass = adapters[backend];
+  if (AdapterClass) {
+    const instance = new AdapterClass();
+    adapterCache.set(backend, instance);
+    return instance;
+  }
+  throw new Error("Invalid backend specified");
 }

@@ -1,9 +1,11 @@
 import { exec } from "node:child_process";
+import packageJson from "./package.json" with { type: "json" };
+import manifest from "./src/manifest.json" with { type: "json" };
 import {
 	copyFile,
 	mkdir,
 	readdir,
-	readFile,
+	rename,
 	rm,
 	watch,
 	writeFile,
@@ -14,25 +16,9 @@ import { promisify } from "node:util";
 const execAsync = promisify(exec);
 
 
-async function copyDirectoryContents(srcDir: string, destDir: string): Promise<void> {
-	const items = await readdir(srcDir, { withFileTypes: true });
-	
-	for (const item of items) {
-		const srcPath = join(srcDir, item.name);
-		const destPath = join(destDir, item.name);
-		
-		if (item.isDirectory()) {
-			await mkdir(destPath, { recursive: true });
-			await copyDirectoryContents(srcPath, destPath);
-		} else {
-			await copyFile(srcPath, destPath);
-		}
-	}
-}
 
 async function bumpPatchVersion(): Promise<string> {
 	try {
-		const packageJson = JSON.parse(await readFile("package.json", "utf-8"));
 		const currentVersion = packageJson.version;
 		
 		const versionParts = currentVersion.split(".");
@@ -45,7 +31,6 @@ async function bumpPatchVersion(): Promise<string> {
 		packageJson.version = newVersion;
 		await writeFile("package.json", JSON.stringify(packageJson, null, 2));
 		
-		const manifest = JSON.parse(await readFile("src/manifest.json", "utf-8"));
 		manifest.version = newVersion;
 		await writeFile("src/manifest.json", JSON.stringify(manifest, null, 2));
 		
@@ -85,7 +70,13 @@ async function createArchive(): Promise<void> {
 	await mkdir(archiveDir, { recursive: true });
 
 	try {
-		await execAsync(`cd ${distDir} && zip -r ../../${archiveDir}/extension.zip .`);
+		const archivePath = join(archiveDir, "extension.zip");
+		const tempZipPath = join(distDir, "extension.zip");
+		await execAsync("zip -r extension.zip .", {
+			cwd: distDir,
+			env: process.env,
+		});
+		await rename(tempZipPath, archivePath);
 		console.log("Created extension.zip in dist/packages/");
 	} catch (error) {
 		console.error("Failed to create archive:", error);
@@ -102,15 +93,22 @@ async function signFirefoxExtension(): Promise<void> {
 		);
 	}
 
-		try {
-			await execAsync(
-				`web-ext sign --api-key=${AMO_API_KEY} --api-secret=${AMO_API_SECRET} --source-dir=dist/unpackaged --artifacts-dir=dist/signed --channel=unlisted --amo-metadata=src/metadata.json`,
-			);
-			console.log("Extension signed successfully");
-		} catch (error) {
-			console.error("Failed to sign extension:", error);
-			throw error;
-		}
+	try {
+		await execAsync(
+			"web-ext sign --api-key=${AMO_API_KEY} --api-secret=${AMO_API_SECRET} --source-dir=dist/unpackaged --artifacts-dir=dist/signed --channel=unlisted --amo-metadata=src/metadata.json",
+			{
+				env: {
+					...process.env,
+					AMO_API_KEY: String(AMO_API_KEY),
+					AMO_API_SECRET: String(AMO_API_SECRET),
+				},
+			},
+		);
+		console.log("Extension signed successfully");
+	} catch (error) {
+		console.error("Failed to sign extension:", error);
+		throw error;
+	}
 }
 
 async function compileTypeScript(distDir: string, isWatch = false): Promise<void> {
@@ -165,20 +163,27 @@ async function cleanOldArtifacts(): Promise<void> {
 		const oldFiles = ["extension.zip", "firefox.zip", "chromium-mv3.zip", "chromium-mv2.zip"];
 		for (const file of oldFiles) {
 			try {
-				await execAsync(`rm -f dist/packages/${file}`);
+				const filePath = join("dist", "packages", file);
+				await rm(filePath, { force: true });
 			} catch {
 			}
 		}
 		
 		try {
-			await execAsync(`rm -f dist/signed/*.xpi`);
+			const signedDir = join("dist", "signed");
+			const signedFiles = await readdir(signedDir).catch(() => []);
+			for (const file of signedFiles) {
+				if (file.endsWith(".xpi")) {
+					await rm(join(signedDir, file), { force: true });
+				}
+			}
 		} catch {
 		}
 		
 		const oldDirs = ["firefox", "chromium", "tmp"];
 		for (const dir of oldDirs) {
 			try {
-				await execAsync(`rm -rf dist/${dir}`);
+				await rm(join("dist", dir), { recursive: true, force: true });
 			} catch {
 			}
 		}

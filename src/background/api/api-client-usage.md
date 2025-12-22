@@ -144,7 +144,7 @@ getTokenRefreshConfig(): TokenRefreshConfig {
 createTokenMetadata(tokenData: TokenResponse) {
     const now = Date.now();
     const expiresIn = tokenData.expires_in || 3600;
-    
+
     return {
         accessToken: tokenData.access_token,
         refreshToken: tokenData.refresh_token || "",
@@ -196,17 +196,20 @@ async reAuthenticate(): Promise<void> {
 The ApiClient automatically handles common error scenarios:
 
 ### Authentication Errors (401/403)
+
 - Automatically attempts token refresh if supported
 - Falls back to full re-authentication if refresh fails or is unavailable
 - Retries the original request with new tokens
 - Supports both refresh token flow and full re-authentication
 
 ### Rate Limiting (429)
+
 - Automatically waits for the specified delay
 - Retries the request up to the configured limit
 - Logs warnings when approaching rate limits
 
 ### Network Errors
+
 - Proper timeout handling
 - Connection error logging
 - Graceful degradation
@@ -253,7 +256,7 @@ async testConnection(): Promise<boolean> {
 ```typescript
 private async makeAuthenticatedRequest(url: string, options: RequestInit = {}): Promise<Response> {
     const accessToken = await tokenManager.getAccessToken(this.getServiceName());
-    
+
     return this._fetchWithRateLimit(url, {
         ...options,
         headers: {
@@ -303,10 +306,10 @@ For adapters that support re-authentication, implement the optional `reAuthentic
 async reAuthenticate(): Promise<void> {
     // Clear existing tokens
     await tokenManager.clearToken(this.getServiceName());
-    
+
     // Perform full authentication flow
     await this.authenticate();
-    
+
     // Tokens are automatically stored by the authentication method
 }
 ```
@@ -316,10 +319,12 @@ async reAuthenticate(): Promise<void> {
 The ApiClient is designed to avoid circular dependencies between adapters and the client:
 
 ### **Problem Solved**
+
 - **Before**: Adapter → ApiClient → Adapter (circular reference)
 - **After**: Adapter → ApiClient (with function references)
 
 ### **Solution**
+
 The ApiClient uses an `AuthHandlers` interface that contains function references instead of storing the adapter directly:
 
 ```typescript

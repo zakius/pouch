@@ -8,23 +8,23 @@
 import type { TokenRefreshConfig } from "../token-manager";
 
 export interface TokenizedAdapter {
-	getServiceName(): string;
+  getServiceName(): string;
 
-	getTokenRefreshConfig(): TokenRefreshConfig;
+  getTokenRefreshConfig(): TokenRefreshConfig;
 
-	createTokenMetadata(tokenData: Record<string, unknown>): {
-		accessToken: string;
-		refreshToken: string;
-		tokenType: string;
-		expiresAt: number;
-		issuedAt: number;
-		scope?: string;
-		refreshCount: number;
-	};
+  createTokenMetadata(tokenData: Record<string, unknown>): {
+    accessToken: string;
+    refreshToken: string;
+    tokenType: string;
+    expiresAt: number;
+    issuedAt: number;
+    scope?: string;
+    refreshCount: number;
+  };
 
-	getBaseUrl(): string;
+  getBaseUrl(): string;
 
-	getAuthEndpoint(): string;
+  getAuthEndpoint(): string;
 
-	reAuthenticate?(): Promise<void>;
+  reAuthenticate?(): Promise<void>;
 }
