@@ -126,7 +126,9 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
       accessToken: this.accessToken || "",
       refreshToken: "", // No refresh token for OAuth 1.0a
       tokenType: "OAuth",
-      expiresAt: now + 365 * 24 * 60 * 60 * 1000, // 1 year from now (effectively never expires)
+      // Instapaper OAuth 1.0a tokens don't technically expire, but we set 1 year
+      // to trigger periodic re-authentication as a security best practice
+      expiresAt: now + 365 * 24 * 60 * 60 * 1000,
       issuedAt: now,
       scope: undefined,
       refreshCount: 0,
@@ -150,6 +152,16 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
     await this.authenticate();
   }
 
+  /**
+   * Instapaper xAuth Authentication
+   *
+   * Instapaper uses xAuth (OAuth 1.0a extension) which exchanges username/password
+   * directly for an access token without user redirect flow.
+   *
+   * This is the ONLY way to obtain Instapaper access tokens according to their API.
+   *
+   * API: https://www.instapaper.com/api
+   */
   private async authenticate(): Promise<void> {
     const response = await fetch(`${this.apiUrl}/api/1/oauth/access_token`, {
       method: "POST",
@@ -224,14 +236,34 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
       bookmark_id: id,
     });
   }
+  /**
+   * Instapaper Incremental Sync (FULL SUPPORT)
+   *
+   * Instapaper's "have" parameter enables true incremental sync with deletion tracking:
+   *
+   * HOW IT WORKS:
+   * 1. Send comma-separated list of bookmark IDs we already have
+   * 2. Server returns only NEW or UPDATED bookmarks
+   * 3. Server also returns delete_ids[] array with deleted bookmark IDs
+   * 4. Hash-based change detection: bookmarks only returned if content changed
+   *
+   * BENEFITS:
+   * - Efficient: Only transfers changed data
+   * - Complete: Tracks additions, updates, AND deletions
+   * - Fast: Can use incremental sync exclusively (no periodic full syncs needed)
+   *
+   * Example: have="12345:OjMuzFp6,12346:0n4ONgYs,12347:YXo82wTR"
+   * - Each entry: ID:hash (hash detects content changes)
+   * - Optional: Add :progress:timestamp to track reading progress
+   *
+   * API: https://www.instapaper.com/api
+   */
   async sync(options?: SyncOptions): Promise<SyncResult> {
     const limit = 500;
     const allArticles: Article[] = [];
     let receivedBookmarks: InstapaperBookmark[] = [];
     let totalFetched = 0;
 
-    // Instapaper uses a different approach for incremental sync
-    // It uses the "have" parameter to get only new bookmarks
     const mode = options?.mode || "overwrite";
 
     do {
@@ -255,7 +287,8 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
         receivedBookmarks = [];
       }
 
-      // Rate limiting for Instapaper API
+      // Rate limiting: Instapaper doesn't publish rate limits,
+      // but 1 second between requests is conservative
       if (receivedBookmarks.length === limit) {
         await new Promise((resolve) => setTimeout(resolve, 1000));
       }
@@ -280,6 +313,27 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
       created_at: item.time ? new Date(item.time * 1000).toISOString() : new Date().toISOString(),
     };
   }
+  /**
+   * OAuth 1.0a Signature Generation for Instapaper
+   *
+   * Instapaper requires OAuth 1.0a signatures for all API requests.
+   *
+   * Process:
+   * 1. Collect all parameters (request params + OAuth params)
+   * 2. Sort parameters alphabetically and URL-encode them
+   * 3. Create signature base string: METHOD&url&encoded_params
+   * 4. Generate HMAC-SHA1 signature using: consumerSecret&accessTokenSecret
+   * 5. Add signature to OAuth Authorization header
+   *
+   * Requirements:
+   * - Only HMAC-SHA1 signature method supported
+   * - HTTPS required on all endpoints
+   * - All requests via POST method
+   * - Parameters in POST body, not query string
+   * - OAuth params in Authorization header, not body/query
+   *
+   * API: https://www.instapaper.com/api
+   */
   private async _makeSignedRequest(
     endpoint: string,
     params: Record<string, unknown>,

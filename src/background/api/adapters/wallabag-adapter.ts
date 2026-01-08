@@ -172,8 +172,10 @@ export class WallabagAdapter implements ReadItLaterAPI<WallabagSettings>, Tokeni
     this.config = settings.apiConfig;
     this.apiUrl = this.config.url;
 
+    // Wallabag OAuth2 requires password for grant_type=password authentication flow
+    // Even for accounts without passwords, a value must be provided (any non-empty string works)
     if (!this.config.password) {
-      throw new Error("Password is required for Wallabag authentication");
+      throw new Error("Password is required for Wallabag OAuth2 password grant authentication");
     }
 
     await this.authenticate();
@@ -197,12 +199,6 @@ export class WallabagAdapter implements ReadItLaterAPI<WallabagSettings>, Tokeni
       password: this.config.password || "",
     });
 
-    console.log("Wallabag authentication request:", {
-      url: this.getAuthEndpoint(),
-      body: requestBody.toString(),
-      hasPassword: !!this.config.password,
-    });
-
     const response = await fetch(this.getAuthEndpoint(), {
       method: "POST",
       headers: {
@@ -217,7 +213,6 @@ export class WallabagAdapter implements ReadItLaterAPI<WallabagSettings>, Tokeni
     }
 
     const tokenData = (await response.json()) as Record<string, unknown>;
-    console.log("Wallabag API response:", tokenData);
 
     if (tokenData.error) {
       const errorMessage =
@@ -231,8 +226,7 @@ export class WallabagAdapter implements ReadItLaterAPI<WallabagSettings>, Tokeni
     try {
       validatedTokenData = v.parse(wallabagTokenResponseSchema, tokenData);
     } catch (validationError: unknown) {
-      console.error("Validation error for Wallabag token response:", validationError);
-      console.error("Raw token data:", tokenData);
+      logger.error("Validation error for Wallabag token response:", validationError);
       throw new Error(
         `Invalid token response from Wallabag API: ${validationError instanceof Error ? validationError.message : "Unknown validation error"}`,
       );
@@ -241,7 +235,7 @@ export class WallabagAdapter implements ReadItLaterAPI<WallabagSettings>, Tokeni
     const tokenMetadata = this.createTokenMetadata(validatedTokenData);
     await tokenManager.storeToken(this.getServiceName(), tokenMetadata);
 
-    console.log("Wallabag authentication successful", {
+    logger.debug("Wallabag authentication successful", {
       tokenType: tokenMetadata.tokenType,
       expiresAt: new Date(tokenMetadata.expiresAt).toISOString(),
       scope: tokenMetadata.scope,
@@ -287,6 +281,41 @@ export class WallabagAdapter implements ReadItLaterAPI<WallabagSettings>, Tokeni
     await this.apiClient.delete(`/api/entries/${id}.json`);
   }
 
+  /**
+   * Wallabag Sync Mode Decision (HYBRID APPROACH)
+   *
+   * Wallabag supports two sync modes:
+   *
+   * === FULL SYNC (overwrite) ===
+   * - Fetches ALL entries from server
+   * - Replaces local cache completely
+   * - Catches additions, updates, AND deletions
+   * - Used for: first sync, periodic rebuild (>24h since last full sync)
+   *
+   * === INCREMENTAL SYNC (update) ===
+   * - Uses "since" parameter (Unix timestamp in seconds)
+   * - Fetches only entries modified/created after timestamp
+   * - LIMITATION: Does NOT track deletions
+   * - Used for: quick updates when recent full sync (<24h ago)
+   *
+   * === STRATEGY ===
+   * - First sync → FULL (baseline)
+   * - Last full sync >24h ago + browser idle → FULL (catch deletions)
+   * - Otherwise → INCREMENTAL (fast update)
+   *
+   * This hybrid approach ensures:
+   * - Fast syncs during active use (incremental)
+   * - Complete data consistency (periodic full syncs)
+   * - Efficient bandwidth usage
+   *
+   * API: https://doc.wallabag.org/developer/api/
+   *
+   * IMPORTANT: Deletion Tracking
+   * - Wallabag's "since" parameter does NOT track deletions
+   * - If an entry is deleted on server, incremental sync won't know
+   * - Solution: Periodic full syncs (every 24h when idle) catch deletions
+   * - by comparing the full list from server with local cache
+   */
   private makeSyncDecision(options?: SyncOptions): {
     mode: SyncMode;
     reason: string;
@@ -355,14 +384,23 @@ export class WallabagAdapter implements ReadItLaterAPI<WallabagSettings>, Tokeni
         detail: "metadata",
       });
 
-      // Add incremental sync support if lastSyncTimestamp is provided
-      // Note: Wallabag doesn't support full delta sync, so we only fetch newer items
-      // Remotely deleted items will be caught during the next full rebuild (startup)
+      /**
+       * Wallabag Incremental Sync Implementation
+       *
+       * The "since" parameter filters entries by modification/creation time
+       * Expected format: Unix timestamp in SECONDS (not milliseconds!)
+       *
+       * CRITICAL LIMITATION:
+       * - Does NOT return entries deleted on server
+       * - Deleted entries only caught during full sync
+       *
+       * Therefore, we use periodic full syncs (every 24h when idle)
+       */
       if (options?.lastSyncTimestamp && mode === "update") {
-        // Convert ISO string to Unix timestamp for Wallabag API
+        // Convert ISO timestamp to Unix seconds
         const unixTimestamp = Math.floor(new Date(options.lastSyncTimestamp).getTime() / 1000);
         params.set("since", unixTimestamp.toString());
-        logger.debug("Using incremental sync with since parameter:", {
+        logger.debug("Using Wallabag incremental sync with since parameter", {
           lastSyncTimestamp: options.lastSyncTimestamp,
           unixTimestamp,
           mode,

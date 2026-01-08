@@ -1,6 +1,7 @@
 import * as v from "valibot";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
+import { logger } from "../../../utils/logger";
 import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
 import { type ApiClient, createApiClient } from "../api-client";
@@ -160,12 +161,40 @@ export class LinkwardenAdapter implements ReadItLaterAPI<LinkwardenSettings>, To
   async deleteArticle(id: number): Promise<void> {
     await this.apiClient.delete(`/api/v1/links/${id}`);
   }
+  /**
+   * Linkwarden Sync (UNCERTAIN INCREMENTAL SUPPORT)
+   *
+   * STATUS: Requires verification
+   *
+   * API Documentation:
+   * - Old endpoint: /api/v1/links (DEPRECATED)
+   * - New endpoint: /api/v1/search (recommended)
+   * - Docs: https://docs.linkwarden.app/api/search-links
+   *
+   * PROBLEM: Documentation doesn't specify search query parameters
+   * Current implementation assumes createdAfter parameter exists (UNVERIFIED!)
+   *
+   * RECOMMENDED ACTION:
+   * 1. Test if /api/v1/links or /api/v1/search accepts createdAfter parameter
+   * 2. If yes: Use incremental sync with periodic full syncs
+   * 3. If no: Fall back to full sync only
+   *
+   * CURRENT IMPLEMENTATION: Assumes incremental support (NEEDS TESTING)
+   *
+   * WARNING: The createdAfter parameter may not actually work as expected.
+   * If the parameter is ignored, the API will return all results every time.
+   * The sync caller should handle duplicates appropriately.
+   */
   async sync(options?: SyncOptions): Promise<SyncResult> {
     // Build query parameters based on sync options
     const queryParams = new URLSearchParams();
 
-    // Add incremental sync support if lastSyncTimestamp is provided
+    // CAUTION: This parameter is NOT documented - may not work!
+    // Attempting incremental sync, but falling back to full results if parameter is ignored
     if (options?.lastSyncTimestamp && options.mode === "update") {
+      logger.warn("Linkwarden incremental sync not officially documented - attempting createdAfter parameter", {
+        lastSyncTimestamp: options.lastSyncTimestamp,
+      });
       queryParams.set("createdAfter", options.lastSyncTimestamp);
     }
 
@@ -191,6 +220,7 @@ export class LinkwardenAdapter implements ReadItLaterAPI<LinkwardenSettings>, To
         totalProcessed: articles.length,
         lastSyncTimestamp: new Date().toISOString(),
         apiVersion: "1.0",
+        note: "Linkwarden incremental sync parameter not officially documented - behavior may vary",
       },
     };
   }

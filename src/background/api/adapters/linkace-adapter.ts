@@ -1,6 +1,7 @@
 import * as v from "valibot";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
+import { logger } from "../../../utils/logger";
 import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
 import { type ApiClient, createApiClient } from "../api-client";
@@ -175,7 +176,7 @@ export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings>, Tokenize
     const response = await this.apiClient.post("/api/v2/links", {
       url: article.url,
       title: article.title,
-      visibility: 1, // Private by default
+      visibility: 1, // LinkAce visibility: 1 = public, 2 = internal, 3 = private
       check_disabled: false,
     });
     const validatedData = v.parse(linkaceSaveResponseSchema, response.data);
@@ -191,6 +192,24 @@ export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings>, Tokenize
     await this.apiClient.delete(`/api/v2/links/${id}`);
   }
 
+  /**
+   * LinkAce Sync (DOCUMENTED INCREMENTAL SUPPORT)
+   *
+   * LinkAce API supports incremental sync via created_after parameter
+   * API docs: https://api-docs.linkace.org/
+   *
+   * PARAMETER: created_after
+   * - Format: ISO 8601 timestamp string
+   * - Filters links created after this timestamp
+   *
+   * LIMITATIONS:
+   * - Deletion tracking: UNKNOWN (not documented)
+   * - Update tracking: UNKNOWN (not documented)
+   *
+   * STRATEGY:
+   * - Use incremental sync for speed
+   * - Perform periodic full syncs to catch potential deletions
+   */
   async sync(options?: SyncOptions): Promise<SyncResult> {
     const perPage = 30;
     const allArticles: Article[] = [];
@@ -203,9 +222,13 @@ export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings>, Tokenize
       per_page: perPage.toString(),
     });
 
-    // Add incremental sync support if lastSyncTimestamp is provided
+    // LinkAce documents created_after parameter for incremental sync
+    // Format: ISO 8601 timestamp string
     if (options?.lastSyncTimestamp && options.mode === "update") {
       baseParams.set("created_after", options.lastSyncTimestamp);
+      logger.debug("Using LinkAce incremental sync with created_after parameter", {
+        lastSyncTimestamp: options.lastSyncTimestamp,
+      });
     }
 
     while (hasMorePages) {

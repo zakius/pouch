@@ -1,6 +1,7 @@
 import * as v from "valibot";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
+import { logger } from "../../../utils/logger";
 import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
 import { type ApiClient, createApiClient } from "../api-client";
@@ -177,6 +178,25 @@ export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings>, Tokeni
     }
   }
   async sync(options?: SyncOptions): Promise<SyncResult> {
+    /**
+     * Raindrop Incremental Sync (PARTIAL SUPPORT)
+     *
+     * Raindrop supports incremental sync via search parameter with special syntax.
+     * This is NOT a dedicated API parameter, but a search feature.
+     *
+     * LIMITATIONS:
+     * - Only filters by creation date (created:>TIMESTAMP)
+     * - Does NOT track deletions (deleted raindrops remain in local cache)
+     * - Does NOT track updates to existing raindrops
+     *
+     * SEARCH SYNTAX: created:>UNIX_TIMESTAMP
+     * - Timestamp must be Unix timestamp in SECONDS, not milliseconds
+     * - API docs: https://developer.raindrop.io/
+     *
+     * STRATEGY:
+     * - Use incremental sync for quick updates between periodic full syncs
+     * - Perform full sync every 24-48 hours to catch deletions
+     */
     const perPage = 50;
     let allArticles: Article[] = [];
     let page = 0;
@@ -192,7 +212,14 @@ export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings>, Tokeni
 
     // Add incremental sync support if lastSyncTimestamp is provided
     if (options?.lastSyncTimestamp && options.mode === "update") {
-      queryParams.set("search", `created:>${options.lastSyncTimestamp}`);
+      // Convert ISO string to Unix timestamp in seconds for Raindrop search syntax
+      const unixTimestamp = Math.floor(new Date(options.lastSyncTimestamp).getTime() / 1000);
+      queryParams.set("search", `created:>${unixTimestamp}`);
+      logger.debug("Using Raindrop incremental sync with search syntax", {
+        lastSyncTimestamp: options.lastSyncTimestamp,
+        unixTimestamp,
+        searchQuery: `created:>${unixTimestamp}`,
+      });
     }
 
     do {

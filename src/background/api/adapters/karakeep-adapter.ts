@@ -1,6 +1,7 @@
 import * as v from "valibot";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
+import { logger } from "../../../utils/logger";
 import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
 import { type ApiClient, createApiClient } from "../api-client";
@@ -130,9 +131,12 @@ export class KarakeepAdapter implements ReadItLaterAPI<KarakeepSettings>, Tokeni
   }
   async testConnection(): Promise<boolean> {
     try {
+      // KaraKeep GET /bookmarks requires authentication
+      // Using this to verify API access and credentials
+      // Returns user's bookmarks (lightweight operation)
       return await this.apiClient.testConnection("/bookmarks");
     } catch (error) {
-      console.error("Karakeep connection test failed:", error);
+      logger.error("Karakeep connection test failed:", error);
       return false;
     }
   }
@@ -152,18 +156,30 @@ export class KarakeepAdapter implements ReadItLaterAPI<KarakeepSettings>, Tokeni
   async deleteArticle(id: number): Promise<void> {
     await this.apiClient.delete(`/bookmarks/${id}`);
   }
-  async sync(options?: SyncOptions): Promise<SyncResult> {
-    // Build query parameters based on sync options
-    const queryParams = new URLSearchParams();
-
-    // Add incremental sync support if lastSyncTimestamp is provided
-    if (options?.lastSyncTimestamp && options.mode === "update") {
-      queryParams.set("createdAfter", options.lastSyncTimestamp);
-    }
-
-    const url = queryParams.toString() ? `/bookmarks?${queryParams.toString()}` : "/bookmarks";
-
-    const response = await this.apiClient.get(url);
+  async sync(_options?: SyncOptions): Promise<SyncResult> {
+    /**
+     * KaraKeep Sync (FULL SYNC ONLY)
+     *
+     * KaraKeep API does NOT support incremental sync via date filtering.
+     * Available query parameters from official API docs:
+     * - archived (boolean)
+     * - favourited (boolean)
+     * - limit (number)
+     * - cursor (string for pagination)
+     *
+     * API Documentation: https://docs.karakeep.app/api/get-all-bookmarks/
+     *
+     * LIMITATIONS:
+     * - No createdAfter/created_since parameter exists
+     * - No modifiedSince parameter exists
+     * - Must fetch ALL bookmarks on every sync
+     *
+     * STRATEGY:
+     * - Always perform full sync (mode parameter is ignored)
+     * - Client-side diffing to detect changes
+     * - Consider implementing caching to reduce API calls if needed
+     */
+    const response = await this.apiClient.get("/bookmarks");
     const validatedData = v.parse(karakeepSyncResponseSchema, response.data);
 
     if ("error" in validatedData) {
@@ -171,16 +187,16 @@ export class KarakeepAdapter implements ReadItLaterAPI<KarakeepSettings>, Tokeni
     }
 
     const articles = validatedData.map((item) => this.mapArticle(item));
-    const mode = options?.mode || "overwrite";
 
     return {
       articles,
-      mode,
+      mode: "overwrite", // Always full sync for KaraKeep
       metadata: {
         totalFetched: articles.length,
         totalProcessed: articles.length,
         lastSyncTimestamp: new Date().toISOString(),
         apiVersion: "1.0",
+        note: "KaraKeep does not support incremental sync - full sync performed",
       },
     };
   }
