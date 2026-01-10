@@ -258,7 +258,7 @@ export class WallabagAdapter implements ReadItLaterAPI<WallabagSettings>, Tokeni
     try {
       return await this.apiClient.testConnection("/api/entries.json?page=1&perPage=1");
     } catch (error) {
-      console.error("Wallabag connection test failed:", error);
+      logger.error("Wallabag connection test failed:", error);
       return false;
     }
   }
@@ -431,7 +431,7 @@ export class WallabagAdapter implements ReadItLaterAPI<WallabagSettings>, Tokeni
       );
     }
 
-    const firstPageArticles = validatedFirstData._embedded.items.map((item) =>
+    const firstPageArticles = validatedFirstData._embedded.items.map((item: WallabagItem) =>
       this.mapArticle(item),
     );
     allArticles.push(...firstPageArticles);
@@ -468,7 +468,9 @@ export class WallabagAdapter implements ReadItLaterAPI<WallabagSettings>, Tokeni
         );
       }
 
-      const pageArticles = validatedData._embedded.items.map((item) => this.mapArticle(item));
+      const pageArticles = validatedData._embedded.items.map((item: WallabagItem) =>
+        this.mapArticle(item),
+      );
       allArticles.push(...pageArticles);
       totalFetched += pageArticles.length;
     }

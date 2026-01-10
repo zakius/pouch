@@ -10,7 +10,7 @@ import type { TokenRefreshConfig } from "../token-manager";
 export interface TokenizedAdapter {
   getServiceName(): string;
 
-  getTokenRefreshConfig(): TokenRefreshConfig;
+  getTokenRefreshConfig(): TokenRefreshConfig | null;
 
   createTokenMetadata(tokenData: Record<string, unknown>): {
     accessToken: string;

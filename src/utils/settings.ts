@@ -5,7 +5,7 @@ import { karakeepSettingsSchema } from "../background/api/adapters/karakeep-adap
 import { linkwardenSettingsSchema } from "../background/api/adapters/linkwarden-adapter";
 import { raindropSettingsSchema } from "../background/api/adapters/raindrop-adapter";
 import { wallabagSettingsSchema } from "../background/api/adapters/wallabag-adapter";
-import type { baseSettingsSchema } from "./base-settings-schema";
+import { baseSettingsSchema } from "./base-settings-schema";
 import { LogLevel } from "./log-levels";
 import { logger } from "./logger";
 export const settingsSchema = v.variant("backend", [

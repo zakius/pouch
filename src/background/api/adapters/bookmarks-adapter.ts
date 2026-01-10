@@ -1,6 +1,7 @@
 import * as v from "valibot";
 import type { Article } from "../../../types/common";
 import { baseSettingsSchema } from "../../../utils/base-settings-schema";
+import { logger } from "../../../utils/logger";
 import type {
   ReadItLaterAPI,
   SavingArticle,
@@ -42,7 +43,7 @@ export class BookmarksAdapter implements ReadItLaterAPI<BookmarksSettings> {
       await this.ensurePouchFolder();
       return true;
     } catch (error) {
-      console.error("Bookmarks connection test failed:", error);
+      logger.error("Bookmarks connection test failed:", error);
       return false;
     }
   }

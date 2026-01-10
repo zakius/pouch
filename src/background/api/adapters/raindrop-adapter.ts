@@ -151,7 +151,7 @@ export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings>, Tokeni
     try {
       return await this.apiClient.testConnection("/collections");
     } catch (error) {
-      console.error("Raindrop connection test failed:", error);
+      logger.error("Raindrop connection test failed:", error);
       return false;
     }
   }

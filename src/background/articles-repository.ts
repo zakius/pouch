@@ -9,18 +9,29 @@ import type {
   SyncOptions,
   SyncResult,
 } from "./api/read-it-later-adapter";
+
+type PendingOperation = {
+  type: "save" | "delete";
+  article?: Pick<Article, "url" | "title">;
+  articleId?: number;
+  timestamp: number;
+};
+
 export class ArticlesRepository {
   private api: ReadItLaterAPI | null = null;
   private settings!: Settings;
   private lastFullSyncTimestamp: number | null = null;
   private lastSyncTimestamp: string | null = null;
   private syncInProgress: Promise<void> | null = null;
+  private pendingOperations: PendingOperation[] = [];
+
   async initialize(settings: Settings): Promise<void> {
     logger.info("Initializing ArticlesRepository with settings:", settings);
     this.settings = settings;
     this.api = null;
     await this.loadSyncTimestamps();
   }
+
   private async getApi(): Promise<ReadItLaterAPI> {
     if (this.api) {
       return this.api;
@@ -40,19 +51,23 @@ export class ArticlesRepository {
       );
     }
   }
+
   async testConnection(): Promise<boolean> {
     const api = await this.getApi();
     return api.testConnection();
   }
+
   async getArticle(id: number): Promise<Article | undefined> {
     const articles = await this.getAllArticles();
     return articles.find((a) => a.id === id);
   }
+
   async getAllArticles(): Promise<Article[]> {
     const result = await browser.storage.local.get(["articles"]);
     logger.debug("result", result);
     return result?.articles || [];
   }
+
   async findSaved(url: string): Promise<Article | undefined> {
     const articles = await this.getAllArticles();
 
@@ -65,6 +80,7 @@ export class ArticlesRepository {
 
     return existingArticle;
   }
+
   private filterBySearch(articles: Article[], search?: string): Article[] {
     if (!search) {
       return articles;
@@ -77,6 +93,7 @@ export class ArticlesRepository {
       return searchWords.every((word) => title.includes(word) || url.includes(word));
     });
   }
+
   async getRecentArticles(
     page = 1,
     perPage = 30,
@@ -98,12 +115,8 @@ export class ArticlesRepository {
       total: articlesNumber,
     };
   }
-  async saveArticle(article: Pick<Article, "url" | "title">): Promise<Article> {
-    if (this.syncInProgress) {
-      logger.debug("Sync in progress, waiting before saving article");
-      await this.syncInProgress;
-    }
 
+  async saveArticle(article: Pick<Article, "url" | "title">): Promise<Article> {
     const api = await this.getApi();
     logger.info("Saving article:", article);
 
@@ -124,6 +137,15 @@ export class ArticlesRepository {
 
       logger.debug("Saved article, now adding to cache", articleWithCanonicalUrl);
       await this.addArticle(articleWithCanonicalUrl);
+
+      // Track this operation if sync is in progress
+      if (this.syncInProgress) {
+        this.pendingOperations.push({
+          type: "save",
+          article: { url: article.url, title: article.title },
+          timestamp: Date.now(),
+        });
+      }
 
       return articleWithCanonicalUrl;
     } catch (error) {
@@ -146,6 +168,15 @@ export class ArticlesRepository {
 
           await this.addArticle(retryArticleWithCanonicalUrl);
 
+          // Track this operation if sync is in progress
+          if (this.syncInProgress) {
+            this.pendingOperations.push({
+              type: "save",
+              article: { url: article.url, title: article.title },
+              timestamp: Date.now(),
+            });
+          }
+
           logger.info("Successfully saved article after re-authentication");
           return retryArticleWithCanonicalUrl;
         } catch (retryError) {
@@ -157,12 +188,8 @@ export class ArticlesRepository {
       throw error;
     }
   }
-  async deleteArticle(id: number): Promise<{ success: boolean; id: string | number }> {
-    if (this.syncInProgress) {
-      logger.debug("Sync in progress, waiting before deleting article");
-      await this.syncInProgress;
-    }
 
+  async deleteArticle(id: number): Promise<{ success: boolean; id: string | number }> {
     const api = await this.getApi();
     logger.debug("Deleting article through cache:", id);
     if (!id) {
@@ -173,12 +200,23 @@ export class ArticlesRepository {
       await this.removeArticle(id);
       await api.deleteArticle(id);
       logger.debug("Deleted article from API", id);
+
+      // Track this operation if sync is in progress
+      if (this.syncInProgress) {
+        this.pendingOperations.push({
+          type: "delete",
+          articleId: id,
+          timestamp: Date.now(),
+        });
+      }
+
       return { success: true, id };
     } catch (error) {
       logger.error("Error deleting article through cache:", error);
       throw error;
     }
   }
+
   async syncWithAPI(
     options?: SyncOptions,
   ): Promise<{ items: Article[]; total: number; syncResult: SyncResult }> {
@@ -200,6 +238,9 @@ export class ArticlesRepository {
         },
       };
     }
+
+    // Clear pending operations at start of sync
+    this.pendingOperations = [];
 
     const syncPromise = (async (): Promise<{
       items: Article[];
@@ -263,6 +304,13 @@ export class ArticlesRepository {
         // Update sync timestamps
         await this.updateSyncTimestamp(syncResult.mode);
 
+        // Re-apply pending operations that occurred during sync
+        if (this.pendingOperations.length > 0) {
+          logger.info(`Re-applying ${this.pendingOperations.length} pending operations after sync`);
+          await this.reapplyPendingOperations();
+          this.pendingOperations = [];
+        }
+
         return {
           items: processedArticles,
           total: processedArticles.length,
@@ -292,6 +340,37 @@ export class ArticlesRepository {
     this.syncInProgress = syncPromise.then(() => undefined);
     return syncPromise;
   }
+
+  private async reapplyPendingOperations(): Promise<void> {
+    const currentArticles = await this.getAllArticles();
+
+    for (const op of this.pendingOperations) {
+      try {
+        if (op.type === "save" && op.article) {
+          // Check if article already exists in the synced dataset
+          const canonicalUrl = await canonicalizeUrl(op.article.url);
+          const exists = currentArticles.some((a) => (a.canonicalUrl || a.url) === canonicalUrl);
+
+          if (!exists) {
+            logger.debug("Re-applying save operation for:", op.article);
+            // The article was already saved to the server, just add to local cache
+            await this.addArticle({
+              id: Date.now() + Math.random(), // Temporary ID, will be updated on next sync
+              url: op.article.url,
+              title: op.article.title,
+              created_at: new Date(op.timestamp).toISOString(),
+            });
+          }
+        } else if (op.type === "delete" && op.articleId !== undefined) {
+          logger.debug("Re-applying delete operation for:", op.articleId);
+          await this.removeArticle(op.articleId);
+        }
+      } catch (error) {
+        logger.error("Error re-applying pending operation:", op, error);
+      }
+    }
+  }
+
   private async addArticle(article: Article): Promise<void> {
     logger.debug("Adding article to cache:", article);
 
@@ -313,6 +392,7 @@ export class ArticlesRepository {
     await browser.storage.local.set({ articles: updatedArticles });
     logger.debug("Article added to cache:", article);
   }
+
   private async removeArticle(id: number): Promise<void> {
     logger.debug("Removing article from cache:", id);
     if (!id) {
@@ -323,6 +403,7 @@ export class ArticlesRepository {
     const filteredArticles = articles.filter((a) => a.id !== id);
     await browser.storage.local.set({ articles: filteredArticles });
   }
+
   async updateArticles(newArticles: Article[]): Promise<void> {
     logger.debug("Updating articles in cache:", newArticles.length);
     await browser.storage.local.set({ articles: newArticles });

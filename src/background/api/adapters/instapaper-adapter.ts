@@ -193,7 +193,7 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
       await this._makeSignedRequest("/api/1/bookmarks/list", { limit: 1 });
       return true;
     } catch (error) {
-      console.error("Instapaper connection test failed:", error);
+      logger.error("Instapaper connection test failed:", error);
       return false;
     }
   }
@@ -215,11 +215,14 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
     const data = await this._makeSignedRequest("/api/1/bookmarks/add", params);
     const validatedData = v.parse(instapaperSaveResponseSchema, data);
 
-    const savedBookmark = validatedData.find(
-      (item): item is InstapaperBookmark => item.type === "bookmark",
-    );
+    // Filter to find bookmark and error
+    const savedBookmark = (validatedData as (InstapaperBookmark | InstapaperError)[]).find(
+      (item) => item.type === "bookmark",
+    ) as InstapaperBookmark | undefined;
 
-    const error = validatedData.find((item): item is InstapaperError => item.type === "error");
+    const error = (validatedData as (InstapaperBookmark | InstapaperError)[]).find(
+      (item) => item.type === "error",
+    ) as InstapaperError | undefined;
 
     if (error) {
       throw new Error(`Failed to save article: ${error.message} (Error ${error.error_code})`);

@@ -53,6 +53,13 @@ const linkwardenErrorSchema = v.object({
   status: v.optional(v.number()),
 });
 
+// Type guard for Linkwarden error responses
+function isLinkwardenError(
+  data: unknown,
+): data is { error: string; message?: string; status?: number } {
+  return typeof data === "object" && data !== null && "error" in data;
+}
+
 const linkwardenSaveResponseSchema = v.union([
   v.object({
     response: linkwardenItemSchema,
@@ -96,8 +103,9 @@ export class LinkwardenAdapter implements ReadItLaterAPI<LinkwardenSettings>, To
     return "linkwarden";
   }
 
-  getTokenRefreshConfig(): TokenRefreshConfig {
-    throw new Error("Linkwarden uses static API tokens, no refresh configuration available");
+  getTokenRefreshConfig(): TokenRefreshConfig | null {
+    // Linkwarden uses static API tokens that don't expire/refresh
+    return null;
   }
 
   createTokenMetadata(_tokenData: Record<string, unknown>) {
@@ -141,7 +149,7 @@ export class LinkwardenAdapter implements ReadItLaterAPI<LinkwardenSettings>, To
     try {
       return await this.apiClient.testConnection("/api/v1/links");
     } catch (error) {
-      console.error("Linkwarden connection test failed:", error);
+      logger.error("Linkwarden connection test failed:", error);
       return false;
     }
   }
@@ -152,7 +160,7 @@ export class LinkwardenAdapter implements ReadItLaterAPI<LinkwardenSettings>, To
     });
     const validatedData = v.parse(linkwardenSaveResponseSchema, response.data);
 
-    if ("error" in validatedData) {
+    if (isLinkwardenError(validatedData)) {
       throw new Error(`Failed to save article: ${validatedData.message || validatedData.error}`);
     }
 
@@ -162,65 +170,46 @@ export class LinkwardenAdapter implements ReadItLaterAPI<LinkwardenSettings>, To
     await this.apiClient.delete(`/api/v1/links/${id}`);
   }
   /**
-   * Linkwarden Sync (UNCERTAIN INCREMENTAL SUPPORT)
+   * Linkwarden Sync (FULL SYNC ONLY)
    *
-   * STATUS: Requires verification
+   * Linkwarden API does NOT support incremental sync via date filtering.
+   * Available query parameters from official API docs:
+   * - searchQueryString (string) - for filtering search results
+   * - sort (number) - for sorting
+   * - cursor (number) - for pagination
    *
-   * API Documentation:
-   * - Old endpoint: /api/v1/links (DEPRECATED)
-   * - New endpoint: /api/v1/search (recommended)
-   * - Docs: https://docs.linkwarden.app/api/search-links
+   * API Documentation: https://docs.linkwarden.app/api/search-links
    *
-   * PROBLEM: Documentation doesn't specify search query parameters
-   * Current implementation assumes createdAfter parameter exists (UNVERIFIED!)
+   * LIMITATIONS:
+   * - No createdAfter/created_since parameter exists
+   * - No modifiedSince parameter exists
+   * - Must fetch ALL links on every sync
    *
-   * RECOMMENDED ACTION:
-   * 1. Test if /api/v1/links or /api/v1/search accepts createdAfter parameter
-   * 2. If yes: Use incremental sync with periodic full syncs
-   * 3. If no: Fall back to full sync only
-   *
-   * CURRENT IMPLEMENTATION: Assumes incremental support (NEEDS TESTING)
-   *
-   * WARNING: The createdAfter parameter may not actually work as expected.
-   * If the parameter is ignored, the API will return all results every time.
-   * The sync caller should handle duplicates appropriately.
+   * STRATEGY:
+   * - Always perform full sync (mode parameter is ignored)
+   * - Client-side diffing to detect changes
    */
-  async sync(options?: SyncOptions): Promise<SyncResult> {
-    // Build query parameters based on sync options
-    const queryParams = new URLSearchParams();
-
-    // CAUTION: This parameter is NOT documented - may not work!
-    // Attempting incremental sync, but falling back to full results if parameter is ignored
-    if (options?.lastSyncTimestamp && options.mode === "update") {
-      logger.warn("Linkwarden incremental sync not officially documented - attempting createdAfter parameter", {
-        lastSyncTimestamp: options.lastSyncTimestamp,
-      });
-      queryParams.set("createdAfter", options.lastSyncTimestamp);
-    }
-
-    const url = queryParams.toString()
-      ? `/api/v1/links?${queryParams.toString()}`
-      : "/api/v1/links";
-
-    const response = await this.apiClient.get(url);
+  async sync(_options?: SyncOptions): Promise<SyncResult> {
+    const response = await this.apiClient.get("/api/v1/links");
     const validatedData = v.parse(linkwardenSyncResponseSchema, response.data);
 
-    if ("error" in validatedData) {
+    if (isLinkwardenError(validatedData)) {
       throw new Error(`Failed to sync articles: ${validatedData.message || validatedData.error}`);
     }
 
-    const articles = validatedData.response.data.map((item) => this.mapArticle(item));
-    const mode = options?.mode || "overwrite";
+    // After error check, validatedData has response property
+    const articles = (validatedData as { response: { data: LinkwardenItem[] } }).response.data.map(
+      (item) => this.mapArticle(item),
+    );
 
     return {
       articles,
-      mode,
+      mode: "overwrite", // Always full sync for Linkwarden
       metadata: {
         totalFetched: articles.length,
         totalProcessed: articles.length,
         lastSyncTimestamp: new Date().toISOString(),
         apiVersion: "1.0",
-        note: "Linkwarden incremental sync parameter not officially documented - behavior may vary",
       },
     };
   }

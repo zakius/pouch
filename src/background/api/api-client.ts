@@ -60,7 +60,7 @@ export interface ApiResponse<T = unknown> {
 }
 
 export interface AuthHandlers {
-  getTokenRefreshConfig?: () => TokenRefreshConfig;
+  getTokenRefreshConfig?: () => TokenRefreshConfig | null;
   reAuthenticate?: () => Promise<void>;
 }
 
@@ -356,6 +356,12 @@ export class ApiClient {
       }
 
       const refreshConfig = this.authHandlers.getTokenRefreshConfig();
+
+      // Adapter signaled no refresh support
+      if (!refreshConfig) {
+        logger.debug(`${this.serviceName} doesn't support token refresh (static API key)`);
+        return false;
+      }
 
       const refreshResult = await tokenManager.refreshToken(this.serviceName, refreshConfig);
 

@@ -167,7 +167,7 @@ export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings>, Tokenize
     try {
       return await this.apiClient.testConnection("/api/v2/links?per_page=1");
     } catch (error) {
-      console.error("LinkAce connection test failed:", error);
+      logger.error("LinkAce connection test failed:", error);
       return false;
     }
   }
@@ -240,7 +240,7 @@ export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings>, Tokenize
         throw new Error(`Failed to sync articles: ${validatedData.message}`);
       }
 
-      const pageArticles = validatedData.data.map((item) => this.mapArticle(item));
+      const pageArticles = validatedData.data.map((item: LinkaceLink) => this.mapArticle(item));
       allArticles.push(...pageArticles);
       totalFetched += pageArticles.length;
 

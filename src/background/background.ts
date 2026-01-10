@@ -5,6 +5,30 @@ import { initializeUrlCanonizer } from "../utils/url-helpers";
 import { ArticlesRepository } from "./articles-repository";
 import { tokenManager } from "./token-manager";
 
+/**
+ * Validates a URL string. Returns true if valid, false otherwise.
+ */
+function isValidUrl(url: string): boolean {
+  try {
+    new URL(url);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Sanitizes search input by trimming and removing control characters.
+ */
+function sanitizeSearch(search: string): string {
+  // Trim whitespace
+  let sanitized = search.trim();
+  // Remove control characters (except tab, newline, carriage return)
+  // eslint-disable-next-line no-control-regex -- We're sanitizing input, not creating control characters
+  sanitized = sanitized.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
+  return sanitized;
+}
+
 interface SaveArticleMessage {
   type: "saveArticle";
   payload: {
@@ -89,6 +113,11 @@ browser.runtime.onMessage.addListener(
         switch (message.type) {
           case "saveSettings": {
             const { settings } = message.payload;
+            // Clear tokens for the old backend before switching
+            const oldSettings = await getSettings();
+            if (oldSettings.backend !== settings.backend) {
+              await tokenManager.clearToken(oldSettings.backend);
+            }
             await saveSettings(settings);
             await logger.initialize();
             articlesRepository = new ArticlesRepository();
@@ -104,9 +133,7 @@ browser.runtime.onMessage.addListener(
               safeSendResponse({ error: "URL is required" });
               return;
             }
-            try {
-              new URL(url);
-            } catch {
+            if (!isValidUrl(url)) {
               safeSendResponse({ error: "Invalid URL format" });
               return;
             }
@@ -124,9 +151,7 @@ browser.runtime.onMessage.addListener(
               safeSendResponse(undefined);
               return;
             }
-            try {
-              new URL(url);
-            } catch {
+            if (!isValidUrl(url)) {
               safeSendResponse(undefined);
               return;
             }
@@ -157,9 +182,16 @@ browser.runtime.onMessage.addListener(
               safeSendResponse({ error: "Invalid perPage value" });
               return;
             }
-            if (search !== undefined && (typeof search !== "string" || search.length > 1000)) {
-              safeSendResponse({ error: "Invalid search term" });
-              return;
+            const sanitizedSearch =
+              search !== undefined && typeof search === "string"
+                ? sanitizeSearch(search)
+                : undefined;
+            if (search !== undefined && sanitizedSearch !== search) {
+              // Search was modified during sanitization
+              logger.debug("Search term sanitized", {
+                original: search,
+                sanitized: sanitizedSearch,
+              });
             }
 
             articlesRepository = await getArticlesRepository();
@@ -167,7 +199,11 @@ browser.runtime.onMessage.addListener(
               page: message.payload.page,
               perPage: message.payload.perPage,
             });
-            const articles = await articlesRepository.getRecentArticles(page, perPage, search);
+            const articles = await articlesRepository.getRecentArticles(
+              page,
+              perPage,
+              sanitizedSearch,
+            );
             logger.debug("Articles retrieved:", articles);
             safeSendResponse(articles || { items: [], page: 1, pages: 0, total: 0 });
             return;

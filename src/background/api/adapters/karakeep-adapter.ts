@@ -55,6 +55,13 @@ const karakeepErrorSchema = v.object({
   status: v.optional(v.number()),
 });
 
+// Type guard for Karakeep error responses
+function isKarakeepError(
+  data: unknown,
+): data is { error: string; message?: string; status?: number } {
+  return typeof data === "object" && data !== null && "error" in data;
+}
+
 const karakeepSaveResponseSchema = v.union([karakeepItemSchema, karakeepErrorSchema]);
 
 const karakeepSyncResponseSchema = v.union([v.array(karakeepItemSchema), karakeepErrorSchema]);
@@ -88,8 +95,9 @@ export class KarakeepAdapter implements ReadItLaterAPI<KarakeepSettings>, Tokeni
     return "karakeep";
   }
 
-  getTokenRefreshConfig(): TokenRefreshConfig {
-    throw new Error("Karakeep uses static API tokens, no refresh configuration available");
+  getTokenRefreshConfig(): TokenRefreshConfig | null {
+    // Karakeep uses static API tokens that don't expire/refresh
+    return null;
   }
 
   createTokenMetadata(_tokenData: Record<string, unknown>) {
@@ -147,7 +155,7 @@ export class KarakeepAdapter implements ReadItLaterAPI<KarakeepSettings>, Tokeni
     });
     const validatedData = v.parse(karakeepSaveResponseSchema, response.data);
 
-    if ("error" in validatedData) {
+    if (isKarakeepError(validatedData)) {
       throw new Error(`Failed to save article: ${validatedData.message || validatedData.error}`);
     }
 
@@ -182,11 +190,12 @@ export class KarakeepAdapter implements ReadItLaterAPI<KarakeepSettings>, Tokeni
     const response = await this.apiClient.get("/bookmarks");
     const validatedData = v.parse(karakeepSyncResponseSchema, response.data);
 
-    if ("error" in validatedData) {
+    if (isKarakeepError(validatedData)) {
       throw new Error(`Failed to sync articles: ${validatedData.message || validatedData.error}`);
     }
 
-    const articles = validatedData.map((item) => this.mapArticle(item));
+    // After error check, validatedData is KarakeepItem[]
+    const articles = (validatedData as KarakeepItem[]).map((item) => this.mapArticle(item));
 
     return {
       articles,
@@ -196,7 +205,6 @@ export class KarakeepAdapter implements ReadItLaterAPI<KarakeepSettings>, Tokeni
         totalProcessed: articles.length,
         lastSyncTimestamp: new Date().toISOString(),
         apiVersion: "1.0",
-        note: "KaraKeep does not support incremental sync - full sync performed",
       },
     };
   }

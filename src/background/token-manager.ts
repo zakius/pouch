@@ -1,5 +1,7 @@
 import { logger } from "../utils/logger";
 
+const TOKEN_CHECK_ALARM_NAME = "token-refresh-check";
+
 export interface TokenMetadata {
   accessToken: string;
   refreshToken: string;
@@ -32,11 +34,13 @@ export interface TokenManagerConfig {
   refreshBufferMs: number;
   maxRefreshAttempts: number;
   refreshCooldownMs: number;
+  checkIntervalMinutes: number;
+  expirationThresholdChecks: number;
 }
 
 export class TokenManager {
   private tokens: Map<string, TokenMetadata> = new Map();
-  private refreshTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private alarmInitialized: boolean = false;
   private config: TokenManagerConfig;
 
   constructor(config: Partial<TokenManagerConfig> = {}) {
@@ -45,8 +49,40 @@ export class TokenManager {
       refreshBufferMs: 5 * 60 * 1000, // 5 minutes
       maxRefreshAttempts: 3,
       refreshCooldownMs: 30 * 1000, // 30 seconds
+      checkIntervalMinutes: 5, // Check every 5 minutes
+      expirationThresholdChecks: 3, // Refresh if expiring in < 3 check periods (15 minutes)
       ...config,
     };
+  }
+
+  public async initializeAlarm(): Promise<void> {
+    if (this.alarmInitialized) {
+      return;
+    }
+
+    try {
+      // Clear any existing alarm
+      await browser.alarms.clear(TOKEN_CHECK_ALARM_NAME);
+
+      // Create periodic alarm
+      await browser.alarms.create(TOKEN_CHECK_ALARM_NAME, {
+        periodInMinutes: this.config.checkIntervalMinutes,
+      });
+
+      // Set up alarm listener
+      browser.alarms.onAlarm.addListener(async (alarm) => {
+        if (alarm.name === TOKEN_CHECK_ALARM_NAME) {
+          await this.checkAndRefreshTokens();
+        }
+      });
+
+      this.alarmInitialized = true;
+      logger.info("Token refresh alarm initialized", {
+        interval: `${this.config.checkIntervalMinutes} minutes`,
+      });
+    } catch (error) {
+      logger.error("Failed to initialize token refresh alarm:", error);
+    }
   }
 
   public async storeToken(
@@ -59,13 +95,15 @@ export class TokenManager {
     };
 
     this.tokens.set(serviceName, tokenMetadata);
-    this.scheduleTokenRefresh(serviceName);
     await this.persistTokens();
 
     logger.info(`Token stored for ${serviceName}`, {
       expiresAt: new Date(tokenMetadata.expiresAt).toISOString(),
       scope: tokenMetadata.scope,
     });
+
+    // Ensure alarm is initialized
+    await this.initializeAlarm();
   }
 
   public async getAccessToken(serviceName: string): Promise<string> {
@@ -207,7 +245,6 @@ export class TokenManager {
 
   public async clearToken(serviceName: string): Promise<void> {
     this.tokens.delete(serviceName);
-    this.clearRefreshTimer(serviceName);
     await this.persistTokens();
     logger.info(`Token cleared for ${serviceName}`);
   }
@@ -219,10 +256,6 @@ export class TokenManager {
 
   public async clearAllTokens(): Promise<void> {
     this.tokens.clear();
-    this.refreshTimers.forEach((timer) => {
-      clearTimeout(timer);
-    });
-    this.refreshTimers.clear();
     await this.persistTokens();
     logger.info("All tokens cleared");
   }
@@ -252,13 +285,41 @@ export class TokenManager {
 
       if (storedTokens) {
         this.tokens = new Map(storedTokens);
-        for (const serviceName of this.tokens.keys()) {
-          this.scheduleTokenRefresh(serviceName);
-        }
         logger.info(`Loaded ${this.tokens.size} tokens from storage`);
+
+        // Initialize the alarm if there are any tokens
+        if (this.tokens.size > 0) {
+          await this.initializeAlarm();
+        }
       }
     } catch (error) {
       logger.error("Failed to load tokens from storage:", error);
+    }
+  }
+
+  private async checkAndRefreshTokens(): Promise<void> {
+    const now = Date.now();
+    const thresholdMs =
+      this.config.checkIntervalMinutes * this.config.expirationThresholdChecks * 60 * 1000;
+
+    for (const [serviceName, token] of this.tokens) {
+      // Skip tokens without refresh capability (static API keys)
+      if (!token.refreshToken) {
+        continue;
+      }
+
+      const timeUntilExpiry = token.expiresAt - now;
+
+      // Refresh if token will expire within threshold
+      if (timeUntilExpiry < thresholdMs) {
+        logger.info(
+          `Token for ${serviceName} expiring soon (${Math.round(timeUntilExpiry / 1000 / 60)} minutes), scheduling refresh`,
+        );
+        // Fire and forget - don't await
+        void this.refreshToken(serviceName).catch((error) => {
+          logger.error(`Periodic refresh failed for ${serviceName}:`, error);
+        });
+      }
     }
   }
 
@@ -275,39 +336,6 @@ export class TokenManager {
 
   private needsRefresh(token: TokenMetadata): boolean {
     return Date.now() >= token.expiresAt - this.config.refreshBufferMs;
-  }
-
-  private scheduleTokenRefresh(serviceName: string): void {
-    this.clearRefreshTimer(serviceName);
-
-    const token = this.tokens.get(serviceName);
-    if (!token) {
-      return;
-    }
-
-    const refreshTime = token.expiresAt - this.config.refreshBufferMs;
-    const delay = Math.max(0, refreshTime - Date.now());
-
-    const timer = setTimeout(async () => {
-      try {
-        await this.refreshToken(serviceName);
-      } catch (error) {
-        logger.error(`Scheduled token refresh failed for ${serviceName}:`, error);
-      }
-    }, delay);
-
-    this.refreshTimers.set(serviceName, timer);
-    logger.debug(
-      `Token refresh scheduled for ${serviceName} in ${Math.round(delay / 1000)} seconds`,
-    );
-  }
-
-  private clearRefreshTimer(serviceName: string): void {
-    const timer = this.refreshTimers.get(serviceName);
-    if (timer) {
-      clearTimeout(timer);
-      this.refreshTimers.delete(serviceName);
-    }
   }
 
   private createDefaultRefreshConfig(
@@ -334,7 +362,8 @@ export class TokenManager {
     token.scope = (tokenData.scope as string) || token.scope;
 
     this.tokens.set(serviceName, token);
-    this.scheduleTokenRefresh(serviceName);
+    // Reset refresh count on successful refresh
+    token.refreshCount = 0;
     void this.persistTokens();
   }
 }

@@ -113,9 +113,9 @@ function handleBodyClick(event: MouseEvent): void {
 
   if (target.id === "test-connection" || target.closest("#test-connection")) {
     event.preventDefault();
-    const button = (target.id === "test-connection"
-      ? target
-      : target.closest("#test-connection")) as HTMLButtonElement;
+    const button = (
+      target.id === "test-connection" ? target : target.closest("#test-connection")
+    ) as HTMLButtonElement;
     if (button && !button.disabled) {
       void handleTestConnection();
     }
@@ -201,7 +201,9 @@ function getSettingsFromForm(): Settings | null {
   };
   const result = v.safeParse(settingsSchema, rawSettings);
   if (!result.success) {
-    const errorMessage = result.issues.map((issue) => issue.message).join(", ");
+    const errorMessage = result.issues
+      .map((issue: { message: string }) => issue.message)
+      .join(", ");
     showStatus(`Invalid settings: ${errorMessage}`, "error");
     logger.error("Invalid settings provided:", errorMessage);
     return null;

@@ -1,7 +1,17 @@
 {
   "permissions": {
     "allow": [
-      "WebSearch"
+      "WebSearch",
+      "Bash(npm run type-check)",
+      "Bash(bun run type-check:*)",
+      "Bash(bun run lint:*)",
+      "Bash(bun install)",
+      "Bash(bunx:*)",
+      "Bash(cat:*)",
+      "Bash(bun install:*)",
+      "Bash(ls:*)",
+      "Bash(bun pm ls:*)",
+      "Bash(find:*)"
     ],
     "deny": [],
     "ask": []
