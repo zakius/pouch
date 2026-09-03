@@ -1,6 +1,6 @@
 {
   "name": "pouch-extension",
-  "version": "1.0.21",
+  "version": "1.0.22",
   "description": "Browser extension for Pouch",
   "type": "module",
   "scripts": {
