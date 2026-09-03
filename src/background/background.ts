@@ -310,19 +310,9 @@ browser.pageAction.onClicked.addListener(async (tab) => {
     logger.error("Error handling page action click:", error);
   }
 });
-async function isDarkTheme(): Promise<boolean> {
-  try {
-    const theme = await browser.theme.getCurrent();
-    return theme.colors?.frame === "dark";
-  } catch {
-    return false;
-  }
-}
-async function getIconPath(isSaved: boolean): Promise<string> {
-  const dark = await isDarkTheme();
+function getIconPath(isSaved: boolean): string {
   const iconPrefix = isSaved ? "page-action-saved" : "page-action-unsaved";
-  const themeSuffix = dark ? "dark" : "light";
-  return browser.runtime.getURL(`icons/${iconPrefix}-${themeSuffix}.svg`);
+  return browser.runtime.getURL(`icons/${iconPrefix}.svg`);
 }
 async function updateUiForTab(tabId: number): Promise<void> {
   try {
@@ -333,7 +323,7 @@ async function updateUiForTab(tabId: number): Promise<void> {
     const articlesRepository = await getArticlesRepository();
     const existingArticle = await articlesRepository.findSaved(tab.url);
     const isSaved = !!existingArticle;
-    const iconPath = await getIconPath(isSaved);
+    const iconPath = getIconPath(isSaved);
     await browser.pageAction.setIcon({ tabId, path: iconPath });
     browser.pageAction.setTitle({
       tabId,
