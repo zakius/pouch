@@ -26,9 +26,9 @@
   },
   "page_action": {
     "default_icon": {
-      "16": "icons/page-action-unsaved.svg",
-      "32": "icons/page-action-unsaved.svg",
-      "48": "icons/page-action-unsaved.svg"
+      "16": "icons/page-action-unsaved-light.svg",
+      "32": "icons/page-action-unsaved-light.svg",
+      "48": "icons/page-action-unsaved-light.svg"
     },
     "default_title": "Save to Pouch",
     "show_matches": [
