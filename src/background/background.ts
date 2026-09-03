@@ -312,7 +312,8 @@ browser.pageAction.onClicked.addListener(async (tab) => {
 });
 function getIconPath(isSaved: boolean): string {
   const iconPrefix = isSaved ? "page-action-saved" : "page-action-unsaved";
-  return browser.runtime.getURL(`icons/${iconPrefix}.svg`);
+  const themeSuffix = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  return browser.runtime.getURL(`icons/${iconPrefix}-${themeSuffix}.svg`);
 }
 async function updateUiForTab(tabId: number): Promise<void> {
   try {
