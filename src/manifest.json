@@ -26,14 +26,12 @@
   },
   "page_action": {
     "default_icon": {
-      "16": "icons/page-action-unsaved.svg",
-      "32": "icons/page-action-unsaved.svg",
-      "48": "icons/page-action-unsaved.svg"
+      "16": "icons/page-action-unsaved-light.svg",
+      "32": "icons/page-action-unsaved-light.svg",
+      "48": "icons/page-action-unsaved-light.svg"
     },
     "default_title": "Save to Pouch",
-    "show_matches": [
-      "<all_urls>"
-    ]
+    "show_matches": ["<all_urls>"]
   },
   "permissions": [
     "activeTab",
@@ -51,9 +49,7 @@
       "id": "pouch@smartrss",
       "strict_min_version": "140.0",
       "data_collection_permissions": {
-        "required": [
-          "none"
-        ]
+        "required": ["none"]
       }
     }
   }
