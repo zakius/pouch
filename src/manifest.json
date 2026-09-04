@@ -1,6 +1,6 @@
 {
   "name": "Pouch",
-  "version": "1.0.22",
+  "version": "1.0.23",
   "description": "Save and manage articles with Pouch",
   "icons": {
     "16": "icons/icon.svg",
