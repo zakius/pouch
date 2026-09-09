@@ -18,7 +18,7 @@
     "default_icon": {
       "48": "icons/icon.svg"
     },
-    "default_title": "Pouch",
+    "default_title": "Pouch — save pages to read later",
     "default_popup": "popup/popup.html"
   },
   "background": {
