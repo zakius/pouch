@@ -21,6 +21,20 @@
     "default_title": "Pouch",
     "default_popup": "popup/popup.html"
   },
+  "commands": {
+    "_execute_browser_action": {
+      "suggested_key": {
+        "default": "Alt+Shift+P"
+      },
+      "description": "Open the Pouch popup"
+    },
+    "toggle-save-page": {
+      "suggested_key": {
+        "default": "Alt+Shift+S"
+      },
+      "description": "Save or remove the current page"
+    }
+  },
   "background": {
     "page": "background/background.html"
   },
