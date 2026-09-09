@@ -18,6 +18,10 @@ let currentPage = 1;
 let totalPages = 1;
 let isLoadingArticles = false;
 let isSavingOrDeleting = false;
+let searchDebounceTimer: ReturnType<typeof setTimeout> | undefined;
+let latestRequestId = 0;
+let pendingReload = false;
+const searchDebounceMs = 300;
 async function initializePopup(): Promise<void> {
   try {
     logger.debug("Initializing popup...");
@@ -41,9 +45,11 @@ async function initializePopup(): Promise<void> {
 }
 async function loadRecentArticles(): Promise<void> {
   if (isLoadingArticles) {
+    pendingReload = true;
     return;
   }
   isLoadingArticles = true;
+  const requestId = ++latestRequestId;
   try {
     const searchTerm = (searchInput?.value || "").trim().toLowerCase();
     logger.debug("Requesting recent articles from background script...");
@@ -62,6 +68,11 @@ async function loadRecentArticles(): Promise<void> {
       total?: number;
       error?: string;
     };
+
+    if (requestId !== latestRequestId) {
+      logger.debug("Discarding stale articles response:", requestId);
+      return;
+    }
 
     logger.debug("Received response from background:", response);
 
@@ -97,6 +108,10 @@ async function loadRecentArticles(): Promise<void> {
     throw new Error("Could not connect to the background service.");
   } finally {
     isLoadingArticles = false;
+    if (pendingReload) {
+      pendingReload = false;
+      void loadRecentArticles();
+    }
   }
 }
 async function displayArticles(articles: Article[]): Promise<void> {
@@ -163,7 +178,10 @@ function handleSearch(): void {
     }
   }
   currentPage = 1;
-  void loadRecentArticles();
+  clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = setTimeout(() => {
+    void loadRecentArticles();
+  }, searchDebounceMs);
 }
 function handleBodyClick(event: MouseEvent): void {
   const target = event.target as HTMLElement;
