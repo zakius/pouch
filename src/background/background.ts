@@ -282,9 +282,9 @@ browser.contextMenus.onClicked.addListener(async (info: OnClickData, tab?: Tab) 
     logger.error("Error saving link:", error);
   }
 });
-browser.pageAction.onClicked.addListener(async (tab) => {
+async function togglePageSave(tab: Tab): Promise<void> {
   if (!tab.url || !isValidHttpUrl(tab.url)) {
-    logger.warn("Page action clicked on invalid URL:", tab.url);
+    logger.warn("Ignoring page with invalid URL:", tab.url);
     return;
   }
   try {
@@ -307,7 +307,23 @@ browser.pageAction.onClicked.addListener(async (tab) => {
       await updateUiForTab(tab.id);
     }
   } catch (error) {
-    logger.error("Error handling page action click:", error);
+    logger.error("Error toggling page save:", error);
+  }
+}
+browser.pageAction.onClicked.addListener((tab) => {
+  void togglePageSave(tab);
+});
+browser.commands.onCommand.addListener(async (command) => {
+  if (command !== "toggle-save-page") {
+    return;
+  }
+  const tabs = await browser.tabs.query({
+    active: true,
+    currentWindow: true,
+  });
+  const tab = tabs[0];
+  if (tab) {
+    await togglePageSave(tab);
   }
 });
 function getIconPath(isSaved: boolean): string {
