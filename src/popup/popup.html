@@ -13,25 +13,38 @@
 
   <body>
     <div class="search-container">
-      <button id="settings-button" class="settings-button" title="Settings">&#x2699;</button>
+      <button id="settings-button" class="settings-button" title="Settings" aria-label="Settings">
+        &#x2699;
+      </button>
       <input type="text" id="search" placeholder="Search articles..." autocomplete="off" />
-      <button id="save-page-button" class="save-page-button" title="Save current page">+</button>
+      <button
+        id="save-page-button"
+        class="save-page-button"
+        title="Save current page"
+        aria-label="Save current page"
+        aria-pressed="false"
+      >
+        +
+      </button>
     </div>
     <div id="article-list" class="article-list">
-      <div id="empty-message" class="empty-state" style="display: none">
+      <div id="empty-message" class="empty-state" role="status" style="display: none">
         You have no saved articles.
       </div>
-      <div id="no-results-message" class="empty-state" style="display: none">
+      <div id="no-results-message" class="empty-state" role="status" style="display: none">
         No articles found for your search.
       </div>
       <div id="articles" class="articles-container"></div>
     </div>
     <div class="pagination">
-      <button id="prev-page" class="pagination-button" disabled>←</button>
-      <select id="page-select" class="page-select"></select>
+      <button id="prev-page" class="pagination-button" aria-label="Previous page" disabled>
+        ←
+      </button>
+      <select id="page-select" class="page-select" aria-label="Page number"></select>
       <span id="page-info">of 1</span>
-      <button id="next-page" class="pagination-button">→</button>
+      <button id="next-page" class="pagination-button" aria-label="Next page">→</button>
     </div>
+    <div id="sr-live" class="visually-hidden" role="status" aria-live="polite"></div>
     <script type="module" src="./popup.js"></script>
   </body>
 </html>

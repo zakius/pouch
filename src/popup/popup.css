@@ -93,12 +93,25 @@ body {
 }
 
 .save-page-button.saved {
-  background-color: var(--error-color);
+  background-color: var(--primary-color);
   color: white;
 }
 
 .save-page-button.saved:hover:not(:disabled) {
-  background-color: #d32f2f;
+  filter: brightness(0.85);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  border: 0;
+  white-space: nowrap;
 }
 
 .delete-button {

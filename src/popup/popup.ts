@@ -290,6 +290,8 @@ function handlePageSelect(event: Event): void {
 }
 function showError(message: string, showSettingsLink = false): void {
   if (!articlesContainer || !articleListContainer) return;
+  const liveRegion = document.getElementById("sr-live");
+  if (liveRegion) liveRegion.textContent = message;
   articlesContainer.innerHTML = "";
   const errorDiv = document.createElement("div");
   errorDiv.className = "error-message";
@@ -347,6 +349,7 @@ function createArticleElement(article: Article): HTMLElement {
   removeButton.textContent = "×";
   removeButton.className = "delete-button";
   removeButton.title = "Delete article";
+  removeButton.setAttribute("aria-label", "Delete article");
   removeButton.dataset.articleId = String(article.id);
   articleElement.appendChild(removeButton);
   return articleElement;
@@ -362,12 +365,16 @@ async function updateSavePageButtonState(): Promise<void> {
       savedArticleForCurrentPage = response;
       if (savePageButton) {
         if (response) {
-          savePageButton.textContent = "X";
+          savePageButton.textContent = "✓";
           savePageButton.title = "Remove current page";
+          savePageButton.setAttribute("aria-label", "Remove current page");
+          savePageButton.setAttribute("aria-pressed", "true");
           savePageButton.classList.add("saved");
         } else {
           savePageButton.textContent = "+";
           savePageButton.title = "Save current page";
+          savePageButton.setAttribute("aria-label", "Save current page");
+          savePageButton.setAttribute("aria-pressed", "false");
           savePageButton.classList.remove("saved");
         }
         savePageButton.style.display = "block";
