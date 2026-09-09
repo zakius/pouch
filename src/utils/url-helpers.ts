@@ -124,7 +124,15 @@ function canonicalizeAmazonUrl(url: URL): URL {
   return url;
 }
 
+// ponytail: crude cap, swap for an LRU if 1000 entries ever turns out to be too few
+const canonicalUrlCache = new Map<string, string>();
+const CANONICAL_CACHE_LIMIT = 1000;
+
 export async function canonicalizeUrl(urlString: string): Promise<string> {
+  const cached = canonicalUrlCache.get(urlString);
+  if (cached !== undefined) {
+    return cached;
+  }
   try {
     await initializeUrlCanonizer();
 
@@ -144,6 +152,11 @@ export async function canonicalizeUrl(urlString: string): Promise<string> {
     url = canonicalizeTwitterUrl(url);
     url = canonicalizeYoutubeUrl(url);
     url = canonicalizeAmazonUrl(url);
+
+    if (canonicalUrlCache.size >= CANONICAL_CACHE_LIMIT) {
+      canonicalUrlCache.clear();
+    }
+    canonicalUrlCache.set(urlString, url.toString());
 
     return url.toString();
   } catch {

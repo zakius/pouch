@@ -218,16 +218,10 @@ export function initializeFilterListManager(): void {
   }
 }
 
-export async function refreshFilterLists(): Promise<{
-  rules: FilterRule[];
-  results: FilterListResult[];
-  versions: Record<string, string>;
-}> {
-  logger.info("Manually refreshing filter lists...");
-
+export async function refreshFilterLists(): Promise<void> {
+  logger.info("Refreshing filter lists...");
   await clearFilterListCache();
-
-  return await loadFilterLists();
+  await initializeUrlCleanerWithRemoteLists();
 }
 
 export async function initializeUrlCleanerWithRemoteLists(): Promise<void> {

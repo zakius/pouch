@@ -24,6 +24,7 @@ export class ArticlesRepository {
   private lastSyncTimestamp: string | null = null;
   private syncInProgress: Promise<void> | null = null;
   private pendingOperations: PendingOperation[] = [];
+  private articlesCache: Article[] | null = null;
 
   async initialize(settings: Settings): Promise<void> {
     logger.info("Initializing ArticlesRepository with settings:", settings);
@@ -63,9 +64,18 @@ export class ArticlesRepository {
   }
 
   async getAllArticles(): Promise<Article[]> {
-    const result = await browser.storage.local.get(["articles"]);
-    logger.debug("result", result);
-    return result?.articles || [];
+    if (!this.articlesCache) {
+      const result = await browser.storage.local.get(["articles"]);
+      const articles: Article[] = result?.articles || [];
+      this.articlesCache = articles;
+      return articles;
+    }
+    return this.articlesCache;
+  }
+
+  private async storeArticles(articles: Article[]): Promise<void> {
+    this.articlesCache = articles;
+    await browser.storage.local.set({ articles });
   }
 
   async findSaved(url: string): Promise<Article | undefined> {
@@ -374,8 +384,7 @@ export class ArticlesRepository {
   private async addArticle(article: Article): Promise<void> {
     logger.debug("Adding article to cache:", article);
 
-    const result = await browser.storage.local.get("articles");
-    const existingArticles = result.articles || [];
+    const existingArticles = await this.getAllArticles();
 
     const canonicalUrl = article.canonicalUrl || article.url;
     const isDuplicate = existingArticles.some((a: Article) => {
@@ -388,8 +397,7 @@ export class ArticlesRepository {
       return;
     }
 
-    const updatedArticles = [article, ...existingArticles];
-    await browser.storage.local.set({ articles: updatedArticles });
+    await this.storeArticles([article, ...existingArticles]);
     logger.debug("Article added to cache:", article);
   }
 
@@ -400,13 +408,12 @@ export class ArticlesRepository {
       return;
     }
     const articles = await this.getAllArticles();
-    const filteredArticles = articles.filter((a) => a.id !== id);
-    await browser.storage.local.set({ articles: filteredArticles });
+    await this.storeArticles(articles.filter((a) => a.id !== id));
   }
 
   async updateArticles(newArticles: Article[]): Promise<void> {
     logger.debug("Updating articles in cache:", newArticles.length);
-    await browser.storage.local.set({ articles: newArticles });
+    await this.storeArticles(newArticles);
   }
 
   async mergeArticles(newArticles: Article[]): Promise<void> {
@@ -435,11 +442,12 @@ export class ArticlesRepository {
     }
 
     const mergedArticles = Array.from(existingMap.values());
-    await browser.storage.local.set({ articles: mergedArticles });
+    await this.storeArticles(mergedArticles);
     logger.debug("Merged articles count:", mergedArticles.length);
   }
 
   async clear(): Promise<void> {
+    this.articlesCache = null;
     await browser.storage.local.remove("articles");
   }
 

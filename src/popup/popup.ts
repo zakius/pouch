@@ -318,6 +318,13 @@ function showError(message: string, showSettingsLink = false): void {
   if (emptyMessage) emptyMessage.style.display = "none";
   if (noResultsMessage) noResultsMessage.style.display = "none";
 }
+// A saved url or title can be a data: URL hundreds of KB long. Laying one out as
+// a single unbroken text run is enough to take the popup down with it.
+const MAX_DISPLAY_CHARS = 300;
+function forDisplay(text: string): string {
+  return text.length > MAX_DISPLAY_CHARS ? `${text.slice(0, MAX_DISPLAY_CHARS)}\u2026` : text;
+}
+
 function createArticleElement(article: Article): HTMLElement {
   logger.debug("Creating article element:", article);
   if (!article.url || typeof article.url !== "string") {
@@ -345,12 +352,12 @@ function createArticleElement(article: Article): HTMLElement {
   titleWrapper.className = "article-title-wrapper";
   const titleElement = document.createElement("h3");
   titleElement.className = "article-title";
-  titleElement.textContent = article.title || "";
+  titleElement.textContent = forDisplay(article.title || "");
   titleWrapper.appendChild(titleElement);
   contentWrapper.appendChild(titleWrapper);
   const urlElement = document.createElement("div");
   urlElement.className = "article-url";
-  urlElement.textContent = article.url;
+  urlElement.textContent = forDisplay(article.url);
   contentWrapper.appendChild(urlElement);
   articleElement.appendChild(contentWrapper);
   const removeButton = document.createElement("button");
