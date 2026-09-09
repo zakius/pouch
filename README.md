@@ -5,21 +5,17 @@ A browser extension for saving articles to your favorite read-it-later service, 
 ## Features
 
 - Save articles with a single click
-- Browser action for quick access to your articles
+- Browser action for quick access to your saved articles
 - Dark mode support
-- Keyboard shortcuts for quick actions
 - Page action for saving the current page
-- View tags from your read-it-later service
-- Reading time estimation
-- Offline access to cached articles
 - Background sync to keep your article list up-to-date
-- Beautiful and intuitive user interface
 - Support for multiple read-it-later services:
+  - Browser Bookmarks
   - Instapaper
-  - KaraKeep
+  - Karakeep
   - LinkAce
   - Linkwarden
-  - Raindrop
+  - Raindrop.io
   - Wallabag
 
 ## Development Setup
@@ -53,9 +49,10 @@ The built extension will be available in the `dist/packages` directory.
 
 - `bun run watch` - Start development server and watch for changes.
 - `bun run package` - Build for production.
-- `bun run release` - Build and sign the extension for release.
-- `bun run lint` - Run Biome to check for code quality.
-- `bun run type-check` - Run TypeScript compiler to check for type errors.
+- `bun run release` - Build the extension for release (no signing).
+- `bun run release:sign` - Build and sign the extension for AMO (requires AMO_API_KEY and AMO_API_SECRET).
+- `bun run lint` - Run oxlint (with type-aware, type-checked rules) to check code quality.
+- `bun run format` - Format the source files with oxfmt.
 
 ## Project Structure
 
