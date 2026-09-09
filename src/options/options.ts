@@ -40,6 +40,7 @@ function assertDom(d: DomElementsNullable): asserts d is DomElements {
 const configCache: {
   [key in Settings["backend"]]?: Partial<Settings["apiConfig"]>;
 } = {};
+const configDrafts: Record<string, Record<string, string>> = {};
 async function initialize(): Promise<void> {
   try {
     assertDom(dom);
@@ -74,6 +75,21 @@ async function initialize(): Promise<void> {
 }
 async function loadBackend(backend: Settings["backend"]): Promise<void> {
   assertDom(dom);
+  const previousForm = dom.configContainer.querySelector("form");
+  if (previousForm instanceof HTMLFormElement) {
+    const previousBackend = availableBackends.find(
+      (candidate) => `${candidate}-config` === previousForm.id,
+    );
+    if (previousBackend) {
+      const draft: Record<string, string> = {};
+      for (const input of Array.from(previousForm.querySelectorAll("input"))) {
+        if (input.name) {
+          draft[input.name] = input.value;
+        }
+      }
+      configDrafts[previousBackend] = draft;
+    }
+  }
   const factory = getAdapter(backend);
   const formConfig = factory.formConfig;
   dom.configContainer.innerHTML = "";
@@ -90,7 +106,7 @@ async function loadBackend(backend: Settings["backend"]): Promise<void> {
     input.id = field.name as string;
     input.name = field.name as string;
     input.className = "form-control";
-    const config = configCache[backend] || {};
+    const config = configDrafts[backend] || configCache[backend] || {};
     input.value = (config as Record<string, string>)[field.name as string] || "";
     fieldContainer.appendChild(label);
     fieldContainer.appendChild(input);
@@ -162,7 +178,7 @@ async function handleTestConnection(): Promise<void> {
       payload: { settings },
     });
     if (response.success) {
-      showStatus("Connection successful!", "success");
+      showStatus("Connection successful! Remember to save your settings.", "success");
     } else {
       showStatus(`Connection failed: ${response.error}`, "error");
     }
