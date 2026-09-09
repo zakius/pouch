@@ -5,6 +5,7 @@ A browser extension for saving articles to your favorite read-it-later service, 
 ## Features
 
 - Save articles with a single click
+- Keyboard shortcuts: `Alt+Shift+P` opens the popup, `Alt+Shift+S` saves or removes the current page (customizable under Manage Extension Shortcuts)
 - Browser action for quick access to your saved articles
 - Dark mode support
 - Page action for saving the current page
