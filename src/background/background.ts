@@ -327,8 +327,9 @@ browser.commands.onCommand.addListener(async (command) => {
   }
 });
 function getIconPath(isSaved: boolean): string {
-  const iconPrefix = isSaved ? "page-action-saved" : "page-action-unsaved";
-  return browser.runtime.getURL(`icons/${iconPrefix}.svg`);
+  // Must stay extension-relative: Firefox only resolves context-fill against the
+  // toolbar theme for icons given as paths, not for moz-extension:// URLs.
+  return `icons/page-action-${isSaved ? "saved" : "unsaved"}.svg`;
 }
 async function updateUiForTab(tabId: number): Promise<void> {
   try {
@@ -379,14 +380,6 @@ async function initialize(): Promise<void> {
     await tokenManager.loadTokens();
     logger.info("Token manager initialized");
 
-    try {
-      logger.info("Refreshing filter lists on startup...");
-      await refreshFilterLists();
-      logger.info("Filter lists refreshed on startup");
-    } catch (error) {
-      logger.warn("Failed to refresh filter lists on startup:", error);
-    }
-
     const articlesRepository = await getArticlesRepository();
     try {
       const result = await articlesRepository.syncWithAPI({
@@ -412,15 +405,14 @@ async function initialize(): Promise<void> {
     });
     void browser.alarms.create("refresh", { periodInMinutes: REFRESH_INTERVAL });
     void browser.alarms.create("refresh-filters", { periodInMinutes: 24 * 60 });
-    browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-      if (
-        (changeInfo.status === "complete" || "favIconUrl" in changeInfo) &&
-        tab.url &&
-        isValidHttpUrl(tab.url)
-      ) {
-        void updateUiForTab(tabId);
-      }
-    });
+    browser.tabs.onUpdated.addListener(
+      (tabId, changeInfo, tab) => {
+        if (changeInfo.status === "complete" && tab.url && isValidHttpUrl(tab.url)) {
+          void updateUiForTab(tabId);
+        }
+      },
+      { properties: ["status"] },
+    );
     browser.tabs.onActivated.addListener(async (activeInfo) => {
       await updateUiForTab(activeInfo.tabId);
     });
