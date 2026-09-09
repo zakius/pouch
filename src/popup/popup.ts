@@ -50,6 +50,10 @@ async function loadRecentArticles(): Promise<void> {
   }
   isLoadingArticles = true;
   const requestId = ++latestRequestId;
+  if (articleListContainer) {
+    articleListContainer.classList.add("is-loading");
+    articleListContainer.setAttribute("aria-busy", "true");
+  }
   try {
     const searchTerm = (searchInput?.value || "").trim().toLowerCase();
     logger.debug("Requesting recent articles from background script...");
@@ -108,6 +112,10 @@ async function loadRecentArticles(): Promise<void> {
     throw new Error("Could not connect to the background service.");
   } finally {
     isLoadingArticles = false;
+    if (articleListContainer) {
+      articleListContainer.classList.remove("is-loading");
+      articleListContainer.setAttribute("aria-busy", "false");
+    }
     if (pendingReload) {
       pendingReload = false;
       void loadRecentArticles();

@@ -154,12 +154,22 @@ body {
   min-height: 200px;
   border-top: 1px solid var(--border-color);
   border-bottom: 1px solid var(--border-color);
+  transition: opacity 0.15s;
+}
+
+.article-list.is-loading {
+  opacity: 0.6;
+  pointer-events: none;
 }
 
 .empty-state {
   text-align: center;
   padding: 20px;
   color: #6c757d;
+}
+
+.empty-state a {
+  color: var(--primary-color);
 }
 
 .articles-container {
