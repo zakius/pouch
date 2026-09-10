@@ -327,8 +327,6 @@ browser.commands.onCommand.addListener(async (command) => {
   }
 });
 function getIconPath(isSaved: boolean): string {
-  // Must stay extension-relative: Firefox only resolves context-fill against the
-  // toolbar theme for icons given as paths, not for moz-extension:// URLs.
   return `icons/page-action-${isSaved ? "saved" : "unsaved"}.svg`;
 }
 async function updateUiForTab(tabId: number): Promise<void> {
