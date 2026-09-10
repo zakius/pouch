@@ -8,9 +8,12 @@
 }
 
 html {
-  /* 600px is exactly Firefox's browserAction popup cap; asking for the max makes the
-     panel resize after mapping, which recreates the xdg_popup surface on Wayland. */
-  height: 580px;
+  /* Firefox re-measures the popup on every DOM mutation (a subtree MutationObserver
+     in ext-browser-content.js) and pushes the result to the panel. Pin both axes at
+     the 800x600 cap so getContentSize always clamps to the same numbers and the panel
+     is never actually resized - on Wayland each resize repositions the xdg_popup. */
+  width: 400px;
+  height: 600px;
 }
 
 * {
