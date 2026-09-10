@@ -326,11 +326,23 @@ browser.commands.onCommand.addListener(async (command) => {
     await togglePageSave(tab);
   }
 });
+// Nothing applies -moz-context-properties to an extension page action icon in the
+// urlbar, so context-fill never resolves and light-dark() has to be evaluated by the
+// parent process while it rasterizes the SVG. Pick a plain per-theme file instead.
+const darkThemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
 function getIconPath(isSaved: boolean): string {
-  // Must stay extension-relative: Firefox only resolves context-fill against the
-  // toolbar theme for icons given as paths, not for moz-extension:// URLs.
-  return `icons/page-action-${isSaved ? "saved" : "unsaved"}.svg`;
+  const state = isSaved ? "saved" : "unsaved";
+  return `icons/page-action-${state}-${darkThemeQuery.matches ? "dark" : "light"}.svg`;
 }
+darkThemeQuery.addEventListener("change", () => {
+  // ponytail: only the visible tabs are refreshed; the rest pick the new icon up
+  // from the onActivated listener. Walk every tab if that ever looks wrong.
+  void browser.tabs.query({ active: true }).then((tabs) => {
+    for (const tab of tabs) {
+      if (tab.id !== undefined) void updateUiForTab(tab.id);
+    }
+  });
+});
 async function updateUiForTab(tabId: number): Promise<void> {
   try {
     const tab = await browser.tabs.get(tabId);

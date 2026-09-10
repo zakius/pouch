@@ -18,7 +18,7 @@
     "default_icon": {
       "48": "icons/icon.svg"
     },
-    "default_title": "Pouch — save pages to read later",
+    "default_title": "Pouch \u2014 save pages to read later",
     "default_popup": "popup/popup.html"
   },
   "commands": {
@@ -40,9 +40,9 @@
   },
   "page_action": {
     "default_icon": {
-      "16": "icons/page-action-unsaved.svg",
-      "32": "icons/page-action-unsaved.svg",
-      "48": "icons/page-action-unsaved.svg"
+      "16": "icons/page-action-unsaved-light.svg",
+      "32": "icons/page-action-unsaved-light.svg",
+      "48": "icons/page-action-unsaved-light.svg"
     },
     "default_title": "Save to Pouch",
     "show_matches": ["<all_urls>"]
