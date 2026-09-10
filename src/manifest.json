@@ -1,6 +1,6 @@
 {
   "name": "Pouch",
-  "version": "1.0.25",
+  "version": "1.0.26",
   "description": "Save and manage articles with Pouch",
   "icons": {
     "16": "icons/icon.svg",
@@ -18,7 +18,7 @@
     "default_icon": {
       "48": "icons/icon.svg"
     },
-    "default_title": "Pouch \u2014 save pages to read later",
+    "default_title": "Pouch — save pages to read later",
     "default_popup": "popup/popup.html"
   },
   "commands": {
