@@ -17,8 +17,34 @@ type PendingOperation = {
   timestamp: number;
 };
 
+export interface AccountStorageKeys {
+  articles: string;
+  lastSyncTimestamp: string;
+  lastFullSyncTimestamp: string;
+}
+
+export function getAccountIdentity(settings: Settings): string {
+  return JSON.stringify({ backend: settings.backend, apiConfig: settings.apiConfig });
+}
+
+export function getAccountStorageKeys(settings: Settings): AccountStorageKeys {
+  const identity = getAccountIdentity(settings);
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < identity.length; i++) {
+    hash ^= identity.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  const suffix = (hash >>> 0).toString(36);
+  return {
+    articles: `articles:${suffix}`,
+    lastSyncTimestamp: `lastSyncTimestamp:${suffix}`,
+    lastFullSyncTimestamp: `lastFullSyncTimestamp:${suffix}`,
+  };
+}
+
 export class ArticlesRepository {
   private api: ReadItLaterAPI | null = null;
+  private apiInitPromise: Promise<ReadItLaterAPI> | null = null;
   private settings!: Settings;
   private lastFullSyncTimestamp: number | null = null;
   private lastSyncTimestamp: string | null = null;
@@ -26,31 +52,42 @@ export class ArticlesRepository {
   private pendingOperations: PendingOperation[] = [];
   private articlesCache: Article[] | null = null;
   private commitQueue: Promise<unknown> = Promise.resolve();
+  private storageKeys: AccountStorageKeys = {
+    articles: "articles",
+    lastSyncTimestamp: "lastSyncTimestamp",
+    lastFullSyncTimestamp: "lastFullSyncTimestamp",
+  };
 
   async initialize(settings: Settings): Promise<void> {
     logger.info("Initializing ArticlesRepository with settings:", settings);
     this.settings = settings;
     this.api = null;
+    this.apiInitPromise = null;
+    this.storageKeys = getAccountStorageKeys(settings);
     await this.loadSyncTimestamps();
   }
 
-  private async getApi(): Promise<ReadItLaterAPI> {
+  private getApi(): Promise<ReadItLaterAPI> {
     if (this.api) {
-      return this.api;
+      return Promise.resolve(this.api);
     }
-    logger.debug("API not initialized, creating adapter now...");
-    const api = getAdapter(this.settings.backend);
-    try {
-      await api.initialize(this.settings);
-      logger.info("On-demand API initialization completed");
-      this.api = api;
-      return this.api;
-    } catch (error) {
-      logger.error("Failed to initialize API:", error);
-      throw new Error(
-        `Failed to initialize ${this.settings.backend} API: ${error instanceof Error ? error.message : "Unknown error"}`,
-      );
+    if (!this.apiInitPromise) {
+      logger.debug("API not initialized, creating adapter now...");
+      this.apiInitPromise = (async () => {
+        const api = getAdapter(this.settings.backend);
+        await api.initialize(this.settings);
+        logger.info("On-demand API initialization completed");
+        this.api = api;
+        return api;
+      })().catch((error: unknown) => {
+        this.apiInitPromise = null;
+        logger.error("Failed to initialize API:", error);
+        throw new Error(
+          `Failed to initialize ${this.settings.backend} API: ${error instanceof Error ? error.message : "Unknown error"}`,
+        );
+      });
     }
+    return this.apiInitPromise;
   }
 
   async testConnection(): Promise<boolean> {
@@ -65,8 +102,8 @@ export class ArticlesRepository {
 
   async getAllArticles(): Promise<Article[]> {
     if (!this.articlesCache) {
-      const result = await browser.storage.local.get(["articles"]);
-      const articles: Article[] = result?.articles || [];
+      const result = await browser.storage.local.get([this.storageKeys.articles]);
+      const articles: Article[] = result?.[this.storageKeys.articles] || [];
       this.articlesCache = articles;
       return articles;
     }
@@ -75,7 +112,7 @@ export class ArticlesRepository {
 
   private async storeArticles(articles: Article[]): Promise<void> {
     this.articlesCache = articles;
-    await browser.storage.local.set({ articles });
+    await browser.storage.local.set({ [this.storageKeys.articles]: articles });
   }
 
   private enqueueCommit<T>(operation: () => Promise<T>): Promise<T> {
@@ -450,17 +487,17 @@ export class ArticlesRepository {
 
   async clear(): Promise<void> {
     this.articlesCache = null;
-    await browser.storage.local.remove("articles");
+    await browser.storage.local.remove(this.storageKeys.articles);
   }
 
   private async loadSyncTimestamps(): Promise<void> {
     try {
       const result = await browser.storage.local.get([
-        "lastFullSyncTimestamp",
-        "lastSyncTimestamp",
+        this.storageKeys.lastFullSyncTimestamp,
+        this.storageKeys.lastSyncTimestamp,
       ]);
-      this.lastFullSyncTimestamp = result.lastFullSyncTimestamp || null;
-      this.lastSyncTimestamp = result.lastSyncTimestamp || null;
+      this.lastFullSyncTimestamp = result[this.storageKeys.lastFullSyncTimestamp] || null;
+      this.lastSyncTimestamp = result[this.storageKeys.lastSyncTimestamp] || null;
       logger.debug("Loaded sync timestamps:", {
         lastSync: this.lastSyncTimestamp,
         lastFullSync: this.lastFullSyncTimestamp
@@ -477,8 +514,8 @@ export class ArticlesRepository {
   private async saveSyncTimestamps(): Promise<void> {
     try {
       await browser.storage.local.set({
-        lastFullSyncTimestamp: this.lastFullSyncTimestamp,
-        lastSyncTimestamp: this.lastSyncTimestamp,
+        [this.storageKeys.lastFullSyncTimestamp]: this.lastFullSyncTimestamp,
+        [this.storageKeys.lastSyncTimestamp]: this.lastSyncTimestamp,
       });
     } catch (error) {
       logger.error("Failed to save sync timestamps:", error);

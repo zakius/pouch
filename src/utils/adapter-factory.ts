@@ -17,21 +17,12 @@ const adapters = {
   linkwarden: LinkwardenAdapter,
 };
 
-const adapterCache = new Map<keyof typeof adapters, ReadItLaterAPI>();
-
 export const availableBackends = Object.keys(adapters) as (keyof typeof adapters)[];
 
 export function getAdapter(backend: keyof typeof adapters): ReadItLaterAPI {
-  const cachedAdapter = adapterCache.get(backend);
-  if (cachedAdapter) {
-    return cachedAdapter;
-  }
-
   const AdapterClass = adapters[backend];
-  if (AdapterClass) {
-    const instance = new AdapterClass();
-    adapterCache.set(backend, instance);
-    return instance;
+  if (!AdapterClass) {
+    throw new Error("Invalid backend specified");
   }
-  throw new Error("Invalid backend specified");
+  return new AdapterClass();
 }

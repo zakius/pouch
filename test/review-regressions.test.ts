@@ -1,7 +1,7 @@
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
 import * as v from "valibot";
 import { ApiClient } from "../src/background/api/api-client";
-import { ArticlesRepository } from "../src/background/articles-repository";
+import { ArticlesRepository, getAccountStorageKeys } from "../src/background/articles-repository";
 import { tokenManager } from "../src/background/token-manager";
 import { DEFAULT_SETTINGS, settingsSchema } from "../src/utils/settings";
 import { canonicalizeUrl } from "../src/utils/url-helpers";
@@ -14,6 +14,8 @@ import {
 import testFilterContent from "./test-data/test-filters.txt";
 
 const originalBrowser = Object.getOwnPropertyDescriptor(globalThis, "browser");
+
+const keys = getAccountStorageKeys(DEFAULT_SETTINGS);
 afterEach(async () => {
   mock.restore();
   if (originalBrowser) Object.defineProperty(globalThis, "browser", originalBrowser);
@@ -98,7 +100,9 @@ test("failed remote deletion preserves cached articles", async () => {
     title: "Example",
     created_at: "2026-01-01",
   };
-  const storage = { articles: [article] };
+  const storage = {
+    [keys.articles]: [article],
+  };
   const remove = mock(async (): Promise<void> => {
     throw new Error("Deletion failed");
   });
@@ -119,9 +123,9 @@ test("failed remote deletion preserves cached articles", async () => {
   await repository.initialize(DEFAULT_SETTINGS);
   await expect(repository.deleteArticle(1)).rejects.toThrow("Deletion failed");
   expect(await repository.getAllArticles()).toEqual([article]);
-  expect(storage.articles).toEqual([article]);
+  expect(storage[keys.articles]).toEqual([article]);
   remove.mockResolvedValue(undefined);
   await repository.deleteArticle(1);
   expect(await repository.getAllArticles()).toEqual([]);
-  expect(storage.articles).toEqual([]);
+  expect(storage[keys.articles]).toEqual([]);
 });

@@ -44,6 +44,8 @@ export class TokenManager {
   private config: TokenManagerConfig;
   private refreshConfigProviders: Map<string, () => TokenRefreshConfig | null> = new Map();
   private refreshPromises: Map<string, Promise<TokenRefreshResult>> = new Map();
+  private ephemeralDepth: number = 0;
+  private activeTokensBackup: Map<string, TokenMetadata> | null = null;
 
   constructor(config: Partial<TokenManagerConfig> = {}) {
     this.config = {
@@ -84,6 +86,23 @@ export class TokenManager {
       });
     } catch (error) {
       logger.error("Failed to initialize token refresh alarm:", error);
+    }
+  }
+
+  public async runWithEphemeralTokens<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.ephemeralDepth === 0) {
+      this.activeTokensBackup = this.tokens;
+      this.tokens = new Map(this.tokens);
+    }
+    this.ephemeralDepth++;
+    try {
+      return await operation();
+    } finally {
+      this.ephemeralDepth--;
+      if (this.ephemeralDepth === 0) {
+        this.tokens = this.activeTokensBackup ?? this.tokens;
+        this.activeTokensBackup = null;
+      }
     }
   }
 
@@ -377,6 +396,9 @@ export class TokenManager {
   }
 
   private async persistTokens(): Promise<void> {
+    if (this.ephemeralDepth > 0) {
+      return;
+    }
     try {
       const tokensArray = Array.from(this.tokens.entries());
       await browser.storage.local.set({
