@@ -525,5 +525,9 @@ export function createApiClient(
       : undefined,
   };
 
+  tokenManager.setRefreshConfigProvider(adapter.getServiceName(), () =>
+    adapter.getTokenRefreshConfig.call(adapter),
+  );
+
   return new ApiClient(adapter.getServiceName(), adapter.getBaseUrl(), authHandlers, config);
 }

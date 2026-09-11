@@ -42,6 +42,8 @@ export class TokenManager {
   private tokens: Map<string, TokenMetadata> = new Map();
   private alarmInitialized: boolean = false;
   private config: TokenManagerConfig;
+  private refreshConfigProviders: Map<string, () => TokenRefreshConfig | null> = new Map();
+  private refreshPromises: Map<string, Promise<TokenRefreshResult>> = new Map();
 
   constructor(config: Partial<TokenManagerConfig> = {}) {
     this.config = {
@@ -106,6 +108,13 @@ export class TokenManager {
     await this.initializeAlarm();
   }
 
+  public setRefreshConfigProvider(
+    serviceName: string,
+    provider: () => TokenRefreshConfig | null,
+  ): void {
+    this.refreshConfigProviders.set(serviceName, provider);
+  }
+
   public async getAccessToken(serviceName: string): Promise<string> {
     const token = this.tokens.get(serviceName);
     if (!token) {
@@ -120,9 +129,15 @@ export class TokenManager {
     if (this.needsRefresh(token)) {
       logger.info(`Token for ${serviceName} needs refresh, attempting refresh...`);
       const refreshResult = await this.refreshToken(serviceName);
+      const currentToken = this.tokens.get(serviceName);
       if (!refreshResult.success) {
         logger.error(`Token refresh failed for service: ${serviceName}. ${refreshResult.error}`);
-        throw new Error(`Token refresh failed for service: ${serviceName}. ${refreshResult.error}`);
+        if (!currentToken || Date.now() >= currentToken.expiresAt) {
+          throw new Error(
+            `Token refresh failed for service: ${serviceName}. ${refreshResult.error}`,
+          );
+        }
+        logger.warn(`Using existing token for ${serviceName} until expiry after failed refresh`);
       }
     }
 
@@ -151,12 +166,47 @@ export class TokenManager {
     serviceName: string,
     refreshConfig?: TokenRefreshConfig,
   ): Promise<TokenRefreshResult> {
+    const inFlight = this.refreshPromises.get(serviceName);
+    if (inFlight) {
+      logger.debug(`Refresh already in progress for ${serviceName}, sharing result`);
+      return inFlight;
+    }
+
+    const promise = this.performRefresh(serviceName, refreshConfig).finally(() => {
+      this.refreshPromises.delete(serviceName);
+    });
+    this.refreshPromises.set(serviceName, promise);
+    return promise;
+  }
+
+  private async performRefresh(
+    serviceName: string,
+    refreshConfig?: TokenRefreshConfig,
+  ): Promise<TokenRefreshResult> {
     const token = this.tokens.get(serviceName);
     if (!token) {
       return {
         success: false,
         requiresReauth: true,
         error: `No token found for service: ${serviceName}`,
+      };
+    }
+
+    if (!token.refreshToken) {
+      logger.debug(`Service ${serviceName} has no refresh token (static key)`);
+      return {
+        success: false,
+        requiresReauth: false,
+        error: `No refresh token available for service: ${serviceName}`,
+      };
+    }
+
+    const config = refreshConfig ?? this.refreshConfigProviders.get(serviceName)?.() ?? null;
+    if (!config) {
+      return {
+        success: false,
+        requiresReauth: false,
+        error: `No refresh configuration available for service: ${serviceName}`,
       };
     }
 
@@ -185,19 +235,7 @@ export class TokenManager {
       };
     }
 
-    if (!token.refreshToken) {
-      logger.warn(`No refresh token available for ${serviceName}`);
-      await this.clearToken(serviceName);
-      return {
-        success: false,
-        requiresReauth: true,
-        error: `No refresh token available for ${serviceName}`,
-      };
-    }
-
     try {
-      const config = refreshConfig || this.createDefaultRefreshConfig(serviceName, token);
-
       const response = await fetch(config.refreshUrl, {
         method: "POST",
         headers: {
@@ -215,16 +253,32 @@ export class TokenManager {
       if (!response.ok) {
         const errorText = await response.text();
         logger.error(`Token refresh failed for ${serviceName}: ${response.status} ${errorText}`);
-        await this.clearToken(serviceName);
+        if (response.status === 400 || response.status === 401 || response.status === 403) {
+          await this.clearToken(serviceName);
+          return {
+            success: false,
+            requiresReauth: true,
+            error: `Token refresh failed: ${response.status} ${errorText}`,
+          };
+        }
         return {
           success: false,
-          requiresReauth: true,
+          requiresReauth: false,
           error: `Token refresh failed: ${response.status} ${errorText}`,
         };
       }
 
       const tokenData = (await response.json()) as Record<string, unknown>;
-      this.updateTokenFromResponse(serviceName, tokenData);
+      if (typeof tokenData?.access_token !== "string" || !tokenData.access_token) {
+        logger.error(`Invalid refresh response for ${serviceName}`);
+        return {
+          success: false,
+          requiresReauth: false,
+          error: `Invalid refresh response for service: ${serviceName}`,
+        };
+      }
+
+      await this.updateTokenFromResponse(serviceName, tokenData);
 
       logger.info(`Token refreshed successfully for ${serviceName}`, {
         expiresAt: new Date(this.tokens.get(serviceName)?.expiresAt || Date.now()).toISOString(),
@@ -234,10 +288,9 @@ export class TokenManager {
       return { success: true, requiresReauth: false };
     } catch (error) {
       logger.error(`Token refresh error for ${serviceName}:`, error);
-      await this.clearToken(serviceName);
       return {
         success: false,
-        requiresReauth: true,
+        requiresReauth: false,
         error: error instanceof Error ? error.message : String(error),
       };
     }
@@ -338,14 +391,10 @@ export class TokenManager {
     return Date.now() >= token.expiresAt - this.config.refreshBufferMs;
   }
 
-  private createDefaultRefreshConfig(
+  private async updateTokenFromResponse(
     serviceName: string,
-    _token: TokenMetadata,
-  ): TokenRefreshConfig {
-    throw new Error(`No refresh config provided for service: ${serviceName}`);
-  }
-
-  private updateTokenFromResponse(serviceName: string, tokenData: Record<string, unknown>): void {
+    tokenData: Record<string, unknown>,
+  ): Promise<void> {
     const token = this.tokens.get(serviceName);
     if (!token) {
       throw new Error(`No existing token found for service: ${serviceName}`);
@@ -364,7 +413,7 @@ export class TokenManager {
     this.tokens.set(serviceName, token);
     // Reset refresh count on successful refresh
     token.refreshCount = 0;
-    void this.persistTokens();
+    await this.persistTokens();
   }
 }
 
