@@ -52,7 +52,7 @@ function applyFilterRules(urlString: string): string {
         }
         return false;
       }
-      return matchesPattern(hostname, rule.pattern, rule.isRegex);
+      return matchesPattern(hostname, rule.pattern, url.href);
     });
 
     const applicableExceptionRules = exceptionRules.filter((rule) => {
@@ -65,7 +65,7 @@ function applyFilterRules(urlString: string): string {
         }
         return false;
       }
-      return matchesPattern(hostname, rule.pattern, rule.isRegex);
+      return matchesPattern(hostname, rule.pattern, url.href);
     });
 
     if (applicableRegularRules.length === 0) {
