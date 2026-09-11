@@ -240,68 +240,58 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
     });
   }
   /**
-   * Instapaper Incremental Sync (FULL SUPPORT)
+   * Instapaper Sync (FULL SNAPSHOT)
    *
-   * Instapaper's "have" parameter enables true incremental sync with deletion tracking:
+   * Instapaper's bookmarks/list endpoint has no reliable pagination cursor:
+   * it returns at most `limit` bookmarks and a full page gives no signal about
+   * whether more exist. "have" and delete_ids are not usable here because we
+   * cannot persist per-bookmark hashes, so incremental sync with deletion
+   * tracking is not supported.
    *
-   * HOW IT WORKS:
-   * 1. Send comma-separated list of bookmark IDs we already have
-   * 2. Server returns only NEW or UPDATED bookmarks
-   * 3. Server also returns delete_ids[] array with deleted bookmark IDs
-   * 4. Hash-based change detection: bookmarks only returned if content changed
-   *
-   * BENEFITS:
-   * - Efficient: Only transfers changed data
-   * - Complete: Tracks additions, updates, AND deletions
-   * - Fast: Can use incremental sync exclusively (no periodic full syncs needed)
-   *
-   * Example: have="12345:OjMuzFp6,12346:0n4ONgYs,12347:YXo82wTR"
-   * - Each entry: ID:hash (hash detects content changes)
-   * - Optional: Add :progress:timestamp to track reading progress
+   * The loop therefore fetches a single full snapshot, deduplicating by
+   * bookmark_id. A full page containing only already-seen bookmarks means
+   * retrieval cannot advance to a complete snapshot, so sync fails explicitly
+   * and the caller keeps its previous cache.
    *
    * API: https://www.instapaper.com/api
    */
   async sync(options?: SyncOptions): Promise<SyncResult> {
     const limit = 500;
-    const allArticles: Article[] = [];
-    let receivedBookmarks: InstapaperBookmark[] = [];
-    let totalFetched = 0;
+    const articlesById = new Map<number, Article>();
+    let pageBookmarks: InstapaperBookmark[] = [];
 
     const mode = options?.mode || "overwrite";
 
     do {
-      const have = allArticles.map((a) => a.id).join(",");
-      const params: { limit: number; have?: string } = { limit };
+      const data = await this._makeSignedRequest("/api/1/bookmarks/list", { limit });
+      const validatedData = v.parse(instapaperSyncResponseSchema, data);
+      pageBookmarks = validatedData.bookmarks;
 
-      // For update mode, use the "have" parameter to get only new items
-      if (mode === "update" && have) {
-        params.have = have;
+      const newBookmarks = pageBookmarks.filter((item) => !articlesById.has(item.bookmark_id));
+      if (pageBookmarks.length === limit && newBookmarks.length === 0) {
+        throw new Error(
+          "Instapaper sync cannot retrieve a complete snapshot: the API returned a full page of already-seen bookmarks",
+        );
       }
 
-      const data = await this._makeSignedRequest("/api/1/bookmarks/list", params);
-      const validatedData = v.parse(instapaperSyncResponseSchema, data);
-
-      if (validatedData.bookmarks) {
-        receivedBookmarks = validatedData.bookmarks;
-        const articles = receivedBookmarks.map((item) => this.mapArticle(item));
-        allArticles.push(...articles);
-        totalFetched += articles.length;
-      } else {
-        receivedBookmarks = [];
+      for (const item of newBookmarks) {
+        articlesById.set(item.bookmark_id, this.mapArticle(item));
       }
 
       // Rate limiting: Instapaper doesn't publish rate limits,
       // but 1 second between requests is conservative
-      if (receivedBookmarks.length === limit) {
+      if (pageBookmarks.length === limit) {
         await new Promise((resolve) => setTimeout(resolve, 1000));
       }
-    } while (receivedBookmarks.length === limit);
+    } while (pageBookmarks.length === limit);
+
+    const allArticles = [...articlesById.values()];
 
     return {
       articles: allArticles,
       mode,
       metadata: {
-        totalFetched,
+        totalFetched: allArticles.length,
         totalProcessed: allArticles.length,
         lastSyncTimestamp: new Date().toISOString(),
         apiVersion: "1.0",
