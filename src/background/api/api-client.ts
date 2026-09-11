@@ -172,21 +172,30 @@ export class ApiClient {
 
     await this.applyRateLimit();
 
-    const response = await this.makeRequestWithRetry(url, requestOptions, options);
-    if (!response.ok) {
-      throw new Error(
-        `${this.serviceName} API request failed: ${response.status} ${response.statusText}`,
-      );
+    const { response, dispose } = await this.makeRequestWithRetry(url, requestOptions);
+    try {
+      if (!response.ok) {
+        throw new Error(
+          `${this.serviceName} API request failed: ${response.status} ${response.statusText}`,
+        );
+      }
+
+      const data = await this.parseResponse<T>(response);
+
+      return {
+        data,
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      };
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError" && !options.signal?.aborted) {
+        throw new Error(`Request timeout after ${options.timeout || this.config.timeoutMs}ms`);
+      }
+      throw error;
+    } finally {
+      dispose();
     }
-
-    const data = await this.parseResponse<T>(response);
-
-    return {
-      data,
-      status: response.status,
-      statusText: response.statusText,
-      headers: response.headers,
-    };
   }
 
   async publicRequest<T = unknown>(
@@ -239,7 +248,7 @@ export class ApiClient {
     return `${baseUrl}${cleanEndpoint}`;
   }
 
-  private async buildRequestOptions(options: RequestOptions): Promise<RequestInit> {
+  private async buildRequestOptions(options: RequestOptions): Promise<RequestOptions> {
     const headers: Record<string, string> = {
       ...this.config.defaultHeaders,
       ...options.headers,
@@ -281,59 +290,114 @@ export class ApiClient {
 
   private async makeRequestWithRetry(
     url: string,
-    options: RequestInit,
-    requestOptions: RequestOptions,
-    attempt: number = 1,
-  ): Promise<Response> {
-    const timeout = requestOptions.timeout || this.config.timeoutMs;
+    options: RequestOptions,
+  ): Promise<{ response: Response; dispose: () => void }> {
+    const timeout = options.timeout || this.config.timeoutMs;
+    const callerSignal = options.signal;
+    let rateLimitRetries = this.config.rateLimit.maxRetries;
+    let authRetries = this.config.maxAuthRetries;
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    for (;;) {
+      const controller = new AbortController();
+      const signal = callerSignal
+        ? AbortSignal.any([callerSignal, controller.signal])
+        : controller.signal;
+      const timeoutId = setTimeout(() => controller.abort(), timeout);
 
-    try {
-      const response = await fetch(url, {
-        ...options,
-        signal: controller.signal,
-      });
+      let response: Response;
+      try {
+        response = await fetch(url, { ...options, signal });
+      } catch (error) {
+        clearTimeout(timeoutId);
+        if (callerSignal?.aborted) {
+          throw callerSignal.reason instanceof Error
+            ? callerSignal.reason
+            : new Error("Request cancelled");
+        }
+        if (error instanceof Error && error.name === "AbortError") {
+          throw new Error(`Request timeout after ${timeout}ms`);
+        }
+        throw error;
+      }
 
-      clearTimeout(timeoutId);
-
-      if (
+      const canRetryAuth =
         (response.status === 401 || response.status === 403) &&
-        requestOptions.authenticated !== false &&
+        options.authenticated !== false &&
         this.config.autoRetryOnAuth &&
-        attempt <= this.config.maxAuthRetries
-      ) {
+        options.retryOnAuth !== false &&
+        authRetries > 0;
+
+      if (canRetryAuth) {
+        clearTimeout(timeoutId);
+        authRetries -= 1;
         logger.warn(
-          `Authentication failed (${response.status}) for ${this.serviceName}, attempt ${attempt}`,
+          `Authentication failed (${response.status}) for ${this.serviceName}, ${authRetries} retries remaining`,
         );
 
-        const refreshResult = await this.handleAuthFailure();
-        if (refreshResult && attempt < this.config.maxAuthRetries) {
-          const newOptions = await this.buildRequestOptions(requestOptions);
-          return this.makeRequestWithRetry(url, newOptions, requestOptions, attempt + 1);
+        if (await this.handleAuthFailure()) {
+          options = await this.buildRequestOptions(options);
+          continue;
         }
       }
 
-      if (response.status === 429) {
-        await this.handleRateLimit(response);
-        if (attempt <= this.config.rateLimit.maxRetries) {
-          return this.makeRequestWithRetry(url, options, requestOptions, attempt + 1);
-        }
+      if (response.status === 429 && rateLimitRetries > 0) {
+        clearTimeout(timeoutId);
+        rateLimitRetries -= 1;
+        await this.waitForRetry(this.parseRetryAfterDelay(response), callerSignal ?? undefined);
+        continue;
       }
 
       this.checkRateLimit(response);
 
-      return response;
-    } catch (error) {
-      clearTimeout(timeoutId);
-
-      if (error instanceof Error && error.name === "AbortError") {
-        throw new Error(`Request timeout after ${timeout}ms`);
-      }
-
-      throw error;
+      return {
+        response,
+        dispose: () => clearTimeout(timeoutId),
+      };
     }
+  }
+
+  private parseRetryAfterDelay(response: Response): number {
+    const retryAfter = response.headers.get("Retry-After");
+    const rateLimitReset = response.headers.get("X-RateLimit-Reset");
+
+    let delay: number | null = null;
+
+    if (retryAfter) {
+      const seconds = Number.parseInt(retryAfter, 10);
+      if (Number.isFinite(seconds)) {
+        delay = Math.max(0, seconds * 1000);
+      } else {
+        const retryDate = Date.parse(retryAfter);
+        if (!Number.isNaN(retryDate)) {
+          delay = Math.max(0, retryDate - Date.now());
+        }
+      }
+    } else if (rateLimitReset) {
+      const resetTime = Number.parseInt(rateLimitReset, 10);
+      if (Number.isFinite(resetTime)) {
+        delay = Math.max(0, resetTime * 1000 - Date.now());
+      }
+    }
+
+    return delay ?? this.config.rateLimit.delayMs;
+  }
+
+  private async waitForRetry(delay: number, signal?: AbortSignal): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+      };
+      const onAbort = () => {
+        cleanup();
+        reject(signal?.reason instanceof Error ? signal.reason : new Error("Request cancelled"));
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        resolve();
+      }, delay);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
   }
 
   private async handleAuthFailure(): Promise<boolean> {
@@ -402,23 +466,6 @@ export class ApiClient {
       logger.error(`Error during re-authentication for ${this.serviceName}:`, error);
       return false;
     }
-  }
-
-  private async handleRateLimit(response: Response): Promise<void> {
-    const retryAfter = response.headers.get("Retry-After");
-    const rateLimitReset = response.headers.get("X-RateLimit-Reset");
-
-    let delay = this.config.rateLimit.delayMs;
-
-    if (retryAfter) {
-      delay = parseInt(retryAfter, 10) * 1000;
-    } else if (rateLimitReset) {
-      const resetTime = parseInt(rateLimitReset, 10) * 1000;
-      delay = Math.max(0, resetTime - Date.now());
-    }
-
-    logger.warn(`Rate limit hit for ${this.serviceName}, waiting ${delay}ms`);
-    await new Promise((resolve) => setTimeout(resolve, delay));
   }
 
   private checkRateLimit(response: Response): void {
