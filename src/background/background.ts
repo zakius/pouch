@@ -338,7 +338,7 @@ browser.commands.onCommand.addListener(async (command) => {
   }
 });
 function getIconPath(isSaved: boolean): string {
-  return `icons/page-action-${isSaved ? "saved" : "unsaved"}.svg`;
+  return browser.runtime.getURL(`icons/page-action-${isSaved ? "saved" : "unsaved"}.svg`);
 }
 async function updateUiForTab(tabId: number): Promise<void> {
   try {
