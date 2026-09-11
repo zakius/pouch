@@ -1,5 +1,5 @@
 export interface Article {
-  id: number;
+  id: number | string;
   title: string;
   url: string;
   canonicalUrl?: string;

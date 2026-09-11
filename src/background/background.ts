@@ -53,7 +53,7 @@ interface GetArticlesMessage {
 interface DeleteArticleMessage {
   type: "deleteArticle";
   payload: {
-    articleId: number;
+    articleId: number | string;
   };
 }
 interface SaveSettingsMessage {
@@ -211,7 +211,11 @@ browser.runtime.onMessage.addListener(
           }
           case "deleteArticle": {
             const articleId = message.payload.articleId;
-            if (typeof articleId !== "number" || articleId < 0 || !Number.isInteger(articleId)) {
+            const isValidId =
+              typeof articleId === "number"
+                ? articleId >= 0 && Number.isInteger(articleId)
+                : typeof articleId === "string" && articleId.length > 0;
+            if (!isValidId) {
               safeSendResponse({
                 error: "Article ID is required and must be a non-negative integer",
               });

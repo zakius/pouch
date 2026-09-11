@@ -13,7 +13,7 @@ import type {
 type PendingOperation = {
   type: "save" | "delete";
   article?: Pick<Article, "url" | "title">;
-  articleId?: number;
+  articleId?: number | string;
   timestamp: number;
 };
 
@@ -57,7 +57,7 @@ export class ArticlesRepository {
     return api.testConnection();
   }
 
-  async getArticle(id: number): Promise<Article | undefined> {
+  async getArticle(id: number | string): Promise<Article | undefined> {
     const articles = await this.getAllArticles();
     return articles.find((a) => a.id === id);
   }
@@ -204,7 +204,7 @@ export class ArticlesRepository {
     }
   }
 
-  async deleteArticle(id: number): Promise<{ success: boolean; id: string | number }> {
+  async deleteArticle(id: number | string): Promise<{ success: boolean; id: string | number }> {
     const api = await this.getApi();
     logger.debug("Deleting article through cache:", id);
     if (!id) {
@@ -410,9 +410,9 @@ export class ArticlesRepository {
     logger.debug("Article added to cache:", article);
   }
 
-  private async removeArticle(id: number): Promise<void> {
+  private async removeArticle(id: number | string): Promise<void> {
     logger.debug("Removing article from cache:", id);
-    if (!id) {
+    if (id === undefined || id === null || id === "") {
       logger.error("Cannot remove article from cache: No ID provided");
       return;
     }

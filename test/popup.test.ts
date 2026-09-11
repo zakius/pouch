@@ -176,7 +176,7 @@ const exampleArticle: Article = {
   created_at: "2026-01-01",
 };
 
-function makeDeleteButton(articleId: number): FakeElement {
+function makeDeleteButton(articleId: number | string): FakeElement {
   const button = makeElement();
   button.classList.add("delete-button");
   button.dataset.articleId = String(articleId);
@@ -322,4 +322,36 @@ test("initialization failure surfaces error content even when the list was empty
   await initializePopup();
   await until(() => errorMessageText() !== "", "error shown after empty list");
   expect(el("articles").style.display).toBe("block");
+});
+
+const stringIdArticle: Article = {
+  id: "12abcDEF_-xy",
+  url: "https://example.com/bookmarked",
+  title: "Bookmarked",
+  created_at: "2026-01-02",
+};
+
+test("articles with native string IDs render and delete passes the exact ID", async () => {
+  const otherStringIdArticle: Article = { ...stringIdArticle, id: "12xyz", title: "Other" };
+  let deletePayloads: unknown[] = [];
+  handleMessage = async (message) => {
+    if (message.type === "getArticles") {
+      return listResponse([stringIdArticle, otherStringIdArticle]);
+    }
+    if (message.type === "checkArticle") return undefined;
+    if (message.type === "deleteArticle") {
+      deletePayloads = [...deletePayloads, message.payload.articleId];
+      return {};
+    }
+    return {};
+  };
+  await initializePopup();
+  await until(() => articles().children.length === 2, "both string-ID articles rendered");
+
+  const deleteButton = makeDeleteButton("12abcDEF_-xy");
+  click(deleteButton);
+  click(deleteButton);
+  await until(() => deletePayloads.length === 1, "delete sent for string ID");
+
+  expect(deletePayloads[0]).toBe("12abcDEF_-xy");
 });

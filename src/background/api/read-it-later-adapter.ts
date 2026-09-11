@@ -45,7 +45,7 @@ export interface ReadItLaterAPI<T extends BaseSettings = BaseSettings> {
   initialize(settings: T): Promise<void>;
   testConnection(): Promise<boolean>;
   saveArticle(article: SavingArticle): Promise<Article>;
-  deleteArticle(id: number): Promise<void>;
+  deleteArticle(id: number | string): Promise<void>;
   sync(options?: SyncOptions): Promise<SyncResult>;
   formConfig: FormConfig;
 }
