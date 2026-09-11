@@ -287,14 +287,15 @@ async function handleDeleteArticle(button: HTMLButtonElement): Promise<void> {
   button.classList.add("is-busy");
   button.setAttribute("aria-busy", "true");
   try {
-    await browser.runtime.sendMessage({
+    await sendBackgroundMessage({
       type: "deleteArticle",
       payload: { articleId },
     });
     logger.debug("Article deleted, reloading list");
+    await updateSavePageButtonState();
+    await loadRecentArticles();
     const liveRegion = document.getElementById("sr-live");
     if (liveRegion) liveRegion.textContent = "Article deleted.";
-    await loadRecentArticles();
   } catch (error) {
     logger.error("Error deleting article:", error);
     showError("Failed to delete article. Please try again.", false);
@@ -345,6 +346,7 @@ function showError(message: string, showSettingsLink = false): void {
     errorDiv.appendChild(link);
   }
   articlesContainer.appendChild(errorDiv);
+  articlesContainer.style.display = "block";
   if (emptyMessage) emptyMessage.style.display = "none";
   if (noResultsMessage) noResultsMessage.style.display = "none";
 }
@@ -399,35 +401,45 @@ function createArticleElement(article: Article): HTMLElement {
   articleElement.appendChild(removeButton);
   return articleElement;
 }
+interface ErrorResponse {
+  error?: string;
+}
+async function sendBackgroundMessage<T>(message: Record<string, unknown>): Promise<T> {
+  const response = (await browser.runtime.sendMessage(message)) as ErrorResponse | undefined;
+  if (response?.error) {
+    throw new Error(response.error);
+  }
+  return response as T;
+}
+
 async function updateSavePageButtonState(): Promise<void> {
   if (!savePageButton || !currentTab?.url) {
     if (savePageButton) savePageButton.style.display = "none";
     return;
   }
-  browser.runtime
-    .sendMessage({ type: "checkArticle", payload: { url: currentTab.url } })
-    .then((response: Article | undefined) => {
-      savedArticleForCurrentPage = response;
-      if (savePageButton) {
-        if (response) {
-          savePageButton.textContent = "✓";
-          savePageButton.title = "Remove current page";
-          savePageButton.setAttribute("aria-label", "Remove current page");
-          savePageButton.setAttribute("aria-pressed", "true");
-          savePageButton.classList.add("saved");
-        } else {
-          savePageButton.textContent = "+";
-          savePageButton.title = "Save current page";
-          savePageButton.setAttribute("aria-label", "Save current page");
-          savePageButton.setAttribute("aria-pressed", "false");
-          savePageButton.classList.remove("saved");
-        }
-        savePageButton.style.display = "block";
-      }
-    })
-    .catch((error) => {
-      logger.error("Error checking article:", error);
+  try {
+    const response = await sendBackgroundMessage<Article | undefined>({
+      type: "checkArticle",
+      payload: { url: currentTab.url },
     });
+    savedArticleForCurrentPage = response;
+    if (response) {
+      savePageButton.textContent = "✓";
+      savePageButton.title = "Remove current page";
+      savePageButton.setAttribute("aria-label", "Remove current page");
+      savePageButton.setAttribute("aria-pressed", "true");
+      savePageButton.classList.add("saved");
+    } else {
+      savePageButton.textContent = "+";
+      savePageButton.title = "Save current page";
+      savePageButton.setAttribute("aria-label", "Save current page");
+      savePageButton.setAttribute("aria-pressed", "false");
+      savePageButton.classList.remove("saved");
+    }
+    savePageButton.style.display = "block";
+  } catch (error) {
+    logger.error("Error checking article:", error);
+  }
 }
 async function handleSavePageClick(): Promise<void> {
   if (!currentTab?.url || !savePageButton || isSavingOrDeleting) return;
@@ -447,7 +459,7 @@ async function handleSavePageClick(): Promise<void> {
         logger.error("Invalid article ID:", savedArticleForCurrentPage.id);
         return;
       }
-      await browser.runtime.sendMessage({
+      await sendBackgroundMessage({
         type: "deleteArticle",
         payload: { articleId: savedArticleForCurrentPage.id },
       });
@@ -455,7 +467,7 @@ async function handleSavePageClick(): Promise<void> {
       await updateSavePageButtonState();
       await loadRecentArticles();
     } else {
-      await browser.runtime.sendMessage({
+      await sendBackgroundMessage({
         type: "saveArticle",
         payload: { url, title },
       });
