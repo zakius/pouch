@@ -77,17 +77,23 @@ export class ArticlesRepository {
     await browser.storage.local.set({ articles });
   }
 
+  private async sameUrl(a: string, b: string): Promise<boolean> {
+    if (!this.settings.normalizeOnCompare) {
+      return a === b;
+    }
+    return (await canonicalizeUrl(a)) === (await canonicalizeUrl(b));
+  }
+
   async findSaved(url: string): Promise<Article | undefined> {
     const articles = await this.getAllArticles();
 
-    const canonicalUrl = await canonicalizeUrl(url);
+    for (const article of articles) {
+      if (await this.sameUrl(article.url, url)) {
+        return article;
+      }
+    }
 
-    const existingArticle = articles.find((article) => {
-      const articleCanonicalUrl = article.canonicalUrl || article.url;
-      return articleCanonicalUrl === canonicalUrl;
-    });
-
-    return existingArticle;
+    return undefined;
   }
 
   private filterBySearch(articles: Article[], search?: string): Article[] {
@@ -357,8 +363,9 @@ export class ArticlesRepository {
       try {
         if (op.type === "save" && op.article) {
           // Check if article already exists in the synced dataset
-          const canonicalUrl = await canonicalizeUrl(op.article.url);
-          const exists = currentArticles.some((a) => (a.canonicalUrl || a.url) === canonicalUrl);
+          const pendingArticle = op.article;
+          if (!pendingArticle) continue;
+          const exists = currentArticles.some((a) => this.sameUrl(a.url, pendingArticle.url));
 
           if (!exists) {
             logger.debug("Re-applying save operation for:", op.article);
@@ -386,10 +393,13 @@ export class ArticlesRepository {
     const existingArticles = await this.getAllArticles();
 
     const canonicalUrl = article.canonicalUrl || article.url;
-    const isDuplicate = existingArticles.some((a: Article) => {
-      const aCanonicalUrl = a.canonicalUrl || a.url;
-      return aCanonicalUrl === canonicalUrl;
-    });
+    let isDuplicate = false;
+    for (const a of existingArticles) {
+      if (await this.sameUrl(a.url, article.url)) {
+        isDuplicate = true;
+        break;
+      }
+    }
 
     if (isDuplicate) {
       logger.debug("Article already exists in cache, skipping add:", canonicalUrl);
@@ -419,15 +429,14 @@ export class ArticlesRepository {
     logger.debug("Merging articles in cache:", newArticles.length);
     const existingArticles = await this.getAllArticles();
     const existingMap = new Map(existingArticles.map((article) => [article.id, article]));
+    const compareKeyOf = (article: Article): string =>
+      this.settings.normalizeOnCompare ? article.canonicalUrl || article.url : article.url;
     const existingCanonicalMap = new Map(
-      existingArticles.map((article) => {
-        const canonicalUrl = article.canonicalUrl || article.url;
-        return [canonicalUrl, article];
-      }),
+      existingArticles.map((article) => [compareKeyOf(article), article]),
     );
 
     for (const newArticle of newArticles) {
-      const canonicalUrl = newArticle.canonicalUrl || newArticle.url;
+      const canonicalUrl = compareKeyOf(newArticle);
       const existingByCanonical = existingCanonicalMap.get(canonicalUrl);
 
       if (existingByCanonical && existingByCanonical.id !== newArticle.id) {

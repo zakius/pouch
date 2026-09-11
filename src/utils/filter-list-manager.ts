@@ -8,6 +8,7 @@
 import { type FilterRule, parseCompleteFilterList } from "./filter-list-parser";
 import { initializeWithFilterRules } from "./filter-list-url-cleaner";
 import { logger } from "./logger";
+import { clearCanonicalUrlCache } from "./url-helpers";
 
 export interface FilterListSource {
   name: string;
@@ -221,6 +222,7 @@ export function initializeFilterListManager(): void {
 export async function refreshFilterLists(): Promise<void> {
   logger.info("Refreshing filter lists...");
   await clearFilterListCache();
+  clearCanonicalUrlCache();
   await initializeUrlCleanerWithRemoteLists();
 }
 

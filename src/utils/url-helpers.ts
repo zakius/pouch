@@ -14,19 +14,23 @@ export async function initializeUrlCanonizer(): Promise<void> {
 
   urlCanonizerInitialized = true;
 }
+const redirectTargets: { host: string; paths: string[]; params: string[] }[] = [
+  {
+    host: "google.com",
+    paths: ["/url", "/imgres"],
+    params: ["q", "url", "imgurl"],
+  },
+];
+
 function handleOpenRedirects(url: URL): URL {
-  const redirectParams = [
-    "url",
-    "u",
-    "q",
-    "next",
-    "redirect",
-    "redirect_uri",
-    "redirect_url",
-    "destination",
-    "dest",
-  ];
-  for (const param of redirectParams) {
+  const host = url.hostname.toLowerCase();
+  const target = redirectTargets.find(
+    (t) => t.paths.includes(url.pathname) && (host === t.host || host.endsWith(`.${t.host}`)),
+  );
+  if (!target) {
+    return url;
+  }
+  for (const param of target.params) {
     const potentialUrl = url.searchParams.get(param);
     if (potentialUrl) {
       try {
@@ -127,6 +131,10 @@ function canonicalizeAmazonUrl(url: URL): URL {
 // ponytail: crude cap, swap for an LRU if 1000 entries ever turns out to be too few
 const canonicalUrlCache = new Map<string, string>();
 const CANONICAL_CACHE_LIMIT = 1000;
+
+export function clearCanonicalUrlCache(): void {
+  canonicalUrlCache.clear();
+}
 
 export async function canonicalizeUrl(urlString: string): Promise<string> {
   const cached = canonicalUrlCache.get(urlString);
