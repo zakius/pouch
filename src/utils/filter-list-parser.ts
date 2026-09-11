@@ -272,11 +272,7 @@ export function parseCompleteFilterList(content: string): ParsedFilterList {
   };
 }
 
-export function matchesPattern(
-  hostname: string,
-  pattern: string,
-  fullUrl?: string,
-): boolean {
+export function matchesPattern(hostname: string, pattern: string, fullUrl?: string): boolean {
   if (pattern === "*") {
     return true;
   }
