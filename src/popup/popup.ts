@@ -260,6 +260,8 @@ async function handleDeleteArticle(button: HTMLButtonElement): Promise<void> {
   }
   isSavingOrDeleting = true;
   button.disabled = true;
+  button.classList.add("is-busy");
+  button.setAttribute("aria-busy", "true");
   try {
     await browser.runtime.sendMessage({
       type: "deleteArticle",
@@ -273,6 +275,8 @@ async function handleDeleteArticle(button: HTMLButtonElement): Promise<void> {
   } finally {
     isSavingOrDeleting = false;
     button.disabled = false;
+    button.classList.remove("is-busy");
+    button.setAttribute("aria-busy", "false");
   }
 }
 
@@ -409,6 +413,8 @@ async function handleSavePageClick(): Promise<void> {
   const title = (currentTab.title || "").trim();
   isSavingOrDeleting = true;
   savePageButton.disabled = true;
+  savePageButton.classList.add("is-busy");
+  savePageButton.setAttribute("aria-busy", "true");
   try {
     if (savedArticleForCurrentPage) {
       if (typeof savedArticleForCurrentPage.id !== "number" || savedArticleForCurrentPage.id < 0) {
@@ -438,6 +444,8 @@ async function handleSavePageClick(): Promise<void> {
   } finally {
     isSavingOrDeleting = false;
     savePageButton.disabled = false;
+    savePageButton.classList.remove("is-busy");
+    savePageButton.setAttribute("aria-busy", "false");
   }
 }
 document.addEventListener("DOMContentLoaded", initializePopup);
