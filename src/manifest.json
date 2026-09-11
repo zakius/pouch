@@ -39,6 +39,9 @@
     "page": "background/background.html"
   },
   "page_action": {
+    "default_icon": {
+      "48": "icons/icon.svg"
+    },
     "default_title": "Save to Pouch",
     "show_matches": ["<all_urls>"]
   },
