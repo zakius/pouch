@@ -12,7 +12,7 @@ import type {
 
 type PendingOperation = {
   type: "save" | "delete";
-  article?: Pick<Article, "url" | "title">;
+  article?: Article;
   articleId?: number | string;
   timestamp: number;
 };
@@ -25,6 +25,7 @@ export class ArticlesRepository {
   private syncInProgress: Promise<void> | null = null;
   private pendingOperations: PendingOperation[] = [];
   private articlesCache: Article[] | null = null;
+  private commitQueue: Promise<unknown> = Promise.resolve();
 
   async initialize(settings: Settings): Promise<void> {
     logger.info("Initializing ArticlesRepository with settings:", settings);
@@ -75,6 +76,15 @@ export class ArticlesRepository {
   private async storeArticles(articles: Article[]): Promise<void> {
     this.articlesCache = articles;
     await browser.storage.local.set({ articles });
+  }
+
+  private enqueueCommit<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.commitQueue.then(operation);
+    this.commitQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   private async sameUrl(a: string, b: string): Promise<boolean> {
@@ -157,7 +167,7 @@ export class ArticlesRepository {
       if (this.syncInProgress) {
         this.pendingOperations.push({
           type: "save",
-          article: { url: article.url, title: article.title },
+          article: articleWithCanonicalUrl,
           timestamp: Date.now(),
         });
       }
@@ -187,7 +197,7 @@ export class ArticlesRepository {
           if (this.syncInProgress) {
             this.pendingOperations.push({
               type: "save",
-              article: { url: article.url, title: article.title },
+              article: retryArticleWithCanonicalUrl,
               timestamp: Date.now(),
             });
           }
@@ -282,6 +292,7 @@ export class ArticlesRepository {
           isBrowserIdle: syncOptions.isBrowserIdle,
         });
 
+        const fetchStartedAt = new Date().toISOString();
         const syncResult = await api.sync(syncOptions);
         logger.debug(
           `Synced ${syncResult.articles.length} articles from API using ${syncResult.mode} mode`,
@@ -317,7 +328,7 @@ export class ArticlesRepository {
         }
 
         // Update sync timestamps
-        await this.updateSyncTimestamp(syncResult.mode);
+        await this.updateSyncTimestamp(syncResult.mode, fetchStartedAt);
 
         // Re-apply pending operations that occurred during sync
         if (this.pendingOperations.length > 0) {
@@ -326,57 +337,33 @@ export class ArticlesRepository {
           this.pendingOperations = [];
         }
 
-        return {
-          items: processedArticles,
-          total: processedArticles.length,
-          syncResult,
-        };
-      } catch (error) {
-        logger.error("Error syncing cache with API:", error);
         const currentArticles = await this.getAllArticles();
         return {
           items: currentArticles,
           total: currentArticles.length,
-          syncResult: {
-            articles: currentArticles,
-            mode: "overwrite",
-            metadata: {
-              totalFetched: 0,
-              totalProcessed: 0,
-              lastSyncTimestamp: new Date().toISOString(),
-            },
-          },
+          syncResult,
         };
+      } catch (error) {
+        logger.error("Error syncing cache with API:", error);
+        throw error instanceof Error ? error : new Error(String(error));
       } finally {
         this.syncInProgress = null;
       }
     })();
 
-    this.syncInProgress = syncPromise.then(() => undefined);
+    this.syncInProgress = syncPromise.then(
+      () => undefined,
+      () => undefined,
+    );
     return syncPromise;
   }
 
   private async reapplyPendingOperations(): Promise<void> {
-    const currentArticles = await this.getAllArticles();
-
     for (const op of this.pendingOperations) {
       try {
         if (op.type === "save" && op.article) {
-          // Check if article already exists in the synced dataset
-          const pendingArticle = op.article;
-          if (!pendingArticle) continue;
-          const exists = currentArticles.some((a) => this.sameUrl(a.url, pendingArticle.url));
-
-          if (!exists) {
-            logger.debug("Re-applying save operation for:", op.article);
-            // The article was already saved to the server, just add to local cache
-            await this.addArticle({
-              id: Date.now() + Math.random(), // Temporary ID, will be updated on next sync
-              url: op.article.url,
-              title: op.article.title,
-              created_at: new Date(op.timestamp).toISOString(),
-            });
-          }
+          logger.debug("Re-applying save operation for:", op.article);
+          await this.addArticle(op.article);
         } else if (op.type === "delete" && op.articleId !== undefined) {
           logger.debug("Re-applying delete operation for:", op.articleId);
           await this.removeArticle(op.articleId);
@@ -387,71 +374,78 @@ export class ArticlesRepository {
     }
   }
 
-  private async addArticle(article: Article): Promise<void> {
+  private addArticle(article: Article): Promise<void> {
     logger.debug("Adding article to cache:", article);
 
-    const existingArticles = await this.getAllArticles();
+    return this.enqueueCommit(async () => {
+      const existingArticles = await this.getAllArticles();
 
-    const canonicalUrl = article.canonicalUrl || article.url;
-    let isDuplicate = false;
-    for (const a of existingArticles) {
-      if (await this.sameUrl(a.url, article.url)) {
-        isDuplicate = true;
-        break;
-      }
-    }
-
-    if (isDuplicate) {
-      logger.debug("Article already exists in cache, skipping add:", canonicalUrl);
-      return;
-    }
-
-    await this.storeArticles([article, ...existingArticles]);
-    logger.debug("Article added to cache:", article);
-  }
-
-  private async removeArticle(id: number | string): Promise<void> {
-    logger.debug("Removing article from cache:", id);
-    if (id === undefined || id === null || id === "") {
-      logger.error("Cannot remove article from cache: No ID provided");
-      return;
-    }
-    const articles = await this.getAllArticles();
-    await this.storeArticles(articles.filter((a) => a.id !== id));
-  }
-
-  async updateArticles(newArticles: Article[]): Promise<void> {
-    logger.debug("Updating articles in cache:", newArticles.length);
-    await this.storeArticles(newArticles);
-  }
-
-  async mergeArticles(newArticles: Article[]): Promise<void> {
-    logger.debug("Merging articles in cache:", newArticles.length);
-    const existingArticles = await this.getAllArticles();
-    const existingMap = new Map(existingArticles.map((article) => [article.id, article]));
-    const compareKeyOf = (article: Article): string =>
-      this.settings.normalizeOnCompare ? article.canonicalUrl || article.url : article.url;
-    const existingCanonicalMap = new Map(
-      existingArticles.map((article) => [compareKeyOf(article), article]),
-    );
-
-    for (const newArticle of newArticles) {
-      const canonicalUrl = compareKeyOf(newArticle);
-      const existingByCanonical = existingCanonicalMap.get(canonicalUrl);
-
-      if (existingByCanonical && existingByCanonical.id !== newArticle.id) {
-        const existingById = existingMap.get(existingByCanonical.id);
-        if (existingById && existingById.id === existingByCanonical.id) {
-          continue;
+      const canonicalUrl = article.canonicalUrl || article.url;
+      let isDuplicate = false;
+      for (const a of existingArticles) {
+        if (await this.sameUrl(a.url, article.url)) {
+          isDuplicate = true;
+          break;
         }
       }
 
-      existingMap.set(newArticle.id, newArticle);
-    }
+      if (isDuplicate) {
+        logger.debug("Article already exists in cache, skipping add:", canonicalUrl);
+        return;
+      }
 
-    const mergedArticles = Array.from(existingMap.values());
-    await this.storeArticles(mergedArticles);
-    logger.debug("Merged articles count:", mergedArticles.length);
+      await this.storeArticles([article, ...existingArticles]);
+      logger.debug("Article added to cache:", article);
+    });
+  }
+
+  private removeArticle(id: number | string): Promise<void> {
+    logger.debug("Removing article from cache:", id);
+    if (id === undefined || id === null || id === "") {
+      logger.error("Cannot remove article from cache: No ID provided");
+      return Promise.resolve();
+    }
+    return this.enqueueCommit(async () => {
+      const articles = await this.getAllArticles();
+      await this.storeArticles(articles.filter((a) => a.id !== id));
+    });
+  }
+
+  updateArticles(newArticles: Article[]): Promise<void> {
+    logger.debug("Updating articles in cache:", newArticles.length);
+    return this.enqueueCommit(() => this.storeArticles(newArticles));
+  }
+
+  mergeArticles(newArticles: Article[]): Promise<void> {
+    logger.debug("Merging articles in cache:", newArticles.length);
+    return this.enqueueCommit(async () => {
+      const existingArticles = await this.getAllArticles();
+      const existingMap = new Map(existingArticles.map((article) => [article.id, article]));
+      const compareKeyOf = (article: Article): string =>
+        this.settings.normalizeOnCompare ? article.canonicalUrl || article.url : article.url;
+      const existingCanonicalMap = new Map(
+        existingArticles.map((article) => [compareKeyOf(article), article]),
+      );
+
+      for (const newArticle of newArticles) {
+        const compareKey = compareKeyOf(newArticle);
+        const existingByCanonical = existingCanonicalMap.get(compareKey);
+
+        if (existingByCanonical && existingByCanonical.id !== newArticle.id) {
+          const existingById = existingMap.get(existingByCanonical.id);
+          if (existingById && existingById.id === existingByCanonical.id) {
+            continue;
+          }
+        }
+
+        existingMap.set(newArticle.id, newArticle);
+        existingCanonicalMap.set(compareKey, newArticle);
+      }
+
+      const mergedArticles = Array.from(existingMap.values());
+      await this.storeArticles(mergedArticles);
+      logger.debug("Merged articles count:", mergedArticles.length);
+    });
   }
 
   async clear(): Promise<void> {
@@ -506,8 +500,8 @@ export class ArticlesRepository {
     }
   }
 
-  private async updateSyncTimestamp(mode: SyncMode): Promise<void> {
-    const now = new Date().toISOString();
+  private async updateSyncTimestamp(mode: SyncMode, fetchStartedAt: string): Promise<void> {
+    const now = fetchStartedAt;
 
     // Always update lastSyncTimestamp for any sync
     const oldLastSync = this.lastSyncTimestamp;
@@ -516,7 +510,7 @@ export class ArticlesRepository {
     // Update lastFullSyncTimestamp only for overwrite syncs
     if (mode === "overwrite") {
       const oldFullSync = this.lastFullSyncTimestamp;
-      this.lastFullSyncTimestamp = Date.now();
+      this.lastFullSyncTimestamp = Date.parse(fetchStartedAt);
       await this.saveSyncTimestamps();
       logger.debug("Updated sync timestamps:", {
         oldLastSync,
