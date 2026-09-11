@@ -1,7 +1,7 @@
 import { refreshFilterLists } from "../utils/filter-list-manager";
 import { logger } from "../utils/logger";
 import { getSettings, type Settings, saveSettings } from "../utils/settings";
-import { initializeUrlCanonizer } from "../utils/url-helpers";
+import { clearCanonicalUrlCache, initializeUrlCanonizer } from "../utils/url-helpers";
 import { ArticlesRepository } from "./articles-repository";
 import { tokenManager } from "./token-manager";
 
@@ -119,6 +119,7 @@ browser.runtime.onMessage.addListener(
               await tokenManager.clearToken(oldSettings.backend);
             }
             await saveSettings(settings);
+            clearCanonicalUrlCache();
             await logger.initialize();
             articlesRepository = new ArticlesRepository();
             await articlesRepository.initialize(settings);
