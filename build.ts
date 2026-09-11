@@ -69,7 +69,7 @@ async function createArchive(): Promise<void> {
 	await mkdir(archiveDir, { recursive: true });
 
 	try {
-		await execAsync(`web-ext build --source-dir=${distDir} --artifacts-dir=${archiveDir}`, {
+		await execAsync(`web-ext build --source-dir=${distDir} --artifacts-dir=${archiveDir} --overwrite-dest`, {
 			env: process.env,
 		});
 		console.log("Created extension.zip in dist/packages/");

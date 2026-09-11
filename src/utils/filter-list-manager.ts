@@ -6,7 +6,7 @@
  */
 
 import { type FilterRule, parseCompleteFilterList } from "./filter-list-parser";
-import { initializeWithRawFilterLists } from "./filter-list-url-cleaner";
+import { initializeWithFilterRules } from "./filter-list-url-cleaner";
 import { logger } from "./logger";
 
 export interface FilterListSource {
@@ -33,7 +33,7 @@ export interface FilterListResult {
 }
 
 const CACHE_KEY = "filter_list_url_cleaning_rules";
-const CACHE_VERSION = "1.0";
+const CACHE_VERSION = "1.1";
 const CACHE_EXPIRY_KEY = "filter_list_cache_expiry";
 const CACHE_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -229,43 +229,17 @@ export async function initializeUrlCleanerWithRemoteLists(): Promise<void> {
 
   const cachedRules = await loadCachedFilterLists();
   if (cachedRules && cachedRules.length > 0) {
-    await initializeWithRawFilterLists([
-      {
-        name: "cached",
-        content: cachedRules
-          .map((rule) => {
-            if (rule.pattern === "*") {
-              return rule.params.map((param) => `$removeparam=${param}`).join("\n");
-            } else {
-              return rule.params.map((param) => `${rule.pattern}$removeparam=${param}`).join("\n");
-            }
-          })
-          .join("\n"),
-      },
-    ]);
+    initializeWithFilterRules(cachedRules);
     logger.info(`Initialized URL cleaner with ${cachedRules.length} cached filter rules`);
     return;
   }
 
   logger.info("No valid cache found, loading filter lists from remote sources...");
-  const { rules, results, versions } = await loadFilterLists();
+  const { rules, versions } = await loadFilterLists();
 
   if (rules.length > 0) {
     await saveCachedFilterLists(rules, versions);
   }
 
-  const filterLists = results.map((result) => ({
-    name: result.name,
-    content: result.rules
-      .map((rule) => {
-        if (rule.pattern === "*") {
-          return rule.params.map((param) => `$removeparam=${param}`).join("\n");
-        } else {
-          return rule.params.map((param) => `${rule.pattern}$removeparam=${param}`).join("\n");
-        }
-      })
-      .join("\n"),
-  }));
-
-  await initializeWithRawFilterLists(filterLists);
+  initializeWithFilterRules(rules);
 }

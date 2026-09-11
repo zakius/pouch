@@ -189,11 +189,12 @@ export function parseFilterList(raw: string): {
       .map((p) => p.trim())
       .filter((p) => p);
 
-    const existingRule = ruleMap.get(pattern);
+    const ruleKey = `${isException ? "@@" : ""}${pattern}`;
+    const existingRule = ruleMap.get(ruleKey);
     if (existingRule) {
       existingRule.params.push(...params);
     } else {
-      ruleMap.set(pattern, {
+      ruleMap.set(ruleKey, {
         pattern,
         params,
         domain,

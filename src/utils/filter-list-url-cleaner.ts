@@ -4,6 +4,11 @@ import { logger } from "./logger";
 let filterRules: FilterRule[] = [];
 let isInitialized = false;
 
+export function initializeWithFilterRules(rules: FilterRule[]): void {
+  filterRules = rules;
+  isInitialized = true;
+}
+
 export async function initializeWithRawFilterLists(
   filterLists: Array<{ name: string; content: string }>,
 ): Promise<void> {
@@ -23,8 +28,7 @@ export async function initializeWithRawFilterLists(
       }
     }
 
-    filterRules = allRules;
-    isInitialized = true;
+    initializeWithFilterRules(allRules);
 
     logger.info(`URL cleaning initialized with ${filterRules.length} total rules from raw content`);
   } catch (error) {
