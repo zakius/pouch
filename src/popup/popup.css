@@ -153,6 +153,17 @@ body {
   outline-offset: 2px;
 }
 
+.delete-button.is-arming {
+  width: auto;
+  min-width: 24px;
+  padding: 4px 8px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background-color: var(--error-color);
+  color: white;
+  border-color: var(--error-color);
+}
+
 .article-list {
   flex-grow: 1;
   overflow-y: auto;

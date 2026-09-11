@@ -22,6 +22,8 @@ let searchDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 let latestRequestId = 0;
 let pendingReload = false;
 const searchDebounceMs = 300;
+const deleteConfirmMs = 4000;
+let deleteArmTimer: ReturnType<typeof setTimeout> | undefined;
 async function initializePopup(): Promise<void> {
   try {
     logger.debug("Initializing popup...");
@@ -205,6 +207,7 @@ function handleBodyClick(event: MouseEvent): void {
     return;
   }
 
+  disarmDeleteButton();
   if (target.id === "settings-button" || target.closest("#settings-button")) {
     event.preventDefault();
     void browser.runtime.openOptionsPage();
@@ -246,8 +249,29 @@ function handleBodyClick(event: MouseEvent): void {
   }
 }
 
+function disarmDeleteButton(): void {
+  clearTimeout(deleteArmTimer);
+  deleteArmTimer = undefined;
+  const armed = document.querySelector(".delete-button.is-arming") as HTMLButtonElement | null;
+  if (!armed) return;
+  armed.classList.remove("is-arming");
+  armed.textContent = "×";
+  armed.title = "Delete article";
+  armed.setAttribute("aria-label", "Delete article");
+}
+
 async function handleDeleteArticle(button: HTMLButtonElement): Promise<void> {
   if (isSavingOrDeleting) return;
+  if (!button.classList.contains("is-arming")) {
+    disarmDeleteButton();
+    button.classList.add("is-arming");
+    button.textContent = "Remove?";
+    button.title = "Confirm delete";
+    button.setAttribute("aria-label", "Confirm delete");
+    deleteArmTimer = setTimeout(() => disarmDeleteButton(), deleteConfirmMs);
+    return;
+  }
+  disarmDeleteButton();
   const articleIdStr = button.dataset.articleId;
   if (!articleIdStr) {
     logger.warn("Delete button missing article ID");
@@ -268,6 +292,8 @@ async function handleDeleteArticle(button: HTMLButtonElement): Promise<void> {
       payload: { articleId },
     });
     logger.debug("Article deleted, reloading list");
+    const liveRegion = document.getElementById("sr-live");
+    if (liveRegion) liveRegion.textContent = "Article deleted.";
     await loadRecentArticles();
   } catch (error) {
     logger.error("Error deleting article:", error);
