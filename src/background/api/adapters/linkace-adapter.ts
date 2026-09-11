@@ -1,6 +1,7 @@
 import * as v from "valibot";
+import { linkaceConfigSchema, linkaceSettingsSchema } from "../../../utils/settings-schemas";
+export { linkaceConfigSchema, linkaceSettingsSchema };
 import type { Article } from "../../../types/common";
-import { baseSettingsSchema } from "../../../utils/base-settings-schema";
 import { logger } from "../../../utils/logger";
 import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
@@ -12,17 +13,6 @@ import type {
   SyncResult,
 } from "../read-it-later-adapter";
 import type { TokenizedAdapter } from "../tokenized-adapter";
-
-export const linkaceConfigSchema = v.object({
-  url: v.pipe(v.string(), v.url()),
-  token: v.string(),
-});
-
-export const linkaceSettingsSchema = v.object({
-  ...baseSettingsSchema.entries,
-  backend: v.literal("linkace"),
-  apiConfig: linkaceConfigSchema,
-});
 
 export type LinkaceSettings = v.InferInput<typeof linkaceSettingsSchema>;
 export type LinkaceConfig = v.InferInput<typeof linkaceConfigSchema>;

@@ -1,6 +1,7 @@
 import * as v from "valibot";
+import { wallabagConfigSchema, wallabagSettingsSchema } from "../../../utils/settings-schemas";
+export { wallabagConfigSchema, wallabagSettingsSchema };
 import type { Article } from "../../../types/common";
-import { baseSettingsSchema } from "../../../utils/base-settings-schema";
 import { logger } from "../../../utils/logger";
 import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
@@ -13,20 +14,6 @@ import type {
   SyncResult,
 } from "../read-it-later-adapter";
 import type { TokenizedAdapter } from "../tokenized-adapter";
-
-export const wallabagConfigSchema = v.object({
-  url: v.pipe(v.string(), v.url()),
-  clientId: v.string(),
-  clientSecret: v.string(),
-  username: v.string(),
-  password: v.optional(v.string()),
-});
-
-export const wallabagSettingsSchema = v.object({
-  ...baseSettingsSchema.entries,
-  backend: v.literal("wallabag"),
-  apiConfig: wallabagConfigSchema,
-});
 
 export type WallabagSettings = v.InferInput<typeof wallabagSettingsSchema>;
 export type WallabagConfig = v.InferInput<typeof wallabagConfigSchema>;

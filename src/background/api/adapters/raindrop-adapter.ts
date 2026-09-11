@@ -1,6 +1,7 @@
 import * as v from "valibot";
+import { raindropConfigSchema, raindropSettingsSchema } from "../../../utils/settings-schemas";
+export { raindropConfigSchema, raindropSettingsSchema };
 import type { Article } from "../../../types/common";
-import { baseSettingsSchema } from "../../../utils/base-settings-schema";
 import { logger } from "../../../utils/logger";
 import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
@@ -12,16 +13,6 @@ import type {
   SyncResult,
 } from "../read-it-later-adapter";
 import type { TokenizedAdapter } from "../tokenized-adapter";
-
-export const raindropConfigSchema = v.object({
-  apiKey: v.string(),
-});
-
-export const raindropSettingsSchema = v.object({
-  ...baseSettingsSchema.entries,
-  backend: v.literal("raindrop"),
-  apiConfig: raindropConfigSchema,
-});
 
 export type RaindropSettings = v.InferInput<typeof raindropSettingsSchema>;
 export type RaindropConfig = v.InferInput<typeof raindropConfigSchema>;
