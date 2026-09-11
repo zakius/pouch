@@ -173,6 +173,11 @@ export class ApiClient {
     await this.applyRateLimit();
 
     const response = await this.makeRequestWithRetry(url, requestOptions, options);
+    if (!response.ok) {
+      throw new Error(
+        `${this.serviceName} API request failed: ${response.status} ${response.statusText}`,
+      );
+    }
 
     const data = await this.parseResponse<T>(response);
 
@@ -200,7 +205,7 @@ export class ApiClient {
         method: "GET",
         timeout: 10000, // Shorter timeout for connection tests
       });
-      return response.status < 500; // Consider 4xx as connection working
+      return response.status >= 200 && response.status < 300;
     } catch (error) {
       logger.error(`Connection test failed for ${this.serviceName}:`, error);
       return false;
@@ -445,6 +450,9 @@ export class ApiClient {
   }
 
   private async parseResponse<T>(response: Response): Promise<T> {
+    if (response.status === 204 || response.status === 205) {
+      return undefined as T;
+    }
     const contentType = response.headers.get("content-type") || "";
 
     if (contentType.includes("application/json")) {

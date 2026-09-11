@@ -2,6 +2,7 @@ import * as v from "valibot";
 import { bookmarksSettingsSchema } from "../background/api/adapters/bookmarks-adapter";
 import { instapaperSettingsSchema } from "../background/api/adapters/instapaper-adapter";
 import { karakeepSettingsSchema } from "../background/api/adapters/karakeep-adapter";
+import { linkaceSettingsSchema } from "../background/api/adapters/linkace-adapter";
 import { linkwardenSettingsSchema } from "../background/api/adapters/linkwarden-adapter";
 import { raindropSettingsSchema } from "../background/api/adapters/raindrop-adapter";
 import { wallabagSettingsSchema } from "../background/api/adapters/wallabag-adapter";
@@ -14,6 +15,7 @@ export const settingsSchema = v.variant("backend", [
   raindropSettingsSchema,
   instapaperSettingsSchema,
   karakeepSettingsSchema,
+  linkaceSettingsSchema,
   linkwardenSettingsSchema,
 ]);
 export type Settings = v.InferInput<typeof settingsSchema>;

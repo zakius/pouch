@@ -39,7 +39,6 @@ export class ArticlesRepository {
     }
     logger.debug("API not initialized, creating adapter now...");
     const api = getAdapter(this.settings.backend);
-    logger.debug("Initializing API with config:", this.settings.apiConfig);
     try {
       await api.initialize(this.settings);
       logger.info("On-demand API initialization completed");
@@ -207,8 +206,8 @@ export class ArticlesRepository {
       throw new Error("Article ID is required");
     }
     try {
-      await this.removeArticle(id);
       await api.deleteArticle(id);
+      await this.removeArticle(id);
       logger.debug("Deleted article from API", id);
 
       // Track this operation if sync is in progress

@@ -62,9 +62,8 @@ function canonicalizeTwitterUrl(url: URL): URL {
   return url;
 }
 function canonicalizeYoutubeUrl(url: URL): URL {
-  const youtubeDomains = ["youtube.com", "m.youtube.com", "youtu.be"];
+  const youtubeDomains = ["youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"];
   if (youtubeDomains.includes(url.hostname.toLowerCase())) {
-    url.hostname = "www.youtube.com";
     let videoId: string | null = null;
     if (url.pathname.startsWith("/shorts/")) {
       videoId = url.pathname.substring("/shorts/".length);
@@ -73,6 +72,7 @@ function canonicalizeYoutubeUrl(url: URL): URL {
     } else {
       videoId = url.searchParams.get("v");
     }
+    url.hostname = "www.youtube.com";
     if (videoId) {
       url.pathname = "/watch";
       url.search = `?v=${videoId}`;
