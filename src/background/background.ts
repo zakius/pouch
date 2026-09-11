@@ -280,8 +280,18 @@ browser.contextMenus.onClicked.addListener(async (info: OnClickData, tab?: Tab) 
     }
   } catch (error) {
     logger.error("Error saving link:", error);
+    notifyError(info.menuItemId === "save-page" ? "toggle page" : "save link", error);
   }
 });
+const ERROR_NOTIFICATION_ID = "pouch-error";
+function notifyError(operation: string, error: unknown): void {
+  void browser.notifications.create(ERROR_NOTIFICATION_ID, {
+    type: "basic",
+    iconUrl: "icons/icon.svg",
+    title: `Pouch — failed to ${operation}`,
+    message: (error as Error).message || "Unknown error",
+  });
+}
 async function togglePageSave(tab: Tab): Promise<void> {
   if (!tab.url || !isValidHttpUrl(tab.url)) {
     logger.warn("Ignoring page with invalid URL:", tab.url);
@@ -308,6 +318,7 @@ async function togglePageSave(tab: Tab): Promise<void> {
     }
   } catch (error) {
     logger.error("Error toggling page save:", error);
+    notifyError("toggle page", error);
   }
 }
 browser.pageAction.onClicked.addListener((tab) => {
