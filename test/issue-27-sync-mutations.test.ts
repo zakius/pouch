@@ -1,8 +1,12 @@
 import { afterEach, expect, test, mock, spyOn } from "bun:test";
 import type { Article } from "../src/types/common";
 import { BookmarksAdapter } from "../src/background/api/adapters/bookmarks-adapter";
-import { ArticlesRepository } from "../src/background/articles-repository";
+import { ArticlesRepository, getAccountStorageKeys } from "../src/background/articles-repository";
 import { DEFAULT_SETTINGS } from "../src/utils/settings";
+
+const keys = getAccountStorageKeys({ ...DEFAULT_SETTINGS, backend: "bookmarks" } as Parameters<
+  ArticlesRepository["initialize"]
+>[0]);
 
 const originalBrowser = Object.getOwnPropertyDescriptor(globalThis, "browser");
 
@@ -164,14 +168,14 @@ test("delete during sync replay removes the article the sync re-fetched", async 
 test("failed sync fetch propagates the error and preserves cached data", async () => {
   const { storage } = makeBrowserMock();
   const repository = await makeRepository();
-  storage.articles = [article("s1", "https://example.com/a")];
+  storage[keys.articles] = [article("s1", "https://example.com/a")];
 
   spyOn(BookmarksAdapter.prototype, "sync").mockRejectedValue(new Error("Network down"));
 
   await expect(repository.syncWithAPI({ mode: "overwrite" })).rejects.toThrow("Network down");
 
   expect(await repository.getAllArticles()).toEqual([article("s1", "https://example.com/a")]);
-  expect(storage.lastSyncTimestamp).toBeUndefined();
+  expect(storage[keys.lastSyncTimestamp]).toBeUndefined();
 });
 
 test("failed cache persistence propagates and keeps prior cache intact", async () => {
@@ -209,7 +213,7 @@ test("concurrent cache mutations commit in order without losing writes", async (
   expect(saveSpy).toHaveBeenCalled();
   const ids = (await repository.getAllArticles()).map((a) => a.id);
   expect(ids).toHaveLength(3);
-  expect(storage.articles).toEqual(await repository.getAllArticles());
+  expect(storage[keys.articles]).toEqual(await repository.getAllArticles());
 });
 
 test("merge collapses duplicate canonical URLs instead of keeping both", async () => {

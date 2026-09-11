@@ -2,7 +2,7 @@ import { refreshFilterLists } from "../utils/filter-list-manager";
 import { logger } from "../utils/logger";
 import { getSettings, type Settings, saveSettings } from "../utils/settings";
 import { clearCanonicalUrlCache, initializeUrlCanonizer } from "../utils/url-helpers";
-import { ArticlesRepository } from "./articles-repository";
+import { ArticlesRepository, getAccountIdentity } from "./articles-repository";
 import { tokenManager } from "./token-manager";
 
 /**
@@ -113,9 +113,8 @@ browser.runtime.onMessage.addListener(
         switch (message.type) {
           case "saveSettings": {
             const { settings } = message.payload;
-            // Clear tokens for the old backend before switching
             const oldSettings = await getSettings();
-            if (oldSettings.backend !== settings.backend) {
+            if (getAccountIdentity(oldSettings) !== getAccountIdentity(settings)) {
               await tokenManager.clearToken(oldSettings.backend);
             }
             await saveSettings(settings);
@@ -123,6 +122,17 @@ browser.runtime.onMessage.addListener(
             await logger.initialize();
             articlesRepository = new ArticlesRepository();
             await articlesRepository.initialize(settings);
+            void articlesRepository
+              .syncWithAPI({ mode: "overwrite" })
+              .then((result) => {
+                logger.info("Sync after settings change completed", {
+                  mode: result.syncResult.mode,
+                  total: result.total,
+                });
+              })
+              .catch((error) => {
+                logger.warn("Sync after settings change failed:", error);
+              });
             logger.info("Settings saved and API re-initialized.");
             safeSendResponse({ success: true });
             return;
@@ -229,8 +239,10 @@ browser.runtime.onMessage.addListener(
           case "testConnection": {
             try {
               const testRepo = new ArticlesRepository();
-              await testRepo.initialize(message.payload.settings);
-              const success = await testRepo.testConnection();
+              const success = await tokenManager.runWithEphemeralTokens(async () => {
+                await testRepo.initialize(message.payload.settings);
+                return testRepo.testConnection();
+              });
               safeSendResponse({
                 success,
                 error: success ? undefined : "Connection failed",

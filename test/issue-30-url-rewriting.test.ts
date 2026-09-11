@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { DEFAULT_SETTINGS, type Settings } from "../src/utils/settings";
-import { ArticlesRepository } from "../src/background/articles-repository";
+import { ArticlesRepository, getAccountStorageKeys } from "../src/background/articles-repository";
 import type { Article } from "../src/types/common";
 import { refreshFilterLists, resetFilterListSources, setFilterListSources } from "../src/utils/filter-list-manager";
 import { initializeWithRawFilterLists } from "../src/utils/filter-list-url-cleaner";
@@ -8,6 +8,8 @@ import { canonicalizeUrl, clearCanonicalUrlCache, initializeUrlCanonizer } from 
 import testFilterContent from "./test-data/test-filters.txt";
 
 const originalBrowser = Object.getOwnPropertyDescriptor(globalThis, "browser");
+
+const keys = getAccountStorageKeys(DEFAULT_SETTINGS);
 
 const emptySource = [{ name: "empty", url: `data:text/plain;base64,${btoa("!")}` }];
 
@@ -104,7 +106,7 @@ test("Comparison without normalization matches exact saved URLs only", async () 
     title: "Video",
     created_at: "2026-01-01",
   };
-  storage.articles = [saved];
+  storage[keys.articles] = [saved];
   const repository = new ArticlesRepository();
   await repository.initialize({ ...DEFAULT_SETTINGS, normalizeOnCompare: false });
   expect(await repository.findSaved("https://www.youtube.com/watch?v=abc123")).toEqual(saved);
@@ -120,7 +122,7 @@ test("Comparison with normalization canonicalizes both sides", async () => {
     title: "Video",
     created_at: "2026-01-01",
   };
-  storage.articles = [saved];
+  storage[keys.articles] = [saved];
   const repository = new ArticlesRepository();
   await repository.initialize({ ...DEFAULT_SETTINGS, normalizeOnCompare: true });
   expect(await repository.findSaved("https://youtu.be/abc123")).toEqual(saved);
@@ -135,7 +137,7 @@ test("Duplicate detection follows the comparison setting", async () => {
     title: "Video",
     created_at: "2026-01-01",
   };
-  storage.articles = [existing];
+  storage[keys.articles] = [existing];
 
   const exactRepository = new ArticlesRepository();
   await exactRepository.initialize({ ...DEFAULT_SETTINGS, normalizeOnCompare: false });
@@ -148,7 +150,7 @@ test("Duplicate detection follows the comparison setting", async () => {
   expect(((await exactRepository.getAllArticles()) as Article[]).length).toBe(2);
 
   const { storage: canonicalStorage } = withStorage();
-  canonicalStorage.articles = [existing];
+  canonicalStorage[keys.articles] = [existing];
   const canonicalRepository = new ArticlesRepository();
   await canonicalRepository.initialize({ ...DEFAULT_SETTINGS, normalizeOnCompare: true });
   await (canonicalRepository as WithPrivate).addArticle({
@@ -182,7 +184,7 @@ test("Saving honors normalizeOnSave independently", async () => {
 
   clearCanonicalUrlCache();
   const { storage } = withStorage();
-  storage.articles = [];
+  storage[keys.articles] = [];
   const normalizedRepository = new ArticlesRepository();
   await normalizedRepository.initialize({
     ...DEFAULT_SETTINGS,
@@ -221,7 +223,7 @@ test("Existing stored articles are compared against recomputed canonical values"
     title: "Stale",
     created_at: "2026-01-01",
   };
-  storage.articles = [staleCanonical];
+  storage[keys.articles] = [staleCanonical];
   setFilterListSources([{ name: "rules", url: dataUrl("$removeparam=other\n@@||cache.test^$removeparam=track") }]);
   await refreshFilterLists();
 
