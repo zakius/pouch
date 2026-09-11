@@ -277,8 +277,8 @@ async function handleDeleteArticle(button: HTMLButtonElement): Promise<void> {
     logger.warn("Delete button missing article ID");
     return;
   }
-  const articleId = Number.parseInt(articleIdStr, 10);
-  if (Number.isNaN(articleId) || articleId < 0) {
+  const articleId = /^\d+$/.test(articleIdStr) ? Number(articleIdStr) : articleIdStr;
+  if (typeof articleId === "number" && (articleId < 0 || !Number.isInteger(articleId))) {
     logger.warn("Invalid article ID:", articleIdStr);
     return;
   }
@@ -363,7 +363,10 @@ function createArticleElement(article: Article): HTMLElement {
     logger.warn("Invalid article URL:", article);
     throw new Error("Article URL is required and must be a string");
   }
-  if (typeof article.id !== "number" || article.id < 0 || !Number.isInteger(article.id)) {
+  if (
+    (typeof article.id !== "number" || article.id < 0 || !Number.isInteger(article.id)) &&
+    (typeof article.id !== "string" || article.id.length === 0)
+  ) {
     logger.warn("Invalid article ID:", article);
     throw new Error("Article ID is required and must be a non-negative integer");
   }
@@ -455,13 +458,18 @@ async function handleSavePageClick(): Promise<void> {
   savePageButton.setAttribute("aria-busy", "true");
   try {
     if (savedArticleForCurrentPage) {
-      if (typeof savedArticleForCurrentPage.id !== "number" || savedArticleForCurrentPage.id < 0) {
-        logger.error("Invalid article ID:", savedArticleForCurrentPage.id);
+      const savedId = savedArticleForCurrentPage.id;
+      const isValidSavedId =
+        typeof savedId === "number"
+          ? savedId >= 0
+          : typeof savedId === "string" && savedId.length > 0;
+      if (!isValidSavedId) {
+        logger.error("Invalid article ID:", savedId);
         return;
       }
       await sendBackgroundMessage({
         type: "deleteArticle",
-        payload: { articleId: savedArticleForCurrentPage.id },
+        payload: { articleId: savedId },
       });
       logger.debug("Article deleted, reloading list and button state");
       await updateSavePageButtonState();

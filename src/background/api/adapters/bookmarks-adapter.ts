@@ -97,7 +97,7 @@ export class BookmarksAdapter implements ReadItLaterAPI<BookmarksSettings> {
     });
 
     const savedArticle: Article = {
-      id: parseInt(bookmark.id, 10),
+      id: bookmark.id,
       title: bookmark.title,
       url: bookmark.url || "",
       created_at: new Date(bookmark.dateAdded || Date.now()).toISOString(),
@@ -106,8 +106,8 @@ export class BookmarksAdapter implements ReadItLaterAPI<BookmarksSettings> {
     return savedArticle;
   }
 
-  async deleteArticle(id: number): Promise<void> {
-    await browser.bookmarks.remove(id.toString());
+  async deleteArticle(id: number | string): Promise<void> {
+    await browser.bookmarks.remove(String(id));
   }
 
   async sync(options?: SyncOptions): Promise<SyncResult> {
@@ -118,7 +118,7 @@ export class BookmarksAdapter implements ReadItLaterAPI<BookmarksSettings> {
     const articles: Article[] = children
       .filter((bookmark) => bookmark.url) // Only include bookmarks with URLs
       .map((bookmark) => ({
-        id: parseInt(bookmark.id, 10),
+        id: bookmark.id,
         title: bookmark.title,
         url: bookmark.url || "",
         created_at: new Date(bookmark.dateAdded || Date.now()).toISOString(),
