@@ -8,3 +8,7 @@ $removeparam=utm_medium
 $removeparam=utm_source
 @@||rd.bizrate.com^$removeparam=utm_medium
 @@||special-site.com^$removeparam=utm_source
+||example.com^$removeparam=token,domain=example.com
+https://tracker.test/tracking/*$removeparam=track_id
+||shop.test/path*$removeparam=sid
+||*.wildcard.test^$removeparam=wc

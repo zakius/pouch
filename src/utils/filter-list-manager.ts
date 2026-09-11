@@ -33,7 +33,7 @@ export interface FilterListResult {
 }
 
 const CACHE_KEY = "filter_list_url_cleaning_rules";
-const CACHE_VERSION = "1.0";
+const CACHE_VERSION = "1.1";
 const CACHE_EXPIRY_KEY = "filter_list_cache_expiry";
 const CACHE_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours
 

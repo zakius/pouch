@@ -130,4 +130,49 @@ describe("Filter List URL Cleaning", () => {
 		const output = await cleanUrl(input);
 		expect(output).toBe("https://rd.bizrate.com/test?utm_medium=email&keep=this");
 	});
+
+	test("should skip rules with unsupported domain modifiers", async () => {
+		const input = "https://example.com/test?token=abc&keep=this";
+		const output = await cleanUrl(input);
+		expect(output).toBe("https://example.com/test?token=abc&keep=this");
+	});
+
+	test("should remove path-scoped parameters on matching paths", async () => {
+		const input = "https://tracker.test/tracking/pixel?track_id=abc&keep=this";
+		const output = await cleanUrl(input);
+		expect(output).toBe("https://tracker.test/tracking/pixel?keep=this");
+	});
+
+	test("should not remove path-scoped parameters on non-matching paths", async () => {
+		const input = "https://tracker.test/other/page?track_id=abc&keep=this";
+		const output = await cleanUrl(input);
+		expect(output).toBe("https://tracker.test/other/page?track_id=abc&keep=this");
+	});
+
+	test("should not remove path-scoped parameters on other domains", async () => {
+		const input = "https://evil.test/tracking/pixel?track_id=abc";
+		const output = await cleanUrl(input);
+		expect(output).toBe("https://evil.test/tracking/pixel?track_id=abc");
+	});
+
+	test("should remove parameters for ||domain/path^ rules on matching paths", async () => {
+		const input = "https://shop.test/path/page?sid=abc&keep=this";
+		const output = await cleanUrl(input);
+		expect(output).toBe("https://shop.test/path/page?keep=this");
+	});
+
+	test("should not remove parameters for ||domain/path^ rules on other paths", async () => {
+		const input = "https://shop.test/elsewhere?sid=abc&keep=this";
+		const output = await cleanUrl(input);
+		expect(output).toBe("https://shop.test/elsewhere?sid=abc&keep=this");
+	});
+
+	test("should match wildcard hostnames without breaking dot escaping", async () => {
+		const input = "https://sub.wildcard.test/page?wc=abc&keep=this";
+		const output = await cleanUrl(input);
+		expect(output).toBe("https://sub.wildcard.test/page?keep=this");
+		const input2 = "https://wildcard.test/page?wc=abc&keep=this";
+		const output2 = await cleanUrl(input2);
+		expect(output2).toBe("https://wildcard.test/page?wc=abc&keep=this");
+	});
 });

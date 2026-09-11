@@ -19,6 +19,33 @@ export interface FilterRule {
   domain?: string;
   isRegex?: boolean;
   isException?: boolean; // @@ prefix indicates exception rule
+  scope?: "domain" | "url"; // "url" rules include a path and must match the full URL
+}
+
+// Convert an ABP-style wildcard pattern to a regex source:
+// literal characters are escaped first, then * expands to .* and ^ to a URL separator.
+function wildcardToRegexSource(pattern: string): string {
+  let source = "";
+  for (const char of pattern) {
+    if (char === "*") {
+      source += ".*";
+    } else if (char === "^") {
+      source += "(?:[/?#]|$)";
+    } else if (/[.*+?^${}()|[\]\\]/.test(char)) {
+      source += `\\${char}`;
+    } else {
+      source += char;
+    }
+  }
+  return source;
+}
+
+function testWildcardPattern(pattern: string, candidate: string): boolean {
+  try {
+    return new RegExp(`^${wildcardToRegexSource(pattern)}$`).test(candidate);
+  } catch {
+    return false;
+  }
 }
 
 export interface ParsedFilterList {
@@ -137,24 +164,47 @@ export function parseFilterList(raw: string): {
       continue;
     }
 
+    const options = removeParamPart.split(",").map((option) => option.trim());
+    // Scope-modifying options (domain=, ~domain, third-party, ...) are not supported.
+    // Skip the whole rule rather than broadening its scope.
+    if (options.some((option) => !option || option.includes("=") || option.startsWith("~"))) {
+      continue;
+    }
+
     let pattern: string;
     let domain: string | undefined;
     let isRegex = false;
+    let scope: "domain" | "url" = "domain";
 
     if (!patternPart || patternPart.trim() === "") {
       pattern = "*";
-    } else if (patternPart.startsWith("||") && patternPart.includes("^")) {
+    } else if (patternPart.startsWith("||")) {
       pattern = patternPart;
-      domain = patternPart.substring(2, patternPart.indexOf("^"));
+      const rest = patternPart.substring(2);
+      const separatorIndex = rest.search(/[\^/]/);
+      if (separatorIndex === -1) {
+        domain = rest;
+      } else {
+        domain = rest.substring(0, separatorIndex);
+        if (rest.substring(separatorIndex).replace(/^\^/, "").length > 0) {
+          scope = "url";
+        }
+      }
     } else if (patternPart.startsWith("|") && patternPart.endsWith("|")) {
       pattern = patternPart;
       domain = patternPart.substring(1, patternPart.length - 1);
-    } else if (patternPart.includes("://") && patternPart.includes("*")) {
+    } else if (patternPart.includes("://")) {
       pattern = patternPart;
       isRegex = true;
       const domainMatch = patternPart.match(/:\/\/([^/?*]+)/);
       if (domainMatch) {
         domain = domainMatch[1];
+        const pathPart = patternPart.substring(
+          patternPart.indexOf(domainMatch[1]) + domainMatch[1].length,
+        );
+        if (pathPart && pathPart !== "/") {
+          scope = "url";
+        }
       }
     } else if (patternPart.startsWith("?") && patternPart.includes("^")) {
       pattern = patternPart;
@@ -184,10 +234,7 @@ export function parseFilterList(raw: string): {
       domain = patternPart;
     }
 
-    const params = removeParamPart
-      .split(",")
-      .map((p) => p.trim())
-      .filter((p) => p);
+    const params = options;
 
     const existingRule = ruleMap.get(pattern);
     if (existingRule) {
@@ -199,6 +246,7 @@ export function parseFilterList(raw: string): {
         domain,
         isRegex,
         isException,
+        scope,
       });
     }
   }
@@ -223,69 +271,75 @@ export function parseCompleteFilterList(content: string): ParsedFilterList {
   };
 }
 
-export function matchesPattern(hostname: string, pattern: string, isRegex?: boolean): boolean {
+export function matchesPattern(
+  hostname: string,
+  pattern: string,
+  fullUrl?: string,
+): boolean {
   if (pattern === "*") {
     return true;
   }
 
-  if (pattern.startsWith("||") && pattern.includes("^")) {
-    const domain = pattern.substring(2, pattern.indexOf("^"));
-    return hostname === domain || hostname.endsWith(`.${domain}`);
-  }
+  if (pattern.startsWith("||")) {
+    const rest = pattern.substring(2);
+    const separatorIndex = rest.search(/[\^/]/);
+    const domain = separatorIndex === -1 ? rest : rest.substring(0, separatorIndex);
+    const tail = separatorIndex === -1 ? "" : rest.substring(separatorIndex);
 
+    const hostMatches = domain.includes("*")
+      ? testWildcardPattern(domain, hostname)
+      : hostname === domain || hostname.endsWith(`.${domain}`);
+    if (!hostMatches) {
+      return false;
+    }
+    if (!tail || tail === "^") {
+      return true;
+    }
+    if (fullUrl === undefined) {
+      return false;
+    }
+    let pathname: string;
+    try {
+      pathname = new URL(fullUrl).pathname;
+    } catch {
+      return false;
+    }
+    return testWildcardPattern(tail, pathname);
+  }
   if (pattern.startsWith("|") && pattern.endsWith("|")) {
     const domain = pattern.substring(1, pattern.length - 1);
     return hostname === domain;
   }
 
-  if (isRegex || pattern.includes("://") || pattern.startsWith("?")) {
-    try {
-      if (pattern.includes("://")) {
-        const domainMatch = pattern.match(/:\/\/([^/?*]+)/);
-        if (domainMatch) {
-          const domain = domainMatch[1];
-          if (hostname === domain || hostname.endsWith(`.${domain}`)) {
-            return true;
-          }
-        }
-        return false;
-      }
-
-      if (pattern.startsWith("?")) {
-        return true;
-      }
-
-      const regexPattern = pattern
-        .replace(/\*/g, ".*") // * matches any characters
-        .replace(/\./g, "\\.") // Escape dots
-        .replace(/\^/g, "$"); // ^ matches end of string
-
-      const regex = new RegExp(`^${regexPattern}$`);
-      return regex.test(hostname);
-    } catch {
+  if (pattern.includes("://")) {
+    const domainMatch = pattern.match(/:\/\/([^/?*]+)/);
+    if (!domainMatch) {
       return false;
     }
+    const domain = domainMatch[1];
+    const hostMatches = hostname === domain || hostname.endsWith(`.${domain}`);
+    if (!hostMatches) {
+      return false;
+    }
+    const pathPart = pattern.substring(pattern.indexOf(domain) + domain.length);
+    if (!pathPart || pathPart === "/" || pathPart === "/*") {
+      return true;
+    }
+    return fullUrl !== undefined && testWildcardPattern(pattern, fullUrl);
+  }
+
+  if (pattern.startsWith("?")) {
+    return true;
   }
 
   if (
     !pattern.includes("*") &&
     !pattern.includes("^") &&
     !pattern.includes("|") &&
-    !pattern.includes("://") &&
-    !pattern.startsWith("?")
+    !pattern.includes("://")
   ) {
     return hostname === pattern || hostname.endsWith(`.${pattern}`);
   }
 
-  if (pattern.includes("*")) {
-    try {
-      const regexPattern = pattern.replace(/\*/g, ".*").replace(/\./g, "\\.");
-      const regex = new RegExp(`^${regexPattern}$`);
-      return regex.test(hostname);
-    } catch {
-      return false;
-    }
-  }
-
-  return false;
+  return testWildcardPattern(pattern, hostname);
 }
