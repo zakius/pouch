@@ -1,6 +1,7 @@
 import * as v from "valibot";
+import { karakeepConfigSchema, karakeepSettingsSchema } from "../../../utils/settings-schemas";
+export { karakeepConfigSchema, karakeepSettingsSchema };
 import type { Article } from "../../../types/common";
-import { baseSettingsSchema } from "../../../utils/base-settings-schema";
 import { logger } from "../../../utils/logger";
 import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
@@ -12,17 +13,6 @@ import type {
   SyncResult,
 } from "../read-it-later-adapter";
 import type { TokenizedAdapter } from "../tokenized-adapter";
-
-export const karakeepConfigSchema = v.object({
-  url: v.pipe(v.string(), v.url()),
-  token: v.string(),
-});
-
-export const karakeepSettingsSchema = v.object({
-  ...baseSettingsSchema.entries,
-  backend: v.literal("karakeep"),
-  apiConfig: karakeepConfigSchema,
-});
 
 export type KarakeepSettings = v.InferInput<typeof karakeepSettingsSchema>;
 export type KarakeepConfig = v.InferInput<typeof karakeepConfigSchema>;

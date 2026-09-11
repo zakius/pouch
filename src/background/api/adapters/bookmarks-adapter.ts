@@ -1,6 +1,7 @@
 import * as v from "valibot";
+import { bookmarksSettingsSchema } from "../../../utils/settings-schemas";
+export { bookmarksSettingsSchema };
 import type { Article } from "../../../types/common";
-import { baseSettingsSchema } from "../../../utils/base-settings-schema";
 import { logger } from "../../../utils/logger";
 import type {
   ReadItLaterAPI,
@@ -8,12 +9,6 @@ import type {
   SyncOptions,
   SyncResult,
 } from "../read-it-later-adapter";
-
-export const bookmarksSettingsSchema = v.object({
-  ...baseSettingsSchema.entries,
-  backend: v.literal("bookmarks"),
-  apiConfig: v.object({}),
-});
 
 export type BookmarksSettings = v.InferInput<typeof bookmarksSettingsSchema>;
 

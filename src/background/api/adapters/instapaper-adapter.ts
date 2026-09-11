@@ -1,6 +1,7 @@
 import * as v from "valibot";
+import { instapaperConfigSchema, instapaperSettingsSchema } from "../../../utils/settings-schemas";
+export { instapaperConfigSchema, instapaperSettingsSchema };
 import type { Article } from "../../../types/common";
-import { baseSettingsSchema } from "../../../utils/base-settings-schema";
 import { logger } from "../../../utils/logger";
 import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
@@ -11,19 +12,6 @@ import type {
   SyncResult,
 } from "../read-it-later-adapter";
 import type { TokenizedAdapter } from "../tokenized-adapter";
-
-export const instapaperConfigSchema = v.object({
-  consumerKey: v.string(),
-  consumerSecret: v.string(),
-  username: v.string(),
-  password: v.optional(v.string()),
-});
-
-export const instapaperSettingsSchema = v.object({
-  ...baseSettingsSchema.entries,
-  backend: v.literal("instapaper"),
-  apiConfig: instapaperConfigSchema,
-});
 
 export type InstapaperSettings = v.InferInput<typeof instapaperSettingsSchema>;
 export type InstapaperConfig = v.InferInput<typeof instapaperConfigSchema>;

@@ -1,6 +1,7 @@
 import * as v from "valibot";
+import { linkwardenConfigSchema, linkwardenSettingsSchema } from "../../../utils/settings-schemas";
+export { linkwardenConfigSchema, linkwardenSettingsSchema };
 import type { Article } from "../../../types/common";
-import { baseSettingsSchema } from "../../../utils/base-settings-schema";
 import { logger } from "../../../utils/logger";
 import type { TokenRefreshConfig } from "../../token-manager";
 import { tokenManager } from "../../token-manager";
@@ -12,17 +13,6 @@ import type {
   SyncResult,
 } from "../read-it-later-adapter";
 import type { TokenizedAdapter } from "../tokenized-adapter";
-
-export const linkwardenConfigSchema = v.object({
-  url: v.pipe(v.string(), v.url()),
-  token: v.string(),
-});
-
-export const linkwardenSettingsSchema = v.object({
-  ...baseSettingsSchema.entries,
-  backend: v.literal("linkwarden"),
-  apiConfig: linkwardenConfigSchema,
-});
 
 export type LinkwardenSettings = v.InferInput<typeof linkwardenSettingsSchema>;
 export type LinkwardenConfig = v.InferInput<typeof linkwardenConfigSchema>;
