@@ -1,5 +1,6 @@
 import type { Article } from "../types/common";
 import { getAdapter } from "../utils/adapter-factory";
+import { hasBackendPermissions, missingPermissionMessage } from "../utils/backend-permissions";
 import { logger } from "../utils/logger";
 import type { Settings } from "../utils/settings";
 import { canonicalizeUrl } from "../utils/url-helpers";
@@ -74,6 +75,9 @@ export class ArticlesRepository {
     if (!this.apiInitPromise) {
       logger.debug("API not initialized, creating adapter now...");
       this.apiInitPromise = (async () => {
+        if (!(await hasBackendPermissions(this.settings))) {
+          throw new Error(missingPermissionMessage(this.settings));
+        }
         const api = getAdapter(this.settings.backend);
         await api.initialize(this.settings);
         logger.info("On-demand API initialization completed");

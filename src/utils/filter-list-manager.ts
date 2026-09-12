@@ -100,6 +100,10 @@ export async function loadFilterListContent(url: string): Promise<FilterListCont
       }
     }
 
+    // raw.githubusercontent.com sends Access-Control-Allow-Origin: * and this
+    // request is CORS-simple (plain GET, no custom headers), so the background
+    // page fetch works without any host permission. ETag is not
+    // CORS-exposed, so it reads back as null; cache expiry is the 24h TTL.
     const response = await fetch(url);
     if (!response.ok) {
       throw new Error(`Failed to fetch filter list: ${response.status}`);

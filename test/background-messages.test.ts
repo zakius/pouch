@@ -66,7 +66,11 @@ Object.assign(globalThis, {
     action: { setBadgeText: async () => {}, setTitle: async () => {} },
     pageAction: { onClicked: { addListener: () => {} }, show: async () => {}, hide: async () => {} },
     commands: { onCommand: { addListener: () => {} } },
-    notifications: { create: async () => {} },
+    notifications: { create: async () => {}, onClicked: { addListener: () => {} } },
+    permissions: {
+      onRemoved: { addListener: () => {} },
+      contains: async () => true,
+    },
     tabs: { query: async () => [], sendMessage: async () => {}, create: async () => ({}), get: async () => ({}) },
   },
   fetch: (async (input: unknown) => {

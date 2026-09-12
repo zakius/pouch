@@ -1,5 +1,10 @@
 import * as v from "valibot";
 import { availableBackends, getAdapter } from "../utils/adapter-factory";
+import {
+  ensureBackendPermissions,
+  missingPermissionMessage,
+  pruneBackendPermissions,
+} from "../utils/backend-permissions";
 import { LogLevel } from "../utils/log-levels";
 import { logger } from "../utils/logger";
 import { getSettings, type Settings, settingsSchema } from "../utils/settings";
@@ -148,11 +153,16 @@ async function handleSaveSettings(): Promise<void> {
   configCache[settings.backend] = settings.apiConfig;
   dom.saveButton.disabled = true;
   try {
+    if (!(await ensureBackendPermissions(settings))) {
+      showStatus(missingPermissionMessage(settings), "error");
+      return;
+    }
     const response = await browser.runtime.sendMessage({
       type: "saveSettings",
       payload: { settings },
     });
     if (response?.success) {
+      await pruneBackendPermissions(settings);
       showStatus("Settings saved successfully", "success");
     } else {
       showStatus(`Error saving settings: ${response?.error || "Unknown error"}`, "error");
@@ -173,6 +183,10 @@ async function handleTestConnection(): Promise<void> {
   showStatus("Testing connection...", "info");
   dom.testConnectionButton.disabled = true;
   try {
+    if (!(await ensureBackendPermissions(settings))) {
+      showStatus(missingPermissionMessage(settings), "error");
+      return;
+    }
     const response = await browser.runtime.sendMessage({
       type: "testConnection",
       payload: { settings },

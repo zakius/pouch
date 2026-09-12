@@ -260,6 +260,17 @@ function disarmDeleteButton(): void {
   armed.setAttribute("aria-label", "Delete article");
 }
 
+function errorMessageFor(
+  error: unknown,
+  fallback: string,
+): { text: string; needsSettings: boolean } {
+  const message = error instanceof Error && error.message ? error.message : "";
+  if (/permission/i.test(message)) {
+    return { text: message, needsSettings: true };
+  }
+  return { text: fallback, needsSettings: false };
+}
+
 async function handleDeleteArticle(button: HTMLButtonElement): Promise<void> {
   if (isSavingOrDeleting) return;
   if (!button.classList.contains("is-arming")) {
@@ -298,7 +309,11 @@ async function handleDeleteArticle(button: HTMLButtonElement): Promise<void> {
     if (liveRegion) liveRegion.textContent = "Article deleted.";
   } catch (error) {
     logger.error("Error deleting article:", error);
-    showError("Failed to delete article. Please try again.", false);
+    const { text, needsSettings } = errorMessageFor(
+      error,
+      "Failed to delete article. Please try again.",
+    );
+    showError(text, needsSettings);
   } finally {
     isSavingOrDeleting = false;
     button.disabled = false;
@@ -486,7 +501,11 @@ async function handleSavePageClick(): Promise<void> {
   } catch (error) {
     logger.error("Error saving/deleting article:", error);
     const action = savedArticleForCurrentPage ? "delete" : "save";
-    showError(`Failed to ${action} article. Please try again.`, false);
+    const { text, needsSettings } = errorMessageFor(
+      error,
+      `Failed to ${action} article. Please try again.`,
+    );
+    showError(text, needsSettings);
   } finally {
     isSavingOrDeleting = false;
     savePageButton.disabled = false;

@@ -1,5 +1,6 @@
 import { refreshFilterLists } from "../utils/filter-list-manager";
 import { logger } from "../utils/logger";
+import { getMissingOrigins, messageForOrigins } from "../utils/backend-permissions";
 import { getSettings, type Settings, saveSettings } from "../utils/settings";
 import { clearCanonicalUrlCache, initializeUrlCanonizer } from "../utils/url-helpers";
 import { ArticlesRepository, getAccountIdentity } from "./articles-repository";
@@ -309,6 +310,32 @@ function notifyError(operation: string, error: unknown): void {
     message: (error as Error).message || "Unknown error",
   });
 }
+const PERMISSIONS_NOTIFICATION_ID = "pouch-permissions";
+async function warnIfPermissionsMissing(): Promise<void> {
+  const settings = await getSettings();
+  const missing = await getMissingOrigins(settings);
+  if (missing.length === 0) {
+    return;
+  }
+  try {
+    await browser.notifications.create(PERMISSIONS_NOTIFICATION_ID, {
+      type: "basic",
+      iconUrl: "icons/icon.svg",
+      title: "Pouch — permission needed",
+      message: messageForOrigins(missing),
+    });
+  } catch (error) {
+    logger.warn("Failed to create permission notification:", error);
+  }
+}
+browser.permissions.onRemoved.addListener(() => {
+  void warnIfPermissionsMissing();
+});
+browser.notifications.onClicked.addListener((notificationId) => {
+  if (notificationId === PERMISSIONS_NOTIFICATION_ID) {
+    void browser.runtime.openOptionsPage();
+  }
+});
 async function togglePageSave(tab: Tab): Promise<void> {
   if (!tab.url || !isValidHttpUrl(tab.url)) {
     logger.warn("Ignoring page with invalid URL:", tab.url);
@@ -480,6 +507,11 @@ browser.alarms.onAlarm.addListener(async (alarm) => {
 browser.runtime.onInstalled.addListener(async (details) => {
   if (details.reason === "install" || details.reason === "update") {
     await initialize();
+  }
+  if (details.reason === "update") {
+    // Users upgrading from the wide-host-permission version lose network
+    // access until they re-grant it for their backend's origin.
+    await warnIfPermissionsMissing();
   }
 });
 

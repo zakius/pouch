@@ -6,6 +6,7 @@
  */
 
 import { logger } from "../../utils/logger";
+import { permissionErrorMessageForUrl } from "../../utils/backend-permissions";
 import { type TokenRefreshConfig, tokenManager } from "../token-manager";
 import type { TokenizedAdapter } from "./tokenized-adapter";
 
@@ -316,6 +317,12 @@ export class ApiClient {
         }
         if (error instanceof Error && error.name === "AbortError") {
           throw new Error(`Request timeout after ${timeout}ms`);
+        }
+        if (error instanceof TypeError) {
+          const permissionError = await permissionErrorMessageForUrl(url);
+          if (permissionError) {
+            throw new Error(permissionError);
+          }
         }
         throw error;
       }
