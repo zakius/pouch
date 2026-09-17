@@ -25,7 +25,7 @@ function sanitizeSearch(search: string): string {
   // Trim whitespace
   let sanitized = search.trim();
   // Remove control characters (except tab, newline, carriage return)
-  // eslint-disable-next-line no-control-regex -- We're sanitizing input, not creating control characters
+  // eslint-disable-next-line no-control-regex -- sanitizing input, not creating control characters
   sanitized = sanitized.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
   return sanitized;
 }
@@ -85,7 +85,7 @@ interface Tab {
   url?: string;
   title?: string;
 }
-const REFRESH_INTERVAL = 30; // 30 minutes - smart sync will handle full syncs when needed
+const REFRESH_INTERVAL = 30;
 let articlesRepository: ArticlesRepository;
 let initializePromise: Promise<void> | null = null;
 async function getArticlesRepository(): Promise<ArticlesRepository> {
@@ -199,7 +199,6 @@ browser.runtime.onMessage.addListener(
                 ? sanitizeSearch(search)
                 : undefined;
             if (search !== undefined && sanitizedSearch !== search) {
-              // Search was modified during sanitization
               logger.debug("Search term sanitized", {
                 original: search,
                 sanitized: sanitizedSearch,

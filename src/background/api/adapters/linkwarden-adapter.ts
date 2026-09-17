@@ -159,27 +159,10 @@ export class LinkwardenAdapter implements ReadItLaterAPI<LinkwardenSettings>, To
   async deleteArticle(id: number): Promise<void> {
     await this.apiClient.delete(`/api/v1/links/${id}`);
   }
-  /**
-   * Linkwarden Sync (FULL SYNC ONLY)
-   *
-   * Linkwarden API does NOT support incremental sync via date filtering.
-   * Available query parameters from official API docs:
-   * - searchQueryString (string) - for filtering search results
-   * - sort (number) - for sorting
-   * - cursor (number) - for pagination
-   *
-   * API Documentation: https://docs.linkwarden.app/api/search-links
-   *
-   * LIMITATIONS:
-   * - No createdAfter/created_since parameter exists
-   * - No modifiedSince parameter exists
-   * - Must fetch ALL links on every sync
-   *
-   * STRATEGY:
-   * - Always perform full sync (mode parameter is ignored)
-   * - Client-side diffing to detect changes
-   */
   async sync(_options?: SyncOptions): Promise<SyncResult> {
+    // Linkwarden's link search has no created-since or modified-since filter
+    // (https://docs.linkwarden.app/api/search-links), so every sync fetches
+    // all links and returns overwrite mode regardless of the requested mode.
     const response = await this.apiClient.get("/api/v1/links");
     const validatedData = v.parse(linkwardenSyncResponseSchema, response.data);
 
@@ -187,14 +170,13 @@ export class LinkwardenAdapter implements ReadItLaterAPI<LinkwardenSettings>, To
       throw new Error(`Failed to sync articles: ${validatedData.message || validatedData.error}`);
     }
 
-    // After error check, validatedData has response property
     const articles = (validatedData as { response: { data: LinkwardenItem[] } }).response.data.map(
       (item) => this.mapArticle(item),
     );
 
     return {
       articles,
-      mode: "overwrite", // Always full sync for Linkwarden
+      mode: "overwrite",
       metadata: {
         totalFetched: articles.length,
         totalProcessed: articles.length,

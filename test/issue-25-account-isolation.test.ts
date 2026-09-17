@@ -1,4 +1,4 @@
-import { afterEach, expect, test, mock, spyOn } from "bun:test";
+import { afterEach, beforeEach, expect, test, mock, spyOn } from "bun:test";
 import type { Article } from "../src/types/common";
 import { BookmarksAdapter } from "../src/background/api/adapters/bookmarks-adapter";
 import { ArticlesRepository, getAccountStorageKeys } from "../src/background/articles-repository";
@@ -7,6 +7,11 @@ import { getAdapter } from "../src/utils/adapter-factory";
 import { DEFAULT_SETTINGS } from "../src/utils/settings";
 
 const originalBrowser = Object.getOwnPropertyDescriptor(globalThis, "browser");
+
+beforeEach(async () => {
+  makeBrowserMock();
+  await tokenManager.clearAllTokens();
+});
 
 afterEach(async () => {
   mock.restore();
