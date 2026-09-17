@@ -170,7 +170,7 @@ export class ArticlesRepository {
     );
     const articlesNumber = articles.length;
     const pages = Math.ceil(articlesNumber / perPage);
-    // Clamp requested page to valid range; if no pages, keep page as 1
+    // Clamp page into [1, pages]; an empty result set has no pages, so report page 1
     const safePage = pages === 0 ? 1 : Math.min(Math.max(1, page), pages);
     const start = (safePage - 1) * perPage;
     const end = start + perPage;
@@ -371,7 +371,8 @@ export class ArticlesRepository {
         // Update sync timestamps
         await this.updateSyncTimestamp(syncResult.mode, fetchStartedAt);
 
-        // Re-apply pending operations that occurred during sync
+        // An API failure mid-sync would drop mutations made after the fetch, so
+        // queued saves and deletes are re-applied against the synced state.
         if (this.pendingOperations.length > 0) {
           logger.info(`Re-applying ${this.pendingOperations.length} pending operations after sync`);
           await this.reapplyPendingOperations();
@@ -528,10 +529,7 @@ export class ArticlesRepository {
 
   private async isBrowserIdle(): Promise<boolean> {
     try {
-      // Check if browser is idle using the idle API
-      // Use 5 minutes (300 seconds) as a more conservative threshold
-      // This ensures we only do full sync when the user is truly away
-      const state = await browser.idle.queryState(300); // 5 minutes idle threshold
+      const state = await browser.idle.queryState(300);
       logger.debug("Browser idle state:", { state, isIdle: state === "idle" });
       return state === "idle";
     } catch (error) {

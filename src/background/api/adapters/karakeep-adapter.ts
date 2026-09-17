@@ -129,9 +129,6 @@ export class KarakeepAdapter implements ReadItLaterAPI<KarakeepSettings>, Tokeni
   }
   async testConnection(): Promise<boolean> {
     try {
-      // KaraKeep GET /bookmarks requires authentication
-      // Using this to verify API access and credentials
-      // Returns user's bookmarks (lightweight operation)
       return await this.apiClient.testConnection("/bookmarks");
     } catch (error) {
       logger.error("Karakeep connection test failed:", error);
@@ -155,28 +152,9 @@ export class KarakeepAdapter implements ReadItLaterAPI<KarakeepSettings>, Tokeni
     await this.apiClient.delete(`/bookmarks/${id}`);
   }
   async sync(_options?: SyncOptions): Promise<SyncResult> {
-    /**
-     * KaraKeep Sync (FULL SYNC ONLY)
-     *
-     * KaraKeep API does NOT support incremental sync via date filtering.
-     * Available query parameters from official API docs:
-     * - archived (boolean)
-     * - favourited (boolean)
-     * - limit (number)
-     * - cursor (string for pagination)
-     *
-     * API Documentation: https://docs.karakeep.app/api/get-all-bookmarks/
-     *
-     * LIMITATIONS:
-     * - No createdAfter/created_since parameter exists
-     * - No modifiedSince parameter exists
-     * - Must fetch ALL bookmarks on every sync
-     *
-     * STRATEGY:
-     * - Always perform full sync (mode parameter is ignored)
-     * - Client-side diffing to detect changes
-     * - Consider implementing caching to reduce API calls if needed
-     */
+    // Karakeep's GET /bookmarks has no created-since or modified-since filter
+    // (https://docs.karakeep.app/api/get-all-bookmarks/), so every sync fetches
+    // all bookmarks and returns overwrite mode regardless of the requested mode.
     const response = await this.apiClient.get("/bookmarks");
     const validatedData = v.parse(karakeepSyncResponseSchema, response.data);
 
@@ -184,12 +162,11 @@ export class KarakeepAdapter implements ReadItLaterAPI<KarakeepSettings>, Tokeni
       throw new Error(`Failed to sync articles: ${validatedData.message || validatedData.error}`);
     }
 
-    // After error check, validatedData is KarakeepItem[]
     const articles = (validatedData as KarakeepItem[]).map((item) => this.mapArticle(item));
 
     return {
       articles,
-      mode: "overwrite", // Always full sync for KaraKeep
+      mode: "overwrite",
       metadata: {
         totalFetched: articles.length,
         totalProcessed: articles.length,
