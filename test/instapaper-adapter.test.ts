@@ -52,6 +52,28 @@ const listBodies = (handler: (call: number) => unknown) =>
     return json("oauth_token=t&oauth_token_secret=s");
   });
 
+/** Recomputes the OAuth signature from pre-encoded `key=value` request params. */
+const expectValidSignature = ([url, init]: [unknown, RequestInit?], requestParams: string[]) => {
+  const auth = (init?.headers as Record<string, string>).Authorization;
+  const header = Object.fromEntries(
+    [...auth.matchAll(/(\w+)="([^"]*)"/g)].map(([, k, v]) => [k, decodeURIComponent(v)]),
+  );
+  const params = [
+    ...requestParams,
+    "oauth_consumer_key=key",
+    `oauth_nonce=${header.oauth_nonce}`,
+    "oauth_signature_method=HMAC-SHA1",
+    `oauth_timestamp=${header.oauth_timestamp}`,
+    "oauth_token=token",
+    "oauth_version=1.0",
+  ]
+    .sort()
+    .join("&");
+  const base = `POST&${encodeURIComponent(String(url))}&${encodeURIComponent(params)}`;
+  const expected = createHmac("sha1", "secret&token-secret").update(base).digest("base64");
+  expect(header.oauth_signature).toBe(expected);
+};
+
 afterEach(() => {
   mock.restore();
   calls = 0;
@@ -118,18 +140,21 @@ test("sync ignores delete_ids it cannot apply and still returns the snapshot", a
   expect(result.mode).toBe("update");
 });
 
-test("sync does not send the unsupported have parameter", async () => {
-  const bodies: URLSearchParams[] = [];
-  spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
-    const body = new URLSearchParams(init?.body as string);
-    if (body.get("limit")) {
-      bodies.push(body);
-      return json(syncResponse([1]));
-    }
-    return json("oauth_token=t&oauth_token_secret=s");
+test("sync pages past 500 bookmarks by sending seen ids as a signed have param", async () => {
+  const all = Array.from({ length: 1234 }, (_, i) => i + 1);
+  const fetchMock = spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+    const have = new Set(new URLSearchParams(init?.body as string).get("have")?.split(","));
+    return json(syncResponse(all.filter((id) => !have.has(String(id))).slice(0, 500)));
   });
-  await makeAdapter().sync({ mode: "update" });
-  expect(bodies[0].has("have")).toBe(false);
+  const result = await makeAdapter().sync({ mode: "overwrite" });
+  expect(result.articles.map((a) => a.id)).toEqual(all);
+  expect(fetchMock).toHaveBeenCalledTimes(3);
+  const [first, second] = fetchMock.mock.calls;
+  expect(new URLSearchParams(first[1]?.body as string).has("have")).toBe(false);
+  expect(new URLSearchParams(second[1]?.body as string).get("have")).toBe(
+    all.slice(0, 500).join(","),
+  );
+  expectValidSignature(second, [`have=${all.slice(0, 500).join("%2C")}`, "limit=500"]);
 });
 
 test("authenticate signs the xAuth access_token request with OAuth", async () => {
@@ -155,16 +180,8 @@ test("saveArticle signs RFC 3986-encoded params so URLs with ( ) verify", async 
     url: "https://en.wikipedia.org/wiki/Foo_(bar)",
     title: "t",
   } as never);
-  const [url, init] = fetchMock.mock.calls[0];
-  const auth = (init?.headers as Record<string, string>).Authorization;
-  const header = Object.fromEntries(
-    [...auth.matchAll(/(\w+)="([^"]*)"/g)].map(([, k, v]) => [k, decodeURIComponent(v)]),
+  expectValidSignature(
+    fetchMock.mock.calls[0],
+    ["title=t", "url=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FFoo_%28bar%29"],
   );
-  const params =
-    `oauth_consumer_key=key&oauth_nonce=${header.oauth_nonce}&oauth_signature_method=HMAC-SHA1` +
-    `&oauth_timestamp=${header.oauth_timestamp}&oauth_token=token&oauth_version=1.0` +
-    "&title=t&url=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FFoo_%28bar%29";
-  const base = `POST&${encodeURIComponent(String(url))}&${encodeURIComponent(params)}`;
-  const expected = createHmac("sha1", "secret&token-secret").update(base).digest("base64");
-  expect(header.oauth_signature).toBe(expected);
 });
