@@ -130,3 +130,18 @@ test("sync does not send the unsupported have parameter", async () => {
   await makeAdapter().sync({ mode: "update" });
   expect(bodies[0].has("have")).toBe(false);
 });
+
+test("authenticate signs the xAuth access_token request with OAuth", async () => {
+  const fetchMock = spyOn(globalThis, "fetch").mockImplementation(
+    async () => new Response("oauth_token=t&oauth_token_secret=s"),
+  );
+  await new InstapaperAdapter().initialize({
+    apiConfig: { consumerKey: "key", consumerSecret: "secret", username: "user", password: "pw" },
+  } as never);
+  const [url, init] = fetchMock.mock.calls[0];
+  expect(String(url)).toEndWith("/api/1/oauth/access_token");
+  const auth = (init?.headers as Record<string, string>).Authorization;
+  expect(auth).toStartWith("OAuth ");
+  expect(auth).toContain('oauth_consumer_key="key"');
+  expect(auth).toContain("oauth_signature=");
+});
