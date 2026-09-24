@@ -3,8 +3,7 @@ import { linkaceConfigSchema, linkaceSettingsSchema } from "../../../utils/setti
 export { linkaceConfigSchema, linkaceSettingsSchema };
 import type { Article } from "../../../types/common";
 import { logger } from "../../../utils/logger";
-import type { TokenRefreshConfig } from "../../token-manager";
-import { tokenManager } from "../../token-manager";
+import { type TokenManager, type TokenRefreshConfig, tokenManager } from "../../token-manager";
 import { type ApiClient, createApiClient } from "../api-client";
 import type {
   ReadItLaterAPI,
@@ -97,6 +96,8 @@ interface LinkaceLink {
 }
 
 export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings>, TokenizedAdapter {
+  constructor(public readonly tokens: TokenManager = tokenManager) {}
+
   public readonly displayName = "LinkAce";
   private apiUrl: string = "";
   private token: string = "";
@@ -141,7 +142,7 @@ export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings>, Tokenize
     this.token = settings.apiConfig.token;
 
     const tokenMetadata = this.createTokenMetadata({});
-    await tokenManager.storeToken(this.getServiceName(), tokenMetadata);
+    await this.tokens.storeToken(this.getServiceName(), tokenMetadata);
 
     this.apiClient = createApiClient(this, {
       baseUrl: this.apiUrl,

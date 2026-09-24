@@ -7,7 +7,7 @@
 
 import { logger } from "../../utils/logger";
 import { permissionErrorMessageForUrl } from "../../utils/backend-permissions";
-import { type TokenRefreshConfig, tokenManager } from "../token-manager";
+import { type TokenManager, type TokenRefreshConfig, tokenManager } from "../token-manager";
 import type { TokenizedAdapter } from "./tokenized-adapter";
 
 export interface ApiClientConfig {
@@ -76,6 +76,7 @@ export class ApiClient {
     baseUrl: string,
     authHandlers: AuthHandlers = {},
     config: Partial<ApiClientConfig> = {},
+    private readonly tokens: TokenManager = tokenManager,
   ) {
     this.serviceName = serviceName;
     this.authHandlers = authHandlers;
@@ -227,12 +228,12 @@ export class ApiClient {
     expiresAt?: string;
     refreshCount?: number;
   } {
-    const health = tokenManager.getTokenHealth();
+    const health = this.tokens.getTokenHealth();
     return health[this.serviceName] || { isValid: false };
   }
 
   async clearToken(): Promise<void> {
-    await tokenManager.clearToken(this.serviceName);
+    await this.tokens.clearToken(this.serviceName);
     logger.info(`Token cleared for ${this.serviceName}`);
   }
 
@@ -274,8 +275,8 @@ export class ApiClient {
 
   private async getAuthHeader(): Promise<string | null> {
     try {
-      const accessToken = await tokenManager.getAccessToken(this.serviceName);
-      const tokenMetadata = tokenManager.getTokenMetadata(this.serviceName);
+      const accessToken = await this.tokens.getAccessToken(this.serviceName);
+      const tokenMetadata = this.tokens.getTokenMetadata(this.serviceName);
 
       if (!accessToken) {
         return null;
@@ -439,7 +440,7 @@ export class ApiClient {
         return false;
       }
 
-      const refreshResult = await tokenManager.refreshToken(this.serviceName, refreshConfig);
+      const refreshResult = await this.tokens.refreshToken(this.serviceName, refreshConfig);
 
       if (refreshResult.success) {
         logger.info(`Token refreshed successfully for ${this.serviceName}`);
@@ -463,7 +464,7 @@ export class ApiClient {
         return false;
       }
 
-      await tokenManager.clearToken(this.serviceName);
+      await this.tokens.clearToken(this.serviceName);
 
       await this.authHandlers.reAuthenticate();
 
@@ -532,9 +533,15 @@ export function createApiClient(
       : undefined,
   };
 
-  tokenManager.setRefreshConfigProvider(adapter.getServiceName(), () =>
+  adapter.tokens.setRefreshConfigProvider(adapter.getServiceName(), () =>
     adapter.getTokenRefreshConfig.call(adapter),
   );
 
-  return new ApiClient(adapter.getServiceName(), adapter.getBaseUrl(), authHandlers, config);
+  return new ApiClient(
+    adapter.getServiceName(),
+    adapter.getBaseUrl(),
+    authHandlers,
+    config,
+    adapter.tokens,
+  );
 }

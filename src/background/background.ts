@@ -4,7 +4,7 @@ import { getMissingOrigins, messageForOrigins } from "../utils/backend-permissio
 import { getSettings, type Settings, saveSettings } from "../utils/settings";
 import { clearCanonicalUrlCache, initializeUrlCanonizer } from "../utils/url-helpers";
 import { ArticlesRepository, getAccountIdentity } from "./articles-repository";
-import { tokenManager } from "./token-manager";
+import { TokenManager, tokenManager } from "./token-manager";
 
 /**
  * Validates a URL string. Returns true if valid, false otherwise.
@@ -238,11 +238,10 @@ browser.runtime.onMessage.addListener(
           }
           case "testConnection": {
             try {
-              const testRepo = new ArticlesRepository();
-              const success = await tokenManager.runWithEphemeralTokens(async () => {
-                await testRepo.initialize(message.payload.settings);
-                return testRepo.testConnection();
-              });
+              // Draft credentials get their own in-memory TokenManager so they never touch the active account's tokens.
+              const testRepo = new ArticlesRepository(new TokenManager({ persist: false }));
+              await testRepo.initialize(message.payload.settings);
+              const success = await testRepo.testConnection();
               safeSendResponse({
                 success,
                 error: success ? undefined : "Connection failed",

@@ -3,8 +3,7 @@ import { karakeepConfigSchema, karakeepSettingsSchema } from "../../../utils/set
 export { karakeepConfigSchema, karakeepSettingsSchema };
 import type { Article } from "../../../types/common";
 import { logger } from "../../../utils/logger";
-import type { TokenRefreshConfig } from "../../token-manager";
-import { tokenManager } from "../../token-manager";
+import { type TokenManager, type TokenRefreshConfig, tokenManager } from "../../token-manager";
 import { type ApiClient, createApiClient } from "../api-client";
 import type {
   ReadItLaterAPI,
@@ -72,6 +71,8 @@ interface KarakeepItem {
 }
 
 export class KarakeepAdapter implements ReadItLaterAPI<KarakeepSettings>, TokenizedAdapter {
+  constructor(public readonly tokens: TokenManager = tokenManager) {}
+
   public readonly displayName = "Karakeep";
   private apiUrl: string = "";
   private token: string = "";
@@ -116,7 +117,7 @@ export class KarakeepAdapter implements ReadItLaterAPI<KarakeepSettings>, Tokeni
     this.token = settings.apiConfig.token;
 
     const tokenMetadata = this.createTokenMetadata({});
-    await tokenManager.storeToken(this.getServiceName(), tokenMetadata);
+    await this.tokens.storeToken(this.getServiceName(), tokenMetadata);
 
     this.apiClient = createApiClient(this, {
       baseUrl: this.apiUrl,
