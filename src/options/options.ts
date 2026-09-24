@@ -220,7 +220,7 @@ function getSettingsFromForm(): Settings | null {
       dom.enableVerboseLoggingCheckbox instanceof HTMLInputElement &&
       dom.enableVerboseLoggingCheckbox.checked
         ? LogLevel.DEBUG
-        : LogLevel.INFO,
+        : LogLevel.ERROR,
     normalizeOnSave:
       dom.normalizeOnSaveCheckbox instanceof HTMLInputElement &&
       dom.normalizeOnSaveCheckbox.checked,

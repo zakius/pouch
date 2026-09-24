@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, expect, test, mock, spyOn } from "bun:test";
 import type { Article } from "../src/types/common";
 import { BookmarksAdapter } from "../src/background/api/adapters/bookmarks-adapter";
-import { ArticlesRepository, getAccountStorageKeys } from "../src/background/articles-repository";
+import {
+  ArticlesRepository,
+  getAccountStorageKeys,
+  removeStaleAccountKeys,
+} from "../src/background/articles-repository";
 import { TokenManager, tokenManager } from "../src/background/token-manager";
 import { getAdapter } from "../src/utils/adapter-factory";
 import { DEFAULT_SETTINGS } from "../src/utils/settings";
@@ -39,7 +43,8 @@ function makeBrowserMock() {
     browser: {
       storage: {
         local: {
-          get: async (keys: string | string[]) => {
+          get: async (keys: string | string[] | null) => {
+            if (keys === null) return { ...storage };
             const names = typeof keys === "string" ? [keys] : keys;
             const out: Record<string, unknown> = {};
             for (const key of names) {
@@ -266,4 +271,29 @@ test("test connection uses isolated tokens while a real request for the same bac
   expect(persisted).toEqual([
     ["karakeep", expect.objectContaining({ accessToken: "rotated-token" })],
   ]);
+});
+
+test("Settings change removes other accounts' cached keys and legacy keys only", async () => {
+  const current = getAccountStorageKeys(DEFAULT_SETTINGS);
+  const other = getAccountStorageKeys({ ...DEFAULT_SETTINGS, backend: "karakeep" });
+  const initial: Record<string, unknown> = {
+    [current.articles]: [],
+    [current.lastSyncTimestamp]: "2026-01-01",
+    [current.lastFullSyncTimestamp]: 1,
+    [other.articles]: [],
+    [other.lastSyncTimestamp]: "2026-01-01",
+    [other.lastFullSyncTimestamp]: 1,
+    articles: [],
+    lastSyncTimestamp: "2026-01-01",
+    lastFullSyncTimestamp: 1,
+    api_tokens: [],
+    filterListCache: "x",
+  };
+  await browser.storage.local.set(initial);
+
+  await removeStaleAccountKeys(DEFAULT_SETTINGS);
+
+  expect(Object.keys(await browser.storage.local.get(null)).sort()).toEqual(
+    [...Object.values(current), "api_tokens", "filterListCache"].sort(),
+  );
 });
