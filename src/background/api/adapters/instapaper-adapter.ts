@@ -60,6 +60,13 @@ const instapaperResponseItemSchema = v.union([
 
 const instapaperSaveResponseSchema = v.array(instapaperResponseItemSchema);
 
+/** RFC 3986 percent-encoding required by OAuth 1.0a (RFC 5849 §3.6); encodeURIComponent leaves !'()* bare. */
+const percentEncode = (s: string) =>
+  encodeURIComponent(s).replace(
+    /[!'()*]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+
 const instapaperSyncResponseSchema = v.object({
   user: instapaperUserSchema,
   bookmarks: v.array(instapaperBookmarkSchema),
@@ -363,12 +370,10 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
     const allParams: Record<string, unknown> = { ...params, ...oauthParams };
     const paramString = Object.keys(allParams)
       .sort()
-      .map((key) => `${encodeURIComponent(key)}=${encodeURIComponent(String(allParams[key]))}`)
+      .map((key) => `${percentEncode(key)}=${percentEncode(String(allParams[key]))}`)
       .join("&");
-    const signatureBaseString = `POST&${encodeURIComponent(url)}&${encodeURIComponent(paramString)}`;
-    const signingKey = `${encodeURIComponent(this.config.consumerSecret)}&${encodeURIComponent(
-      tokenSecret,
-    )}`;
+    const signatureBaseString = `POST&${percentEncode(url)}&${percentEncode(paramString)}`;
+    const signingKey = `${percentEncode(this.config.consumerSecret)}&${percentEncode(tokenSecret)}`;
     const key = await crypto.subtle.importKey(
       "raw",
       new TextEncoder().encode(signingKey),
@@ -384,7 +389,7 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
     oauthParams.oauth_signature = btoa(String.fromCharCode(...new Uint8Array(signature)));
     return `OAuth ${Object.keys(oauthParams)
       .sort()
-      .map((key) => `${encodeURIComponent(key)}="${encodeURIComponent(oauthParams[key])}"`)
+      .map((key) => `${percentEncode(key)}="${percentEncode(oauthParams[key])}"`)
       .join(", ")}`;
   }
 }

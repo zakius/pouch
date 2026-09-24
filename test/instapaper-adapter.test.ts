@@ -1,4 +1,5 @@
 import "../src/utils/settings";
+import { createHmac } from "node:crypto";
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import { InstapaperAdapter } from "../src/background/api/adapters/instapaper-adapter";
 
@@ -144,4 +145,26 @@ test("authenticate signs the xAuth access_token request with OAuth", async () =>
   expect(auth).toStartWith("OAuth ");
   expect(auth).toContain('oauth_consumer_key="key"');
   expect(auth).toContain("oauth_signature=");
+});
+
+test("saveArticle signs RFC 3986-encoded params so URLs with ( ) verify", async () => {
+  const fetchMock = spyOn(globalThis, "fetch").mockImplementation(async () =>
+    json([bookmark(1)]),
+  );
+  await makeAdapter().saveArticle({
+    url: "https://en.wikipedia.org/wiki/Foo_(bar)",
+    title: "t",
+  } as never);
+  const [url, init] = fetchMock.mock.calls[0];
+  const auth = (init?.headers as Record<string, string>).Authorization;
+  const header = Object.fromEntries(
+    [...auth.matchAll(/(\w+)="([^"]*)"/g)].map(([, k, v]) => [k, decodeURIComponent(v)]),
+  );
+  const params =
+    `oauth_consumer_key=key&oauth_nonce=${header.oauth_nonce}&oauth_signature_method=HMAC-SHA1` +
+    `&oauth_timestamp=${header.oauth_timestamp}&oauth_token=token&oauth_version=1.0` +
+    "&title=t&url=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FFoo_%28bar%29";
+  const base = `POST&${encodeURIComponent(String(url))}&${encodeURIComponent(params)}`;
+  const expected = createHmac("sha1", "secret&token-secret").update(base).digest("base64");
+  expect(header.oauth_signature).toBe(expected);
 });
