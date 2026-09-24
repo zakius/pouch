@@ -60,14 +60,14 @@ export async function hasBackendPermissions(settings: Settings): Promise<boolean
 }
 
 /**
- * Must be called from a user input handler (e.g. a click on Save) — the
- * browser shows a permission prompt for each origin not yet granted.
+ * Must be called synchronously from a user input handler (e.g. a click on
+ * Save), with no await before it: Firefox rejects permissions.request once the
+ * gesture context is lost. request resolves true for already-granted origins.
  */
 export async function ensureBackendPermissions(settings: Settings): Promise<boolean> {
   const origins = getBackendOrigins(settings);
   if (origins.length === 0) return true;
   try {
-    if (await browser.permissions.contains({ origins })) return true;
     return await browser.permissions.request({ origins });
   } catch (error) {
     logger.warn("Failed to request host permissions:", error);

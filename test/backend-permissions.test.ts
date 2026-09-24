@@ -130,6 +130,16 @@ test("ensureBackendPermissions requests ungranted origins from a user gesture", 
   expect(permissionState["https://k3s.local/*"]).toBe(true);
 });
 
+test("ensureBackendPermissions calls permissions.request synchronously", async () => {
+  const request = spyOn(browser.permissions, "request");
+  const contains = spyOn(browser.permissions, "contains");
+  const pending = ensureBackendPermissions(selfHostedSettings);
+  // Firefox drops the user-gesture context at the first await.
+  expect(request).toHaveBeenCalledTimes(1);
+  expect(contains).not.toHaveBeenCalled();
+  expect(await pending).toBe(true);
+});
+
 test("pruneBackendPermissions revokes origins the backend no longer needs", async () => {
   permissionState["https://old.example.com/*"] = true;
   permissionState["https://k3s.local/*"] = true;
