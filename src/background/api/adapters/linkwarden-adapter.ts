@@ -3,8 +3,7 @@ import { linkwardenConfigSchema, linkwardenSettingsSchema } from "../../../utils
 export { linkwardenConfigSchema, linkwardenSettingsSchema };
 import type { Article } from "../../../types/common";
 import { logger } from "../../../utils/logger";
-import type { TokenRefreshConfig } from "../../token-manager";
-import { tokenManager } from "../../token-manager";
+import { type TokenManager, type TokenRefreshConfig, tokenManager } from "../../token-manager";
 import { type ApiClient, createApiClient } from "../api-client";
 import type {
   ReadItLaterAPI,
@@ -80,6 +79,8 @@ interface LinkwardenItem {
 }
 
 export class LinkwardenAdapter implements ReadItLaterAPI<LinkwardenSettings>, TokenizedAdapter {
+  constructor(public readonly tokens: TokenManager = tokenManager) {}
+
   public readonly displayName = "Linkwarden";
   private apiUrl: string = "";
   private token: string = "";
@@ -124,7 +125,7 @@ export class LinkwardenAdapter implements ReadItLaterAPI<LinkwardenSettings>, To
     this.token = settings.apiConfig.token;
 
     const tokenMetadata = this.createTokenMetadata({});
-    await tokenManager.storeToken(this.getServiceName(), tokenMetadata);
+    await this.tokens.storeToken(this.getServiceName(), tokenMetadata);
 
     this.apiClient = createApiClient(this, {
       baseUrl: this.apiUrl,

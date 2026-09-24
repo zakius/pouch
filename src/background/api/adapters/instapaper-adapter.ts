@@ -3,8 +3,7 @@ import { instapaperConfigSchema, instapaperSettingsSchema } from "../../../utils
 export { instapaperConfigSchema, instapaperSettingsSchema };
 import type { Article } from "../../../types/common";
 import { logger } from "../../../utils/logger";
-import type { TokenRefreshConfig } from "../../token-manager";
-import { tokenManager } from "../../token-manager";
+import { type TokenManager, type TokenRefreshConfig, tokenManager } from "../../token-manager";
 import type {
   ReadItLaterAPI,
   SavingArticle,
@@ -95,6 +94,8 @@ interface InstapaperError {
 }
 
 export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, TokenizedAdapter {
+  constructor(public readonly tokens: TokenManager = tokenManager) {}
+
   public readonly displayName = "Instapaper";
   private apiUrl = "https://www.instapaper.com";
   private config!: InstapaperConfig;
@@ -184,7 +185,7 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
     }
 
     const tokenMetadata = this.createTokenMetadata({});
-    await tokenManager.storeToken(this.getServiceName(), tokenMetadata);
+    await this.tokens.storeToken(this.getServiceName(), tokenMetadata);
   }
   async testConnection(): Promise<boolean> {
     try {
@@ -197,7 +198,7 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
   }
 
   public async cleanup(): Promise<void> {
-    await tokenManager.clearToken(this.getServiceName());
+    await this.tokens.clearToken(this.getServiceName());
   }
 
   public getTokenHealth(): {
@@ -205,7 +206,7 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
     expiresAt?: string;
     refreshCount?: number;
   } {
-    const health = tokenManager.getTokenHealth();
+    const health = this.tokens.getTokenHealth();
     return health[this.getServiceName()] || { isValid: false };
   }
   async saveArticle(article: SavingArticle): Promise<Article> {

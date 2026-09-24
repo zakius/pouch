@@ -36,6 +36,8 @@ export interface TokenManagerConfig {
   refreshCooldownMs: number;
   checkIntervalMinutes: number;
   expirationThresholdChecks: number;
+  /** False keeps tokens in memory only: no storage writes and no refresh alarm. */
+  persist: boolean;
 }
 
 export class TokenManager {
@@ -44,8 +46,6 @@ export class TokenManager {
   private config: TokenManagerConfig;
   private refreshConfigProviders: Map<string, () => TokenRefreshConfig | null> = new Map();
   private refreshPromises: Map<string, Promise<TokenRefreshResult>> = new Map();
-  private ephemeralDepth: number = 0;
-  private activeTokensBackup: Map<string, TokenMetadata> | null = null;
 
   constructor(config: Partial<TokenManagerConfig> = {}) {
     this.config = {
@@ -55,12 +55,13 @@ export class TokenManager {
       refreshCooldownMs: 30 * 1000, // 30 seconds
       checkIntervalMinutes: 5, // Check every 5 minutes
       expirationThresholdChecks: 3, // Refresh if expiring in < 3 check periods (15 minutes)
+      persist: true,
       ...config,
     };
   }
 
   public async initializeAlarm(): Promise<void> {
-    if (this.alarmInitialized) {
+    if (this.alarmInitialized || !this.config.persist) {
       return;
     }
 
@@ -86,23 +87,6 @@ export class TokenManager {
       });
     } catch (error) {
       logger.error("Failed to initialize token refresh alarm:", error);
-    }
-  }
-
-  public async runWithEphemeralTokens<T>(operation: () => Promise<T>): Promise<T> {
-    if (this.ephemeralDepth === 0) {
-      this.activeTokensBackup = this.tokens;
-      this.tokens = new Map(this.tokens);
-    }
-    this.ephemeralDepth++;
-    try {
-      return await operation();
-    } finally {
-      this.ephemeralDepth--;
-      if (this.ephemeralDepth === 0) {
-        this.tokens = this.activeTokensBackup ?? this.tokens;
-        this.activeTokensBackup = null;
-      }
     }
   }
 
@@ -396,7 +380,7 @@ export class TokenManager {
   }
 
   private async persistTokens(): Promise<void> {
-    if (this.ephemeralDepth > 0) {
+    if (!this.config.persist) {
       return;
     }
     try {

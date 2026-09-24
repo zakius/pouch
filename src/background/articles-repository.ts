@@ -10,6 +10,7 @@ import type {
   SyncOptions,
   SyncResult,
 } from "./api/read-it-later-adapter";
+import type { TokenManager } from "./token-manager";
 
 type PendingOperation = {
   type: "save" | "delete";
@@ -59,6 +60,9 @@ export class ArticlesRepository {
     lastFullSyncTimestamp: "lastFullSyncTimestamp",
   };
 
+  /** `tokens` defaults to the shared, persisted TokenManager; pass a separate one to isolate credentials. */
+  constructor(private readonly tokens?: TokenManager) {}
+
   async initialize(settings: Settings): Promise<void> {
     logger.info("Initializing ArticlesRepository with settings:", settings);
     this.settings = settings;
@@ -78,7 +82,7 @@ export class ArticlesRepository {
         if (!(await hasBackendPermissions(this.settings))) {
           throw new Error(missingPermissionMessage(this.settings));
         }
-        const api = getAdapter(this.settings.backend);
+        const api = getAdapter(this.settings.backend, this.tokens);
         await api.initialize(this.settings);
         logger.info("On-demand API initialization completed");
         this.api = api;

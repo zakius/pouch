@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test, mock, spyOn } from "bun:test";
 import type { Article } from "../src/types/common";
 import { BookmarksAdapter } from "../src/background/api/adapters/bookmarks-adapter";
 import { ArticlesRepository, getAccountStorageKeys } from "../src/background/articles-repository";
-import { tokenManager } from "../src/background/token-manager";
+import { TokenManager, tokenManager } from "../src/background/token-manager";
 import { getAdapter } from "../src/utils/adapter-factory";
 import { DEFAULT_SETTINGS } from "../src/utils/settings";
 
@@ -212,58 +212,58 @@ test("a failed adapter initialization rejects all concurrent callers and allows 
   ).resolves.toMatchObject({ id: 7 });
 });
 
-test("ephemeral token runs keep draft credentials out of active state and storage", async () => {
+test("test connection uses isolated tokens while a real request for the same backend runs", async () => {
   const { storage } = makeBrowserMock();
-  await tokenManager.storeToken("bookmarks", {
-    accessToken: "active-token",
+  Object.assign(browser, { permissions: { contains: async () => true } });
+  const draftRequestStarted = deferred();
+  const releaseDraftRequest = deferred();
+  const authHeaders: string[] = [];
+  spyOn(globalThis, "fetch").mockImplementation((async (_url: string, init?: RequestInit) => {
+    const auth = new Headers(init?.headers).get("Authorization") ?? "";
+    authHeaders.push(auth);
+    if (auth === "Bearer draft-token") {
+      draftRequestStarted.resolve();
+      await releaseDraftRequest.promise;
+    }
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch);
+  const karakeep = (token: string) =>
+    ({
+      ...DEFAULT_SETTINGS,
+      backend: "karakeep",
+      apiConfig: { url: "https://karakeep.example", token },
+    }) as RepoSettings;
+
+  const activeRepo = new ArticlesRepository();
+  await activeRepo.initialize(karakeep("active-token"));
+  expect(await activeRepo.testConnection()).toBe(true);
+
+  const testRepo = new ArticlesRepository(new TokenManager({ persist: false }));
+  await testRepo.initialize(karakeep("draft-token"));
+  const testResult = testRepo.testConnection();
+  await draftRequestStarted.promise;
+
+  await tokenManager.storeToken("karakeep", {
+    accessToken: "rotated-token",
     refreshToken: "",
-    tokenType: "bearer",
+    tokenType: "Bearer",
     expiresAt: Date.now() + 60 * 60 * 1000,
     issuedAt: Date.now(),
     refreshCount: 0,
   });
+  expect(await activeRepo.testConnection()).toBe(true);
 
-  await tokenManager.runWithEphemeralTokens(async () => {
-    await tokenManager.storeToken("bookmarks", {
-      accessToken: "draft-token",
-      refreshToken: "",
-      tokenType: "bearer",
-      expiresAt: Date.now() + 60 * 60 * 1000,
-      issuedAt: Date.now(),
-      refreshCount: 0,
-    });
-    expect(await tokenManager.getAccessToken("bookmarks")).toBe("draft-token");
-  });
+  releaseDraftRequest.resolve();
+  expect(await testResult).toBe(true);
 
-  expect(await tokenManager.getAccessToken("bookmarks")).toBe("active-token");
-  const persisted = (storage.api_tokens as [string, { accessToken: string }][]) ?? [];
-  expect(persisted[0]?.[1].accessToken).toBe("active-token");
-});
-
-test("ephemeral token runs restore active state after a failed connection test", async () => {
-  makeBrowserMock();
-  await tokenManager.storeToken("bookmarks", {
-    accessToken: "active-token",
-    refreshToken: "",
-    tokenType: "bearer",
-    expiresAt: Date.now() + 60 * 60 * 1000,
-    issuedAt: Date.now(),
-    refreshCount: 0,
-  });
-
-  await expect(
-    tokenManager.runWithEphemeralTokens(async () => {
-      await tokenManager.storeToken("bookmarks", {
-        accessToken: "draft-token",
-        refreshToken: "",
-        tokenType: "bearer",
-        expiresAt: Date.now() + 60 * 60 * 1000,
-        issuedAt: Date.now(),
-        refreshCount: 0,
-      });
-      throw new Error("Connection failed");
-    }),
-  ).rejects.toThrow("Connection failed");
-
-  expect(await tokenManager.getAccessToken("bookmarks")).toBe("active-token");
+  expect(authHeaders).toEqual([
+    "Bearer active-token",
+    "Bearer draft-token",
+    "Bearer rotated-token",
+  ]);
+  expect(await tokenManager.getAccessToken("karakeep")).toBe("rotated-token");
+  const persisted = storage.api_tokens as [string, { accessToken: string }][];
+  expect(persisted).toEqual([
+    ["karakeep", expect.objectContaining({ accessToken: "rotated-token" })],
+  ]);
 });

@@ -3,8 +3,7 @@ import { raindropConfigSchema, raindropSettingsSchema } from "../../../utils/set
 export { raindropConfigSchema, raindropSettingsSchema };
 import type { Article } from "../../../types/common";
 import { logger } from "../../../utils/logger";
-import type { TokenRefreshConfig } from "../../token-manager";
-import { tokenManager } from "../../token-manager";
+import { type TokenManager, type TokenRefreshConfig, tokenManager } from "../../token-manager";
 import { type ApiClient, createApiClient } from "../api-client";
 import type {
   ReadItLaterAPI,
@@ -87,6 +86,8 @@ interface RaindropItem {
 }
 
 export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings>, TokenizedAdapter {
+  constructor(public readonly tokens: TokenManager = tokenManager) {}
+
   public readonly displayName = "Raindrop.io";
   private apiUrl = "https://api.raindrop.io/rest/v1";
   private apiKey = "";
@@ -127,7 +128,7 @@ export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings>, Tokeni
     this.apiKey = config.apiKey;
 
     const tokenMetadata = this.createTokenMetadata({});
-    await tokenManager.storeToken(this.getServiceName(), tokenMetadata);
+    await this.tokens.storeToken(this.getServiceName(), tokenMetadata);
 
     this.apiClient = createApiClient(this, {
       baseUrl: this.apiUrl,

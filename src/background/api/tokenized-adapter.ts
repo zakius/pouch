@@ -5,9 +5,11 @@
  * and can work with the centralized TokenManager.
  */
 
-import type { TokenRefreshConfig } from "../token-manager";
+import type { TokenManager, TokenRefreshConfig } from "../token-manager";
 
 export interface TokenizedAdapter {
+  readonly tokens: TokenManager;
+
   getServiceName(): string;
 
   getTokenRefreshConfig(): TokenRefreshConfig | null;
