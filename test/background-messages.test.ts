@@ -38,7 +38,8 @@ Object.assign(globalThis, {
         set: async (v: Record<string, unknown>) => Object.assign(syncStore, v),
       },
       local: {
-        get: async (keys: string | string[]) => {
+        get: async (keys: string | string[] | null) => {
+          if (keys === null) return { ...localStore };
           const names = typeof keys === "string" ? [keys] : keys;
           const out: Record<string, unknown> = {};
           for (const key of names) if (key in localStore) out[key] = localStore[key];

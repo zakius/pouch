@@ -44,6 +44,18 @@ export function getAccountStorageKeys(settings: Settings): AccountStorageKeys {
   };
 }
 
+/** Removes cached articles and sync timestamps left behind by other (or pre-per-account) accounts. */
+export async function removeStaleAccountKeys(settings: Settings): Promise<void> {
+  const current = new Set(Object.values(getAccountStorageKeys(settings)));
+  const prefixes = ["articles", "lastSyncTimestamp", "lastFullSyncTimestamp"];
+  const stale = Object.keys(await browser.storage.local.get(null)).filter(
+    (key) => !current.has(key) && prefixes.some((p) => key === p || key.startsWith(`${p}:`)),
+  );
+  if (stale.length > 0) {
+    await browser.storage.local.remove(stale);
+  }
+}
+
 export class ArticlesRepository {
   private api: ReadItLaterAPI | null = null;
   private apiInitPromise: Promise<ReadItLaterAPI> | null = null;
@@ -220,40 +232,6 @@ export class ArticlesRepository {
       return articleWithCanonicalUrl;
     } catch (error) {
       logger.error("Error saving article through cache:", error);
-
-      if (error instanceof Error && error.message.includes("No token found")) {
-        logger.warn("Authentication error detected, attempting to re-initialize API...");
-        this.api = null; // Clear the cached API instance
-        try {
-          const newApi = await this.getApi();
-          const retryArticle = await newApi.saveArticle({
-            url: urlToSave,
-            title: article.title,
-          });
-
-          const retryArticleWithCanonicalUrl = {
-            ...retryArticle,
-            canonicalUrl: canonicalUrl,
-          };
-
-          await this.addArticle(retryArticleWithCanonicalUrl);
-
-          // Track this operation if sync is in progress
-          if (this.syncInProgress) {
-            this.pendingOperations.push({
-              type: "save",
-              article: retryArticleWithCanonicalUrl,
-              timestamp: Date.now(),
-            });
-          }
-
-          logger.info("Successfully saved article after re-authentication");
-          return retryArticleWithCanonicalUrl;
-        } catch (retryError) {
-          logger.error("Failed to save article even after re-authentication:", retryError);
-          throw retryError;
-        }
-      }
 
       throw error;
     }

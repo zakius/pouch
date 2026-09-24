@@ -98,6 +98,11 @@ test("AMP URLs are still unwrapped", async () => {
   );
 });
 
+test("AMP paths on hosts that merely end in google.com are not unwrapped", async () => {
+  const url = "https://evilgoogle.com/amp/s/example.com/article";
+  expect(await canonicalizeUrl(url)).toBe(url);
+});
+
 test("Comparison without normalization matches exact saved URLs only", async () => {
   const { storage } = withStorage();
   const saved: Article = {

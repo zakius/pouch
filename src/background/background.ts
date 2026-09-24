@@ -3,7 +3,11 @@ import { logger } from "../utils/logger";
 import { getMissingOrigins, messageForOrigins } from "../utils/backend-permissions";
 import { getSettings, type Settings, saveSettings } from "../utils/settings";
 import { clearCanonicalUrlCache, initializeUrlCanonizer } from "../utils/url-helpers";
-import { ArticlesRepository, getAccountIdentity } from "./articles-repository";
+import {
+  ArticlesRepository,
+  getAccountIdentity,
+  removeStaleAccountKeys,
+} from "./articles-repository";
 import { TokenManager, tokenManager } from "./token-manager";
 
 /**
@@ -119,6 +123,7 @@ browser.runtime.onMessage.addListener(
               await tokenManager.clearToken(oldSettings.backend);
             }
             await saveSettings(settings);
+            await removeStaleAccountKeys(settings);
             clearCanonicalUrlCache();
             await logger.initialize();
             articlesRepository = new ArticlesRepository();

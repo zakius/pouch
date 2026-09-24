@@ -44,7 +44,8 @@ function handleOpenRedirects(url: URL): URL {
   return url;
 }
 function deAmpUrl(url: URL): URL {
-  if (url.hostname.endsWith("google.com") && url.pathname.startsWith("/amp/")) {
+  const host = url.hostname;
+  if ((host === "google.com" || host.endsWith(".google.com")) && url.pathname.startsWith("/amp/")) {
     const pathParts = url.pathname.split("/");
     if (pathParts.length > 3) {
       const originalHostAndPath = pathParts.slice(3).join("/");
