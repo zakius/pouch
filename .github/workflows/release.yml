@@ -7,11 +7,18 @@ on:
 permissions:
   contents: write
 
+# Back-to-back merges must release one at a time, each bumping from the previous release's version.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
 
@@ -26,13 +33,15 @@ jobs:
         run: bun run release:sign
 
       - name: Read bumped version
+        if: always()
         id: version
         run: echo "version=$(jq -r .version package.json)" >> "$GITHUB_OUTPUT"
 
       - run: bun run format
+        if: always()
 
       - name: Commit version bump
-        if: always()
+        if: always() && steps.version.outputs.version != ''
         run: |
           if git diff --quiet package.json src/manifest.json; then
             echo "No version bump to commit"
