@@ -43,9 +43,7 @@
       "48": "icons/icon.svg"
     },
     "default_title": "Save to Pouch",
-    "show_matches": [
-      "<all_urls>"
-    ]
+    "show_matches": ["<all_urls>"]
   },
   "permissions": [
     "activeTab",
@@ -57,19 +55,13 @@
     "bookmarks",
     "idle"
   ],
-  "optional_permissions": [
-    "*://*/*",
-    "https://www.instapaper.com/*",
-    "https://api.raindrop.io/*"
-  ],
+  "optional_permissions": ["*://*/*", "https://www.instapaper.com/*", "https://api.raindrop.io/*"],
   "browser_specific_settings": {
     "gecko": {
       "id": "pouch@smartrss",
       "strict_min_version": "140.0",
       "data_collection_permissions": {
-        "required": [
-          "none"
-        ]
+        "required": ["none"]
       }
     }
   }
