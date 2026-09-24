@@ -241,16 +241,15 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
   /**
    * Instapaper Sync (FULL SNAPSHOT)
    *
-   * Instapaper's bookmarks/list endpoint has no reliable pagination cursor:
-   * it returns at most `limit` bookmarks and a full page gives no signal about
-   * whether more exist. "have" and delete_ids are not usable here because we
-   * cannot persist per-bookmark hashes, so incremental sync with deletion
-   * tracking is not supported.
+   * bookmarks/list returns at most `limit` bookmarks and has no cursor. Paging
+   * works through "have": every request after the first sends the IDs seen so
+   * far (comma-separated), and the API leaves those out of the response. The
+   * loop stops at the first page shorter than `limit`.
    *
-   * The loop therefore fetches a single full snapshot, deduplicating by
-   * bookmark_id. A full page containing only already-seen bookmarks means
-   * retrieval cannot advance to a complete snapshot, so sync fails explicitly
-   * and the caller keeps its previous cache.
+   * delete_ids is ignored: each sync is a full snapshot, so removed bookmarks
+   * simply drop out. A full page containing only already-seen bookmarks means
+   * the API ignored "have" and retrieval cannot advance, so sync fails
+   * explicitly and the caller keeps its previous cache.
    *
    * API: https://www.instapaper.com/api
    */
@@ -262,7 +261,9 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
     const mode = options?.mode || "overwrite";
 
     do {
-      const data = await this._makeSignedRequest("/api/1/bookmarks/list", { limit });
+      const params: Record<string, unknown> = { limit };
+      if (articlesById.size > 0) params.have = [...articlesById.keys()].join(",");
+      const data = await this._makeSignedRequest("/api/1/bookmarks/list", params);
       const validatedData = v.parse(instapaperSyncResponseSchema, data);
       pageBookmarks = validatedData.bookmarks;
 
