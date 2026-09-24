@@ -151,16 +151,19 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
    * API: https://www.instapaper.com/api
    */
   private async authenticate(): Promise<void> {
-    const response = await fetch(`${this.apiUrl}/api/1/oauth/access_token`, {
+    const url = this.getAuthEndpoint();
+    const xAuthParams = {
+      x_auth_username: this.config.username,
+      x_auth_password: this.config.password || "",
+      x_auth_mode: "client_auth",
+    };
+    const response = await fetch(url, {
       method: "POST",
       headers: {
+        Authorization: await this._oauthHeader(url, xAuthParams, "", ""),
         "Content-Type": "application/x-www-form-urlencoded",
       },
-      body: new URLSearchParams({
-        x_auth_username: this.config.username,
-        x_auth_password: this.config.password || "",
-        x_auth_mode: "client_auth",
-      }),
+      body: new URLSearchParams(xAuthParams),
     });
     if (!response.ok) {
       throw new Error("Failed to authenticate with Instapaper");
@@ -322,27 +325,50 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
     if (!this.config || !this.accessToken || !this.accessTokenSecret) {
       throw new Error("Instapaper adapter not initialized");
     }
+    const baseUrl = `${this.apiUrl}${endpoint}`;
+    const response = await fetch(baseUrl, {
+      method: "POST",
+      headers: {
+        Authorization: await this._oauthHeader(
+          baseUrl,
+          params,
+          this.accessToken,
+          this.accessTokenSecret,
+        ),
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams(params as Record<string, string>),
+    });
+    if (!response.ok) {
+      throw new Error(`Instapaper API Error: ${response.status} ${await response.text()}`);
+    }
+    return response.json();
+  }
+
+  /** OAuth 1.0a HMAC-SHA1 Authorization header for a POST to `url`. An empty token is omitted (xAuth). */
+  private async _oauthHeader(
+    url: string,
+    params: Record<string, unknown>,
+    token: string,
+    tokenSecret: string,
+  ): Promise<string> {
     const oauthParams: Record<string, string> = {
       oauth_consumer_key: this.config.consumerKey,
       oauth_nonce: Math.random().toString(36).substring(2),
       oauth_signature_method: "HMAC-SHA1",
       oauth_timestamp: Math.floor(Date.now() / 1000).toString(),
-      oauth_token: this.accessToken,
+      ...(token ? { oauth_token: token } : {}),
       oauth_version: "1.0",
     };
-    const allParams = { ...params, ...oauthParams };
+    const allParams: Record<string, unknown> = { ...params, ...oauthParams };
     const paramString = Object.keys(allParams)
       .sort()
       .map((key) => `${encodeURIComponent(key)}=${encodeURIComponent(String(allParams[key]))}`)
       .join("&");
-    const method = "POST";
-    const baseUrl = `${this.apiUrl}${endpoint}`;
-    const signatureBaseString = `${method}&${encodeURIComponent(
-      baseUrl,
-    )}&${encodeURIComponent(paramString)}`;
-    const signingKey = `${encodeURIComponent(
-      this.config.consumerSecret,
-    )}&${encodeURIComponent(this.accessTokenSecret)}`;
+    const signatureBaseString = `POST&${encodeURIComponent(url)}&${encodeURIComponent(paramString)}`;
+    const signingKey = `${encodeURIComponent(this.config.consumerSecret)}&${encodeURIComponent(
+      tokenSecret,
+    )}`;
     const key = await crypto.subtle.importKey(
       "raw",
       new TextEncoder().encode(signingKey),
@@ -356,21 +382,9 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
       new TextEncoder().encode(signatureBaseString),
     );
     oauthParams.oauth_signature = btoa(String.fromCharCode(...new Uint8Array(signature)));
-    const authHeader = `OAuth ${Object.keys(oauthParams)
+    return `OAuth ${Object.keys(oauthParams)
       .sort()
       .map((key) => `${encodeURIComponent(key)}="${encodeURIComponent(oauthParams[key])}"`)
       .join(", ")}`;
-    const response = await fetch(baseUrl, {
-      method,
-      headers: {
-        Authorization: authHeader,
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams(params as Record<string, string>),
-    });
-    if (!response.ok) {
-      throw new Error(`Instapaper API Error: ${response.status} ${await response.text()}`);
-    }
-    return response.json();
   }
 }
