@@ -360,15 +360,19 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
       ...(token ? { oauth_token: token } : {}),
       oauth_version: "1.0",
     };
+    // RFC 5849 §3.6: encodeURIComponent leaves !'()* unescaped, which breaks the signature.
+    const enc = (s: string) =>
+      encodeURIComponent(s).replace(
+        /[!'()*]/g,
+        (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+      );
     const allParams: Record<string, unknown> = { ...params, ...oauthParams };
     const paramString = Object.keys(allParams)
       .sort()
-      .map((key) => `${encodeURIComponent(key)}=${encodeURIComponent(String(allParams[key]))}`)
+      .map((key) => `${enc(key)}=${enc(String(allParams[key]))}`)
       .join("&");
-    const signatureBaseString = `POST&${encodeURIComponent(url)}&${encodeURIComponent(paramString)}`;
-    const signingKey = `${encodeURIComponent(this.config.consumerSecret)}&${encodeURIComponent(
-      tokenSecret,
-    )}`;
+    const signatureBaseString = `POST&${enc(url)}&${enc(paramString)}`;
+    const signingKey = `${enc(this.config.consumerSecret)}&${enc(tokenSecret)}`;
     const key = await crypto.subtle.importKey(
       "raw",
       new TextEncoder().encode(signingKey),
@@ -384,7 +388,7 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
     oauthParams.oauth_signature = btoa(String.fromCharCode(...new Uint8Array(signature)));
     return `OAuth ${Object.keys(oauthParams)
       .sort()
-      .map((key) => `${encodeURIComponent(key)}="${encodeURIComponent(oauthParams[key])}"`)
+      .map((key) => `${enc(key)}="${enc(oauthParams[key])}"`)
       .join(", ")}`;
   }
 }
