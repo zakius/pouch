@@ -288,11 +288,10 @@ async function handleDeleteArticle(button: HTMLButtonElement): Promise<void> {
     logger.warn("Delete button missing article ID");
     return;
   }
-  const articleId = /^\d+$/.test(articleIdStr) ? Number(articleIdStr) : articleIdStr;
-  if (typeof articleId === "number" && (articleId < 0 || !Number.isInteger(articleId))) {
-    logger.warn("Invalid article ID:", articleIdStr);
-    return;
-  }
+  // Bookmark ids are strings in both APIs (GUIDs on Firefox, decimal strings
+  // on Chromium). Coercing digit-looking Chromium ids to numbers made the
+  // repository's strict id comparison silently miss the cached entry.
+  const articleId = articleIdStr;
   isSavingOrDeleting = true;
   button.disabled = true;
   button.classList.add("is-busy");

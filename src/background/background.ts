@@ -159,6 +159,7 @@ browser.runtime.onMessage.addListener(
               url,
               title,
             });
+            await refreshActiveTabUi();
             safeSendResponse(savedArticle);
             return;
           }
@@ -238,6 +239,7 @@ browser.runtime.onMessage.addListener(
             }
             articlesRepository = await getArticlesRepository();
             const result = await articlesRepository.deleteArticle(articleId);
+            await refreshActiveTabUi();
             safeSendResponse(result);
             return;
           }
@@ -413,6 +415,20 @@ async function updateUiForTab(tabId: number): Promise<void> {
       title: "Unable to determine page status",
       enabled: false,
     });
+  }
+}
+// Popup-initiated saves and deletes bypass the page-action toggle, so the
+// icon and the context-menu entry would go stale until the next navigation or
+// tab switch. Refresh the tab the popup is acting on.
+async function refreshActiveTabUi(): Promise<void> {
+  try {
+    const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+    const tab = tabs[0];
+    if (tab?.id !== undefined) {
+      await updateUiForTab(tab.id);
+    }
+  } catch (error) {
+    logger.error("Error refreshing active tab UI:", error);
   }
 }
 function isValidHttpUrl(url: string) {

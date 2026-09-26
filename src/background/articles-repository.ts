@@ -117,7 +117,10 @@ export class ArticlesRepository {
 
   async getArticle(id: number | string): Promise<Article | undefined> {
     const articles = await this.getAllArticles();
-    return articles.find((a) => a.id === id);
+    // Ids are compared as strings: the storage may hold entries written by
+    // versions that used the other type, and bookmark ids are strings in both
+    // APIs (GUIDs on Firefox, decimal strings on Chromium).
+    return articles.find((a) => String(a.id) === String(id));
   }
 
   async getAllArticles(): Promise<Article[]> {
@@ -431,7 +434,10 @@ export class ArticlesRepository {
     }
     return this.enqueueCommit(async () => {
       const articles = await this.getAllArticles();
-      await this.storeArticles(articles.filter((a) => a.id !== id));
+      // String comparison, so entries stored with the other id type (see
+      // getArticle) still match.
+      const target = String(id);
+      await this.storeArticles(articles.filter((a) => String(a.id) !== target));
     });
   }
 
