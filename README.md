@@ -46,6 +46,19 @@ bun run package
 
 The built extension will be available in the `dist/packages` directory.
 
+### Chromium
+
+```bash
+bun run package:chromium
+```
+
+builds the same source for Chromium as two MV3 extensions in `dist/packages`:
+
+- `pouch-chromium-<version>.zip`: Pouch, without its page action. Chromium allows one action per extension.
+- `pouch-quick-actions-chromium-<version>.zip`: Pouch Quick Actions, a toolbar button that saves or removes the current page. It asks Pouch over runtime messages, so it needs Pouch.
+
+Load both unpacked (`chrome://extensions`, developer mode, "Load unpacked" on each folder). The `key`s in their manifests fix their IDs, which the two use to find each other (`src/utils/chromium.ts`). Code that differs between the builds checks `IS_CHROMIUM`. The Chromium build has its own extension ID, so its settings start empty. Releases attach both packages.
+
 ## Development
 
 - `bun run watch` - Start development server and watch for changes.

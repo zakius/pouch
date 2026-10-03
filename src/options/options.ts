@@ -1,3 +1,4 @@
+import "../utils/chromium";
 import * as v from "valibot";
 import { availableBackends, getAdapter } from "../utils/adapter-factory";
 import {
