@@ -58,7 +58,12 @@ Object.assign(globalThis, {
       create: async () => ({ id: "x", title: "t", url: "u" }),
       remove: async () => {},
     },
-    alarms: { clear: async () => {}, create: async () => {}, onAlarm: { addListener: () => {} } },
+    alarms: {
+      clear: async () => {},
+      create: async () => {},
+      get: async () => undefined,
+      onAlarm: { addListener: () => {} },
+    },
     contextMenus: {
       create: () => ({}),
       onClicked: { addListener: () => {} },

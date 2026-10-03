@@ -14,7 +14,7 @@ import {
   getAccountIdentity,
   removeStaleAccountKeys,
 } from "./articles-repository";
-import { TokenManager, tokenManager } from "./token-manager";
+import { TOKEN_CHECK_ALARM_NAME, TokenManager, tokenManager } from "./token-manager";
 
 /**
  * Validates a URL string. Returns true if valid, false otherwise.
@@ -99,12 +99,14 @@ const REFRESH_INTERVAL = 30;
 let articlesRepository: ArticlesRepository;
 let initializePromise: Promise<void> | null = null;
 let startupPromise: Promise<void> | null = null;
+let urlCanonizerPromise: Promise<void> | null = null;
 // What every start of the background needs, also each time Chromium's
-// service worker wakes up.
+// service worker wakes up. The URL rules may download filter lists, so
+// requests don't wait for them; initialize() does.
 function startup(): Promise<void> {
   startupPromise ??= (async () => {
     await logger.initialize();
-    await initializeUrlCanonizer();
+    urlCanonizerPromise = initializeUrlCanonizer();
     await tokenManager.loadTokens();
     logger.info("Token manager initialized");
   })();
@@ -504,6 +506,7 @@ async function initialize(): Promise<void> {
   initializePromise = (async () => {
     await browser.contextMenus.removeAll();
     await startup();
+    await urlCanonizerPromise;
     logger.info("Background script initialized");
 
     const articlesRepository = await getArticlesRepository();
@@ -542,7 +545,10 @@ async function initialize(): Promise<void> {
   return initializePromise;
 }
 browser.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name === "refresh") {
+  if (alarm.name === TOKEN_CHECK_ALARM_NAME) {
+    await startup();
+    await tokenManager.checkAndRefreshTokens();
+  } else if (alarm.name === "refresh") {
     try {
       const articlesRepository = await getArticlesRepository();
       // Let the adapter decide the sync mode based on history and idle state
