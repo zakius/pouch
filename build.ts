@@ -334,7 +334,8 @@ async function buildChromium(): Promise<void> {
 			background: { service_worker: "background.js", type: "module" },
 			action: {
 				default_icon: { "16": "icons/unsaved-16.png", "32": "icons/unsaved-32.png" },
-				default_title: "Save to Pouch",
+				// "Save to Pouch" once Pouch reports a page it can save.
+				default_title: "Pouch Quick Actions",
 			},
 		},
 	};
