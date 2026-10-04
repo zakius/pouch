@@ -12,6 +12,7 @@
     "watch": "bun run build.ts --watch",
     "release": "bun run build.ts",
     "package:chromium": "bun run build.ts --chromium",
+    "test": "bun test --isolate",
     "release:sign": "bun run build.ts --sign"
   },
   "devDependencies": {

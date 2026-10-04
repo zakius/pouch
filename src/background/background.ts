@@ -506,6 +506,20 @@ async function initialize(): Promise<void> {
   initializePromise = (async () => {
     await browser.contextMenus.removeAll();
     await startup();
+    // Menus and alarms first: a Chromium service worker may be stopped while
+    // the filter lists or the first sync still load.
+    browser.contextMenus.create({
+      id: "save-link",
+      title: "Save link",
+      contexts: ["link"],
+    });
+    browser.contextMenus.create({
+      id: "save-page",
+      title: "Save page",
+      contexts: [IS_CHROMIUM ? "action" : "browser_action"] as browser.menus.ContextType[],
+    });
+    void browser.alarms.create("refresh", { periodInMinutes: REFRESH_INTERVAL });
+    void browser.alarms.create("refresh-filters", { periodInMinutes: 24 * 60 });
     await urlCanonizerPromise;
     logger.info("Background script initialized");
 
@@ -522,18 +536,6 @@ async function initialize(): Promise<void> {
     } catch (error) {
       logger.warn("Failed to sync during initialization:", error);
     }
-    browser.contextMenus.create({
-      id: "save-link",
-      title: "Save link",
-      contexts: ["link"],
-    });
-    browser.contextMenus.create({
-      id: "save-page",
-      title: "Save page",
-      contexts: [IS_CHROMIUM ? "action" : "browser_action"] as browser.menus.ContextType[],
-    });
-    void browser.alarms.create("refresh", { periodInMinutes: REFRESH_INTERVAL });
-    void browser.alarms.create("refresh-filters", { periodInMinutes: 24 * 60 });
     const tabs = await browser.tabs.query({
       active: true,
       currentWindow: true,
@@ -546,8 +548,13 @@ async function initialize(): Promise<void> {
 }
 browser.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === TOKEN_CHECK_ALARM_NAME) {
-    await startup();
-    await tokenManager.checkAndRefreshTokens();
+    try {
+      // A woken service worker has no adapter yet to say how to refresh.
+      await (await getArticlesRepository()).initializeApi();
+      await tokenManager.checkAndRefreshTokens();
+    } catch (error) {
+      logger.error("Error checking tokens:", error);
+    }
   } else if (alarm.name === "refresh") {
     try {
       const articlesRepository = await getArticlesRepository();

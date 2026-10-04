@@ -67,6 +67,7 @@ Load both unpacked (`chrome://extensions`, developer mode, "Load unpacked" on ea
 - `bun run release:sign` - Build and sign the extension for AMO (requires AMO_API_KEY and AMO_API_SECRET).
 - `bun run lint` - Run oxlint (with type-aware, type-checked rules) to check code quality.
 - `bun run format` - Format the source files with oxfmt.
+- `bun run test` - Run the tests, each file with fresh globals and modules (`--isolate`: tests import the background script with their own `browser` mock).
 
 ## Project Structure
 

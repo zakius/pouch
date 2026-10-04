@@ -84,6 +84,11 @@ export class ArticlesRepository {
     await this.loadSyncTimestamps();
   }
 
+  /** Creates the backend's adapter, which also tells the token manager how to refresh its token. */
+  async initializeApi(): Promise<void> {
+    await this.getApi();
+  }
+
   private getApi(): Promise<ReadItLaterAPI> {
     if (this.api) {
       return Promise.resolve(this.api);

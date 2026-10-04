@@ -24,7 +24,7 @@ jobs:
 
       - run: bun run lint
       - run: bun run format:check
-      - run: bun test
+      - run: bun test --isolate
 
       - name: Build and sign extension
         env:
