@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 
-// A token alarm that wakes Chromium's service worker: nothing else has run, so
-// the alarm itself must set up the backend before it can refresh a token.
+// A token alarm that wakes Chromium's service worker, before any backend use:
+// no password login, and the stored token stays for the adapter's own refresh.
 type AlarmListener = (alarm: { name: string }) => Promise<void>;
 const alarmListeners: AlarmListener[] = [];
 const fetchCalls: string[] = [];
@@ -70,12 +70,14 @@ Object.assign(globalThis, {
   }) as typeof fetch,
 });
 
-test("the token alarm refreshes an expiring token in a freshly woken background", async () => {
+test("the token alarm in a freshly woken background neither logs in nor drops tokens", async () => {
   await import("../src/background/background.ts");
-  // Filter lists are fetched too; count only the token refresh.
+  // Filter lists are fetched too; count only the backend.
   fetchCalls.length = 0;
   for (const listener of alarmListeners) {
     await listener({ name: "token-refresh-check" });
   }
-  expect(fetchCalls).toContain("https://wallabag.example.com/oauth/v2/token");
+  await Bun.sleep(10);
+  expect(fetchCalls.filter((url) => url.startsWith("https://wallabag.example.com"))).toEqual([]);
+  expect(local.api_tokens).toEqual([["wallabag", expiring]]);
 });

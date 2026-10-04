@@ -548,13 +548,11 @@ async function initialize(): Promise<void> {
 }
 browser.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === TOKEN_CHECK_ALARM_NAME) {
-    try {
-      // A woken service worker has no adapter yet to say how to refresh.
-      await (await getArticlesRepository()).initializeApi();
-      await tokenManager.checkAndRefreshTokens();
-    } catch (error) {
-      logger.error("Error checking tokens:", error);
-    }
+    // Refreshes the tokens of the backends in use since the background
+    // started. A Chromium service worker that this alarm woke has none: its
+    // adapter logs in or refreshes when the backend is next used.
+    await startup();
+    await tokenManager.checkAndRefreshTokens();
   } else if (alarm.name === "refresh") {
     try {
       const articlesRepository = await getArticlesRepository();
