@@ -25,6 +25,7 @@ Object.assign(globalThis, {
     runtime: {
       onMessage: { addListener: (l: Listener) => listeners.push(l) },
       onInstalled: { addListener: () => {} },
+      onStartup: { addListener: () => {} },
       contextMenus: undefined,
     },
     storage: {
@@ -57,7 +58,12 @@ Object.assign(globalThis, {
       create: async () => ({ id: "x", title: "t", url: "u" }),
       remove: async () => {},
     },
-    alarms: { clear: async () => {}, create: async () => {}, onAlarm: { addListener: () => {} } },
+    alarms: {
+      clear: async () => {},
+      create: async () => {},
+      get: async () => undefined,
+      onAlarm: { addListener: () => {} },
+    },
     contextMenus: {
       create: () => ({}),
       onClicked: { addListener: () => {} },
@@ -72,7 +78,14 @@ Object.assign(globalThis, {
       onRemoved: { addListener: () => {} },
       contains: async () => true,
     },
-    tabs: { query: async () => [], sendMessage: async () => {}, create: async () => ({}), get: async () => ({}) },
+    tabs: {
+      query: async () => [],
+      sendMessage: async () => {},
+      create: async () => ({}),
+      get: async () => ({}),
+      onUpdated: { addListener: () => {} },
+      onActivated: { addListener: () => {} },
+    },
   },
   fetch: (async (input: unknown) => {
     fetchCalls.push(String(input));

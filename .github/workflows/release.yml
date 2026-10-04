@@ -24,13 +24,16 @@ jobs:
 
       - run: bun run lint
       - run: bun run format:check
-      - run: bun test
+      - run: bun test --isolate
 
       - name: Build and sign extension
         env:
           AMO_API_KEY: ${{ secrets.AMO_API_KEY }}
           AMO_API_SECRET: ${{ secrets.AMO_API_SECRET }}
         run: bun run release:sign
+
+      - name: Build the Chromium packages
+        run: bun run package:chromium
 
       - name: Read bumped version
         if: always()
@@ -62,5 +65,6 @@ jobs:
         run: |
           gh release create "v${{ steps.version.outputs.version }}" \
             dist/signed/*.xpi \
+            dist/packages/*-chromium-*.zip \
             --title "v${{ steps.version.outputs.version }}" \
             --generate-notes

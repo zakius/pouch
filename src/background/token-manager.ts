@@ -1,6 +1,6 @@
 import { logger } from "../utils/logger";
 
-const TOKEN_CHECK_ALARM_NAME = "token-refresh-check";
+export const TOKEN_CHECK_ALARM_NAME = "token-refresh-check";
 
 export interface TokenMetadata {
   accessToken: string;
@@ -66,20 +66,15 @@ export class TokenManager {
     }
 
     try {
-      // Clear any existing alarm
-      await browser.alarms.clear(TOKEN_CHECK_ALARM_NAME);
-
-      // Create periodic alarm
-      await browser.alarms.create(TOKEN_CHECK_ALARM_NAME, {
-        periodInMinutes: this.config.checkIntervalMinutes,
-      });
-
-      // Set up alarm listener
-      browser.alarms.onAlarm.addListener(async (alarm) => {
-        if (alarm.name === TOKEN_CHECK_ALARM_NAME) {
-          await this.checkAndRefreshTokens();
-        }
-      });
+      // Chromium keeps alarms while its service worker sleeps: recreating
+      // the alarm on every wake would push it back each time. The background
+      // script's onAlarm listener calls checkAndRefreshTokens().
+      const existing = await browser.alarms.get(TOKEN_CHECK_ALARM_NAME);
+      if (existing?.periodInMinutes !== this.config.checkIntervalMinutes) {
+        await browser.alarms.create(TOKEN_CHECK_ALARM_NAME, {
+          periodInMinutes: this.config.checkIntervalMinutes,
+        });
+      }
 
       this.alarmInitialized = true;
       logger.info("Token refresh alarm initialized", {
@@ -353,7 +348,7 @@ export class TokenManager {
     }
   }
 
-  private async checkAndRefreshTokens(): Promise<void> {
+  public async checkAndRefreshTokens(): Promise<void> {
     const now = Date.now();
     const thresholdMs =
       this.config.checkIntervalMinutes * this.config.expirationThresholdChecks * 60 * 1000;

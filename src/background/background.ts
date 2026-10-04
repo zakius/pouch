@@ -1,3 +1,9 @@
+import {
+  IS_CHROMIUM,
+  type PageStateMessage,
+  QUICK_ACTIONS_ID,
+  type QuickActionMessage,
+} from "../utils/chromium";
 import { refreshFilterLists } from "../utils/filter-list-manager";
 import { logger } from "../utils/logger";
 import { getMissingOrigins, messageForOrigins } from "../utils/backend-permissions";
@@ -8,7 +14,7 @@ import {
   getAccountIdentity,
   removeStaleAccountKeys,
 } from "./articles-repository";
-import { TokenManager, tokenManager } from "./token-manager";
+import { TOKEN_CHECK_ALARM_NAME, TokenManager, tokenManager } from "./token-manager";
 
 /**
  * Validates a URL string. Returns true if valid, false otherwise.
@@ -92,7 +98,22 @@ interface Tab {
 const REFRESH_INTERVAL = 30;
 let articlesRepository: ArticlesRepository;
 let initializePromise: Promise<void> | null = null;
+let startupPromise: Promise<void> | null = null;
+let urlCanonizerPromise: Promise<void> | null = null;
+// What every start of the background needs, also each time Chromium's
+// service worker wakes up. The URL rules may download filter lists, so
+// requests don't wait for them; initialize() does.
+function startup(): Promise<void> {
+  startupPromise ??= (async () => {
+    await logger.initialize();
+    urlCanonizerPromise = initializeUrlCanonizer();
+    await tokenManager.loadTokens();
+    logger.info("Token manager initialized");
+  })();
+  return startupPromise;
+}
 async function getArticlesRepository(): Promise<ArticlesRepository> {
+  await startup();
   if (!articlesRepository) {
     const settings = await getSettings();
     articlesRepository = new ArticlesRepository();
@@ -306,11 +327,13 @@ browser.contextMenus.onClicked.addListener(async (info: OnClickData, tab?: Tab) 
     notifyError(info.menuItemId === "save-page" ? "toggle page" : "save link", error);
   }
 });
+// Chromium's service worker can't draw an SVG.
+const NOTIFICATION_ICON = IS_CHROMIUM ? "icons/icon-128.png" : "icons/icon.svg";
 const ERROR_NOTIFICATION_ID = "pouch-error";
 function notifyError(operation: string, error: unknown): void {
   void browser.notifications.create(ERROR_NOTIFICATION_ID, {
     type: "basic",
-    iconUrl: "icons/icon.svg",
+    iconUrl: NOTIFICATION_ICON,
     title: `Pouch — failed to ${operation}`,
     message: (error as Error).message || "Unknown error",
   });
@@ -325,7 +348,7 @@ async function warnIfPermissionsMissing(): Promise<void> {
   try {
     await browser.notifications.create(PERMISSIONS_NOTIFICATION_ID, {
       type: "basic",
-      iconUrl: "icons/icon.svg",
+      iconUrl: NOTIFICATION_ICON,
       title: "Pouch — permission needed",
       message: messageForOrigins(missing),
     });
@@ -370,9 +393,22 @@ async function togglePageSave(tab: Tab): Promise<void> {
     notifyError("toggle page", error);
   }
 }
-browser.pageAction.onClicked.addListener((tab) => {
-  void togglePageSave(tab);
-});
+if (IS_CHROMIUM) {
+  browser.runtime.onMessageExternal.addListener(async (message: QuickActionMessage, sender) => {
+    if (sender.id !== QUICK_ACTIONS_ID) {
+      return;
+    }
+    if (message?.type === "togglePage") {
+      await togglePageSave(await browser.tabs.get(message.tabId));
+    } else if (message?.type === "refreshUi") {
+      await refreshActiveTabUi();
+    }
+  });
+} else {
+  browser.pageAction.onClicked.addListener((tab) => {
+    void togglePageSave(tab);
+  });
+}
 browser.commands.onCommand.addListener(async (command) => {
   if (command !== "toggle-save-page") {
     return;
@@ -398,13 +434,18 @@ async function updateUiForTab(tabId: number): Promise<void> {
     const articlesRepository = await getArticlesRepository();
     const existingArticle = await articlesRepository.findSaved(tab.url);
     const isSaved = !!existingArticle;
-    const iconPath = getIconPath(isSaved);
-    await browser.pageAction.setIcon({ tabId, path: iconPath });
-    browser.pageAction.setTitle({
-      tabId,
-      title: isSaved ? "Article saved" : "Save to Pouch",
-    });
-    await browser.pageAction.show(tabId);
+    if (IS_CHROMIUM) {
+      const state: PageStateMessage = { type: "pageState", tabId, saved: isSaved };
+      // Quick Actions may not be installed.
+      await browser.runtime.sendMessage(QUICK_ACTIONS_ID, state).catch(() => {});
+    } else {
+      await browser.pageAction.setIcon({ tabId, path: getIconPath(isSaved) });
+      browser.pageAction.setTitle({
+        tabId,
+        title: isSaved ? "Article saved" : "Save to Pouch",
+      });
+      await browser.pageAction.show(tabId);
+    }
     await browser.contextMenus.update("save-page", {
       title: isSaved ? "Remove page" : "Save page",
       enabled: true,
@@ -439,18 +480,48 @@ function isValidHttpUrl(url: string) {
     return false;
   }
 }
+const onTabUpdated = (
+  tabId: number,
+  changeInfo: browser.tabs._OnUpdatedChangeInfo,
+  tab: browser.tabs.Tab,
+) => {
+  if (changeInfo.status === "complete" && tab.url && isValidHttpUrl(tab.url)) {
+    void updateUiForTab(tabId);
+  }
+};
+// Chromium has no filter argument and rejects one.
+if (IS_CHROMIUM) {
+  browser.tabs.onUpdated.addListener(onTabUpdated);
+} else {
+  browser.tabs.onUpdated.addListener(onTabUpdated, { properties: ["status"] });
+}
+browser.tabs.onActivated.addListener(async (activeInfo) => {
+  await updateUiForTab(activeInfo.tabId);
+});
+
 async function initialize(): Promise<void> {
   if (initializePromise) {
     return initializePromise;
   }
   initializePromise = (async () => {
     await browser.contextMenus.removeAll();
-    await logger.initialize();
+    await startup();
+    // Menus and alarms first: a Chromium service worker may be stopped while
+    // the filter lists or the first sync still load.
+    browser.contextMenus.create({
+      id: "save-link",
+      title: "Save link",
+      contexts: ["link"],
+    });
+    browser.contextMenus.create({
+      id: "save-page",
+      title: "Save page",
+      contexts: [IS_CHROMIUM ? "action" : "browser_action"] as browser.menus.ContextType[],
+    });
+    void browser.alarms.create("refresh", { periodInMinutes: REFRESH_INTERVAL });
+    void browser.alarms.create("refresh-filters", { periodInMinutes: 24 * 60 });
+    await urlCanonizerPromise;
     logger.info("Background script initialized");
-    await initializeUrlCanonizer();
-
-    await tokenManager.loadTokens();
-    logger.info("Token manager initialized");
 
     const articlesRepository = await getArticlesRepository();
     try {
@@ -465,29 +536,6 @@ async function initialize(): Promise<void> {
     } catch (error) {
       logger.warn("Failed to sync during initialization:", error);
     }
-    browser.contextMenus.create({
-      id: "save-link",
-      title: "Save link",
-      contexts: ["link"],
-    });
-    browser.contextMenus.create({
-      id: "save-page",
-      title: "Save page",
-      contexts: ["browser_action"],
-    });
-    void browser.alarms.create("refresh", { periodInMinutes: REFRESH_INTERVAL });
-    void browser.alarms.create("refresh-filters", { periodInMinutes: 24 * 60 });
-    browser.tabs.onUpdated.addListener(
-      (tabId, changeInfo, tab) => {
-        if (changeInfo.status === "complete" && tab.url && isValidHttpUrl(tab.url)) {
-          void updateUiForTab(tabId);
-        }
-      },
-      { properties: ["status"] },
-    );
-    browser.tabs.onActivated.addListener(async (activeInfo) => {
-      await updateUiForTab(activeInfo.tabId);
-    });
     const tabs = await browser.tabs.query({
       active: true,
       currentWindow: true,
@@ -499,7 +547,13 @@ async function initialize(): Promise<void> {
   return initializePromise;
 }
 browser.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name === "refresh") {
+  if (alarm.name === TOKEN_CHECK_ALARM_NAME) {
+    // Refreshes the tokens of the backends in use since the background
+    // started. A Chromium service worker that this alarm woke has none: its
+    // adapter logs in or refreshes when the backend is next used.
+    await startup();
+    await tokenManager.checkAndRefreshTokens();
+  } else if (alarm.name === "refresh") {
     try {
       const articlesRepository = await getArticlesRepository();
       // Let the adapter decide the sync mode based on history and idle state
@@ -534,6 +588,12 @@ browser.runtime.onInstalled.addListener(async (details) => {
   }
 });
 
-initialize().catch((error) => {
+browser.runtime.onStartup.addListener(async () => {
+  await initialize();
+});
+
+// Chromium's service worker comes and goes: it initializes on install and
+// browser start, and its menus and alarms outlive it.
+(IS_CHROMIUM ? startup() : initialize()).catch((error) => {
   logger.error("Failed to initialize extension:", error);
 });

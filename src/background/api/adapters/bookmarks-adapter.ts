@@ -1,4 +1,5 @@
 import * as v from "valibot";
+import { IS_CHROMIUM } from "../../../utils/chromium";
 import { bookmarksSettingsSchema } from "../../../utils/settings-schemas";
 export { bookmarksSettingsSchema };
 import type { Article } from "../../../types/common";
@@ -56,7 +57,8 @@ export class BookmarksAdapter implements ReadItLaterAPI<BookmarksSettings> {
 
     const folder = await browser.bookmarks.create({
       title: this.POUCH_FOLDER_NAME,
-      parentId: "unfiled_____", // Other bookmarks folder in Firefox
+      // Other bookmarks; Chromium's ID for it is "2".
+      parentId: IS_CHROMIUM ? "2" : "unfiled_____",
     });
 
     this.pouchFolderId = folder.id;

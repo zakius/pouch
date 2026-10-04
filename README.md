@@ -46,6 +46,19 @@ bun run package
 
 The built extension will be available in the `dist/packages` directory.
 
+### Chromium
+
+```bash
+bun run package:chromium
+```
+
+builds the same source for Chromium as two MV3 extensions in `dist/packages`:
+
+- `pouch-chromium-<version>.zip`: Pouch, without its page action. Chromium allows one action per extension.
+- `pouch-quick-actions-chromium-<version>.zip`: Pouch Quick Actions, a toolbar button that saves or removes the current page. It asks Pouch over runtime messages, so it needs Pouch.
+
+Load both unpacked (`chrome://extensions`, developer mode, "Load unpacked" on each folder). The `key`s in their manifests fix their IDs, which the two use to find each other (`src/utils/chromium.ts`). Code that differs between the builds checks `IS_CHROMIUM`. The Chromium build has its own extension ID, so its settings start empty. Releases attach both packages.
+
 ## Development
 
 - `bun run watch` - Start development server and watch for changes.
@@ -54,6 +67,7 @@ The built extension will be available in the `dist/packages` directory.
 - `bun run release:sign` - Build and sign the extension for AMO (requires AMO_API_KEY and AMO_API_SECRET).
 - `bun run lint` - Run oxlint (with type-aware, type-checked rules) to check code quality.
 - `bun run format` - Format the source files with oxfmt.
+- `bun run test` - Run the tests, each file with fresh globals and modules (`--isolate`: tests import the background script with their own `browser` mock).
 
 ## Project Structure
 

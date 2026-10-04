@@ -3,15 +3,13 @@ import { type TokenMetadata, TokenManager } from "../src/background/token-manage
 
 interface AlarmsMock {
   create: ReturnType<typeof mock>;
-  clear: ReturnType<typeof mock>;
-  listener?: (alarm: { name: string }) => Promise<void>;
+  existing?: { name: string; periodInMinutes: number };
 }
 
 function setupBrowser() {
   const storage: Record<string, unknown> = {};
   const alarms: AlarmsMock = {
     create: mock(() => ({})),
-    clear: mock(async () => {}),
   };
   Object.assign(globalThis, {
     browser: {
@@ -25,12 +23,7 @@ function setupBrowser() {
       },
       alarms: {
         create: alarms.create,
-        clear: alarms.clear,
-        onAlarm: {
-          addListener: (listener: AlarmsMock["listener"]) => {
-            alarms.listener = listener;
-          },
-        },
+        get: async () => alarms.existing,
       },
     },
   });
@@ -102,7 +95,15 @@ test("the periodic alarm refreshes an expiring token without deleting credential
   const metadata = manager.getTokenMetadata("wallabag");
   expect(metadata?.accessToken).toBe("new-access");
   expect(Array.from(storage.api_tokens as [string, TokenMetadata][])).toHaveLength(1);
-  expect(alarms.listener).toBeDefined();
+  expect(alarms.create).toHaveBeenCalledWith("token-refresh-check", { periodInMinutes: 5 });
+});
+
+test("loading tokens keeps a running refresh alarm, as when Chromium's worker wakes", async () => {
+  const { alarms, storage } = setupBrowser();
+  storage.api_tokens = [["wallabag", { ...baseToken, serviceName: "wallabag" }]];
+  alarms.existing = { name: "token-refresh-check", periodInMinutes: 5 };
+  await new TokenManager().loadTokens();
+  expect(alarms.create).not.toHaveBeenCalled();
 });
 
 test("concurrent refresh callers share a single request and result", async () => {

@@ -1,3 +1,4 @@
+import "../utils/chromium";
 import type { Article } from "../types/common";
 import { logger } from "../utils/logger";
 
