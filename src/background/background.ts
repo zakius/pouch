@@ -1,3 +1,4 @@
+import { parseRuntimeMessage, errorResponse } from "./runtime-message";
 import {
   assertStorageHealthy,
   FatalStorageError,
@@ -14,7 +15,7 @@ import {
 import { refreshFilterLists } from "../utils/filter-list-manager";
 import { logger } from "../utils/logger";
 import { getMissingOrigins, messageForOrigins } from "../utils/backend-permissions";
-import { getSettings, type Settings, saveSettings } from "../utils/settings";
+import { getSettings, saveSettings } from "../utils/settings";
 import { clearCanonicalUrlCache, initializeUrlCanonizer } from "../utils/url-helpers";
 import {
   ArticlesRepository,
@@ -47,53 +48,6 @@ function sanitizeSearch(search: string): string {
   return sanitized;
 }
 
-interface SaveArticleMessage {
-  type: "saveArticle";
-  payload: {
-    url: string;
-    title: string;
-  };
-}
-interface CheckArticleMessage {
-  type: "checkArticle";
-  payload: {
-    url: string;
-  };
-}
-interface GetArticlesMessage {
-  type: "getArticles";
-  payload: {
-    page?: number;
-    perPage?: number;
-    search?: string;
-  };
-}
-interface DeleteArticleMessage {
-  type: "deleteArticle";
-  payload: {
-    articleId: number | string;
-  };
-}
-interface SaveSettingsMessage {
-  type: "saveSettings";
-  payload: {
-    settings: Settings;
-  };
-}
-interface TestConnectionMessage {
-  type: "testConnection";
-  payload: {
-    settings: Settings;
-  };
-}
-type Message =
-  | SaveArticleMessage
-  | CheckArticleMessage
-  | GetArticlesMessage
-  | DeleteArticleMessage
-  | SaveSettingsMessage
-  | TestConnectionMessage
-  | { type: "getStorageDiagnostic" };
 interface OnClickData {
   menuItemId: string | number;
   linkUrl?: string;
@@ -145,7 +99,7 @@ async function getArticlesRepository(): Promise<ArticlesRepository> {
 }
 browser.runtime.onMessage.addListener(
   (
-    message: Message,
+    rawMessage: unknown,
     _sender: browser.runtime.MessageSender,
     sendResponse: (response?: unknown) => void,
   ): boolean => {
@@ -154,14 +108,19 @@ browser.runtime.onMessage.addListener(
       const safeSendResponse = (response: unknown) => {
         if (!responseSent) {
           responseSent = true;
+          const fatal = getStorageDiagnostic();
+          const result = response instanceof FatalStorageError ? errorResponse(response) : response;
           sendResponse(
-            response instanceof FatalStorageError
-              ? response.diagnostic
-              : (getStorageDiagnostic() ?? response),
+            fatal
+              ? errorResponse(new FatalStorageError(fatal))
+              : result && typeof result === "object" && "error" in result && !("code" in result)
+                ? { ...result, code: "INVALID_REQUEST", details: {} }
+                : result,
           );
         }
       };
       try {
+        const message = parseRuntimeMessage(rawMessage);
         if (message.type === "getStorageDiagnostic") {
           safeSendResponse(await readStorageDiagnostic());
           return;
@@ -307,12 +266,14 @@ browser.runtime.onMessage.addListener(
               const success = await testRepo.testConnection();
               safeSendResponse({
                 success,
-                error: success ? undefined : "Connection failed",
+                ...(success
+                  ? {}
+                  : { error: "Connection failed", code: "CONNECTION_FAILED", details: {} }),
               });
             } catch (error) {
               safeSendResponse({
                 success: false,
-                error: (error as Error).message,
+                ...errorResponse(error),
               });
             }
             return;
@@ -325,11 +286,7 @@ browser.runtime.onMessage.addListener(
       } catch (error) {
         logger.error(`Error handling message:`, error);
         if (!responseSent) {
-          safeSendResponse(
-            error instanceof FatalStorageError
-              ? error
-              : (getStorageDiagnostic() ?? { error: (error as Error).message || "Unknown error" }),
-          );
+          safeSendResponse(errorResponse(error));
         }
       }
     })();

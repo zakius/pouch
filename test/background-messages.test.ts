@@ -19,6 +19,7 @@ const syncStore: Record<string, unknown> = {
 };
 const localStore: Record<string, unknown> = {};
 const fetchCalls: string[] = [];
+let rejectBookmarkRead = false;
 
 Object.assign(globalThis, {
   browser: {
@@ -54,7 +55,10 @@ Object.assign(globalThis, {
     },
     bookmarks: {
       getTree: async () => [{ id: "1", title: "Pouch", children: [] }],
-      getChildren: async () => [],
+      getChildren: async () => {
+        if (rejectBookmarkRead) throw new Error("permission denied https://private.example/token");
+        return [];
+      },
       create: async () => ({ id: "x", title: "t", url: "u" }),
       remove: async () => {},
     },
@@ -149,4 +153,20 @@ test("saveSettings and testConnection respond", async () => {
   console.log("testConnection response:", JSON.stringify(testResult), "fetches:", fetchCalls);
   expect(saveResult).not.toBe("TIMEOUT");
   expect(testResult).not.toBe("TIMEOUT");
+});
+
+
+test("runtime bookmark connection failures expose safe details and malformed requests are rejected", async () => {
+  await import("../src/background/background.ts");
+  const settings = { backend: "bookmarks", apiConfig: {}, logLevel: 3, normalizeOnSave: false, normalizeOnCompare: false };
+  rejectBookmarkRead = true;
+  const response = await sendMessage({ type: "testConnection", payload: { settings } });
+  expect(response).toMatchObject({ success: false, code: "BrowserFailure", details: { operation: "test bookmarks connection" } });
+  expect(JSON.stringify(response)).not.toContain("private.example");
+  expect(response).toHaveProperty("error");
+  for (const message of [null, { type: "saveArticle" }, { type: "saveArticle", payload: { url: 42 } }]) {
+    expect(await sendMessage(message)).toMatchObject({ code: "INVALID_REQUEST", details: {} });
+  }
+  rejectBookmarkRead = false;
+  expect(await sendMessage({ type: "testConnection", payload: { settings } })).toEqual({ success: true });
 });

@@ -9,6 +9,7 @@ export interface StorageDiagnostic {
 }
 
 export class FatalStorageError extends Error {
+  readonly _tag = "FatalStorageFailure";
   constructor(readonly diagnostic: StorageDiagnostic) {
     super(diagnostic.error);
     this.name = "FatalStorageError";

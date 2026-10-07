@@ -121,7 +121,7 @@ test("failed remote deletion preserves cached articles", async () => {
   });
   const repository = new ArticlesRepository();
   await repository.initialize(DEFAULT_SETTINGS);
-  await expect(repository.deleteArticle(1)).rejects.toThrow("Deletion failed");
+  await expect(repository.deleteArticle(1)).rejects.toThrow("Browser delete bookmark failed");
   expect(await repository.getAllArticles()).toEqual([article]);
   expect(storage[keys.articles]).toEqual([article]);
   remove.mockResolvedValue(undefined);

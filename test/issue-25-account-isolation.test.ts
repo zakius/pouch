@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, expect, test, mock, spyOn } from "bun:test";
+import { mockReadyAdapter } from "./fixtures/ready-adapter-mock";
+import { beforeEach, afterEach, beforeEach, expect, test, mock, spyOn } from "bun:test";
 import type { Article } from "../src/types/common";
 import { BookmarksAdapter } from "../src/background/api/adapters/bookmarks-adapter";
 import {
@@ -9,6 +10,8 @@ import {
 import { TokenManager, tokenManager } from "../src/background/token-manager";
 import { getAdapter } from "../src/utils/adapter-factory";
 import { DEFAULT_SETTINGS } from "../src/utils/settings";
+
+beforeEach(() => { mockReadyAdapter(); });
 
 const originalBrowser = Object.getOwnPropertyDescriptor(globalThis, "browser");
 

@@ -1,3 +1,4 @@
+import { Effect } from "effect";
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { DEFAULT_SETTINGS, type Settings } from "../src/utils/settings";
 import { ArticlesRepository, getAccountStorageKeys } from "../src/background/articles-repository";
@@ -43,7 +44,7 @@ function dataUrl(content: string): string {
 
 type WithPrivate = ArticlesRepository & {
   addArticle: (article: Article) => Promise<void>;
-  api: unknown;
+  bookmarkApi: unknown;
 };
 
 beforeEach(async () => {
@@ -172,7 +173,7 @@ test("Duplicate detection follows the comparison setting", async () => {
 test("Saving honors normalizeOnSave independently", async () => {
   const fakeApi = {
     initialize: async () => {},
-    saveArticle: async (input: { url: string; title: string }) => ({
+    saveArticle: (input: { url: string; title: string }) => Effect.succeed({
       id: 7,
       url: input.url,
       title: input.title,
@@ -182,7 +183,7 @@ test("Saving honors normalizeOnSave independently", async () => {
 
   const rawRepository = new ArticlesRepository();
   await rawRepository.initialize({ ...DEFAULT_SETTINGS, normalizeOnSave: false });
-  (rawRepository as WithPrivate).api = fakeApi;
+  (rawRepository as WithPrivate).bookmarkApi = Promise.resolve(fakeApi);
   const rawSaved = await rawRepository.saveArticle({ url: "https://youtu.be/abc123", title: "Video" });
   expect(rawSaved.url).toBe("https://youtu.be/abc123");
   expect(rawSaved.canonicalUrl).toBe("https://www.youtube.com/watch?v=abc123");
@@ -196,7 +197,7 @@ test("Saving honors normalizeOnSave independently", async () => {
     normalizeOnSave: true,
     normalizeOnCompare: false,
   });
-  (normalizedRepository as WithPrivate).api = fakeApi;
+  (normalizedRepository as WithPrivate).bookmarkApi = Promise.resolve(fakeApi);
   const normalizedSaved = await normalizedRepository.saveArticle({
     url: "https://youtu.be/abc123",
     title: "Video",
