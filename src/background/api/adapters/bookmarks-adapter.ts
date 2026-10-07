@@ -1,4 +1,5 @@
 import { Effect } from "effect";
+import { reportRemoteOutcome } from "../../../utils/fatal-storage";
 import * as v from "valibot";
 import { IS_CHROMIUM } from "../../../utils/chromium";
 import { bookmarksSettingsSchema, type BookmarksSettings } from "../../../utils/settings-schemas";
@@ -9,6 +10,7 @@ import {
   ConfigurationFailure,
   PermissionFailure,
   runOperation,
+  recordMutationSuccess,
   storageHealthy,
   type AcquisitionError,
   type EffectAdapter,
@@ -60,7 +62,34 @@ export const createBookmarksAdapter = Effect.fn("bookmarks.acquire")(function* (
       const requestPromise = request();
       return Effect.tryPromise({
         try: () => requestPromise,
-        catch: () => new BrowserFailure(operation),
+        catch: (error) => {
+          const message =
+            error instanceof Error ? error.message : typeof error === "string" ? error : "";
+          const name =
+            error instanceof Error &&
+            [
+              "NotFoundError",
+              "NotAllowedError",
+              "SecurityError",
+              "InvalidStateError",
+              "TypeError",
+              "Error",
+            ].includes(error.name)
+              ? error.name
+              : undefined;
+          const reason =
+            name === "NotFoundError" ||
+            /(?:bookmark|folder|parent).*not found|no (?:bookmark|folder|parent)/i.test(message)
+              ? "missing-folder"
+              : name === "NotAllowedError" ||
+                  name === "SecurityError" ||
+                  /permission denied|access denied|not permitted/i.test(message)
+                ? "permission-denied"
+                : /unavailable|disabled|not supported/i.test(message)
+                  ? "unavailable"
+                  : "unknown";
+          return new BrowserFailure(operation, reason, name ? { name } : undefined);
+        },
       });
     });
   }
@@ -96,22 +125,26 @@ export const createBookmarksAdapter = Effect.fn("bookmarks.acquire")(function* (
     formConfig: [],
     saveArticle: Effect.fn("bookmarks.save")(function* (article: SavingArticle) {
       yield* storageHealthy;
-      yield* permissionHealthy;
+      yield* permissionHealthy.pipe(Effect.interruptible);
       yield* storageHealthy;
-      const bookmark = yield* call("save bookmark", () =>
-        bookmarks.create({
-          parentId: folderId,
-          title: article.title,
-          url: article.url,
-        }),
-      );
-      return toArticle(bookmark);
+      return yield* Effect.gen(function* () {
+        const bookmark = yield* call("save bookmark", () =>
+          bookmarks.create({ parentId: folderId, title: article.title, url: article.url }),
+        );
+        reportRemoteOutcome("save", "succeeded");
+        yield* recordMutationSuccess("save");
+        return toArticle(bookmark);
+      }).pipe(Effect.uninterruptible);
     }),
     deleteArticle: Effect.fn("bookmarks.delete")(function* (id: number | string) {
       yield* storageHealthy;
-      yield* permissionHealthy;
+      yield* permissionHealthy.pipe(Effect.interruptible);
       yield* storageHealthy;
-      yield* call("delete bookmark", () => bookmarks.remove(String(id)));
+      yield* Effect.gen(function* () {
+        yield* call("delete bookmark", () => bookmarks.remove(String(id)));
+        reportRemoteOutcome("delete", "succeeded");
+        yield* recordMutationSuccess("delete");
+      }).pipe(Effect.uninterruptible);
     }),
     sync: Effect.fn("bookmarks.sync")(function* (options?: SyncOptions) {
       yield* storageHealthy;

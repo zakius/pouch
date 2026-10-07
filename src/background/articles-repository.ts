@@ -175,28 +175,33 @@ export class ArticlesRepository {
   ) {
     const api = yield* fromLegacyPromise(() => this.getBookmarkApi());
     const canonicalUrl = yield* fromLegacyPromise(() => canonicalizeUrl(article.url));
-    const savedArticle = yield* api.saveArticle({
-      url: this.settings.normalizeOnSave ? canonicalUrl : article.url,
-      title: article.title,
-    });
-    reportRemoteOutcome("save", "succeeded");
-    const saved = { ...savedArticle, canonicalUrl };
-    yield* fromLegacyPromise(() => this.addArticle(saved, "succeeded", "save"));
-    if (this.syncInProgress)
-      this.pendingOperations.push({ type: "save", article: saved, timestamp: Date.now() });
-    return saved;
+    // Browser mutations cannot be cancelled after submission; commit and bookkeeping must finish together.
+    return yield* Effect.gen({ self: this }, function* () {
+      const savedArticle = yield* api.saveArticle({
+        url: this.settings.normalizeOnSave ? canonicalUrl : article.url,
+        title: article.title,
+      });
+      reportRemoteOutcome("save", "succeeded");
+      const saved = { ...savedArticle, canonicalUrl };
+      yield* fromLegacyPromise(() => this.addArticle(saved, "succeeded", "save"));
+      if (this.syncInProgress)
+        this.pendingOperations.push({ type: "save", article: saved, timestamp: Date.now() });
+      return saved;
+    }).pipe(Effect.uninterruptible);
   });
   readonly deleteArticleEffect = Effect.fn("repository.delete")(function* (
     this: ArticlesRepository,
     id: number | string,
   ) {
     const api = yield* fromLegacyPromise(() => this.getBookmarkApi());
-    yield* api.deleteArticle(id);
-    reportRemoteOutcome("delete", "succeeded");
-    yield* fromLegacyPromise(() => this.removeArticle(id, "succeeded", "delete"));
-    if (this.syncInProgress)
-      this.pendingOperations.push({ type: "delete", articleId: id, timestamp: Date.now() });
-    return { success: true, id };
+    return yield* Effect.gen({ self: this }, function* () {
+      yield* api.deleteArticle(id);
+      reportRemoteOutcome("delete", "succeeded");
+      yield* fromLegacyPromise(() => this.removeArticle(id, "succeeded", "delete"));
+      if (this.syncInProgress)
+        this.pendingOperations.push({ type: "delete", articleId: id, timestamp: Date.now() });
+      return { success: true, id };
+    }).pipe(Effect.uninterruptible);
   });
   // Shared Promise sync/commit coordination is migrated in #80 and its bridge removed in #81.
   readonly syncWithAPIEffect = Effect.fn("repository.sync")((options?: SyncOptions) =>

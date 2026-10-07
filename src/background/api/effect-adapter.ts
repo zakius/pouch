@@ -1,4 +1,4 @@
-import { Cause, Effect, Exit, Option } from "effect";
+import { Cause, Context, Effect, Exit, Option } from "effect";
 import { logger } from "../../utils/logger";
 import type { Article } from "../../types/common";
 import {
@@ -27,8 +27,20 @@ export class PermissionFailure extends Error {
 }
 export class BrowserFailure extends Error {
   readonly _tag = "BrowserFailure";
-  constructor(readonly operation: string) {
-    super(`Browser ${operation} failed. Check browser bookmarks access and try again.`);
+  constructor(
+    readonly operation: string,
+    readonly reason: "missing-folder" | "permission-denied" | "unavailable" | "unknown" = "unknown",
+    readonly cause?: { name: string },
+  ) {
+    const guidance = {
+      "missing-folder":
+        "The bookmark folder is missing. Check the Pouch folder in browser bookmarks.",
+      "permission-denied":
+        "Browser denied bookmarks access. Grant bookmarks permission in extension settings.",
+      unavailable: "The browser bookmarks API is unavailable. Check extension availability.",
+      unknown: "Check browser bookmarks access and try again.",
+    };
+    super(`Browser ${operation} failed. ${guidance[reason]}`);
   }
 }
 export class FatalStorageFailure extends FatalStorageError {
@@ -96,10 +108,29 @@ export class OperationDefect extends Error {
     super("Unexpected background error. Check the extension diagnostics.");
   }
 }
+type MutationOutcome = { remoteOperation: "save" | "delete"; remoteOutcome: "succeeded" };
+const OperationProgress = Context.Service<{ mutation?: MutationOutcome }>(
+  "pouch/OperationProgress",
+);
+
+export const recordMutationSuccess = (remoteOperation: MutationOutcome["remoteOperation"]) =>
+  Effect.gen(function* () {
+    const progress = yield* Effect.serviceOption(OperationProgress);
+    if (Option.isSome(progress))
+      progress.value.mutation = { remoteOperation, remoteOutcome: "succeeded" };
+  });
+
 export class OperationInterrupted extends Error {
   readonly _tag = "OperationInterrupted";
-  constructor(readonly cause: Cause.Cause<unknown>) {
-    super("The operation was interrupted.");
+  constructor(
+    readonly cause: Cause.Cause<unknown>,
+    readonly mutation?: MutationOutcome,
+  ) {
+    super(
+      mutation
+        ? `The operation was interrupted. Remote ${mutation.remoteOperation} succeeded. Do not repeat it.`
+        : "The operation was interrupted. Check its outcome before repeating it.",
+    );
   }
 }
 
@@ -108,14 +139,20 @@ export async function runOperation<A, E>(
   operation: Effect.Effect<A, E>,
   signal?: AbortSignal,
 ): Promise<A> {
-  const exit = await Effect.runPromiseExit(operation, { signal });
+  const progress: { mutation?: MutationOutcome } = {};
+  const exit = await Effect.runPromiseExit(
+    operation.pipe(Effect.provideService(OperationProgress, progress)),
+    { signal },
+  );
   if (Exit.isSuccess(exit)) return exit.value;
   if (Cause.hasDies(exit.cause)) {
     logger.error("Effect operation defect:", Cause.pretty(exit.cause));
     throw new OperationDefect(exit.cause);
   }
-  if (Cause.hasInterrupts(exit.cause)) throw new OperationInterrupted(exit.cause);
   const failure = Cause.findErrorOption(exit.cause);
+  if (Option.isSome(failure) && failure.value instanceof FatalStorageError) throw failure.value;
+  if (Cause.hasInterrupts(exit.cause))
+    throw new OperationInterrupted(exit.cause, progress.mutation);
   if (Option.isSome(failure)) throw failure.value;
   throw new OperationDefect(exit.cause);
 }

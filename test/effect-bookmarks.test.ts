@@ -12,6 +12,7 @@ import {
   OperationInterrupted,
   fromLegacyPromise,
   runOperation,
+  recordMutationSuccess,
 } from "../src/background/api/effect-adapter";
 import { DEFAULT_SETTINGS } from "../src/utils/settings";
 import type { BookmarksSettings } from "../src/utils/settings-schemas";
@@ -218,4 +219,69 @@ test("a failed native sync acquisition permits a later retry", async () => {
   await expect(repo.syncWithAPI()).rejects.toBeInstanceOf(PermissionFailure);
   granted = true;
   expect((await repo.syncWithAPI()).items.map((article) => article.id)).toEqual([bookmarkId]);
+});
+
+for (const operation of ["save", "delete"]) {
+  for (const phase of ["remote", "commit", "prepare", "fatal", "failed-commit", "sync"]) {
+    test(`${operation} cancellation at ${phase} preserves mutation bookkeeping and fatal gates`, async () => {
+      const child = Bun.spawn(
+        ["bun", "test/fixtures/effect-bookmarks-cancellation.ts", operation, phase],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+      const stdout = await new Response(child.stdout).text();
+      const stderr = await new Response(child.stderr).text();
+      expect(await child.exited, stderr).toBe(0);
+      expect(stdout).toContain("cancellation-ok");
+    });
+  }
+}
+
+test("browser failures distinguish safe reasons and redact rejection payloads", async () => {
+  const api = await runOperation(createBookmarksAdapter(settings));
+  const cases = [
+    [new Error("Bookmark folder not found password=secret"), "missing-folder"],
+    [
+      new DOMException("Permission denied secret=https://private.example/token", "NotAllowedError"),
+      "permission-denied",
+    ],
+    [new Error("Browser API unavailable token=secret"), "unavailable"],
+    [
+      { message: "Permission denied", password: "secret", url: "https://private.example" },
+      "unknown",
+    ],
+  ] as const;
+  for (const [rejection, reason] of cases) {
+    browser.bookmarks.getChildren = () => Promise.reject(rejection);
+    const error = await runOperation(api.testConnection).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(BrowserFailure);
+    const response = errorResponse(error);
+    expect(response.details).toMatchObject({ reason });
+    if (reason === "permission-denied")
+      expect(response.details).toMatchObject({ cause: { name: "NotAllowedError" } });
+    expect(JSON.stringify(response)).not.toMatch(/secret|private.example|password|token/);
+    expect(JSON.parse(JSON.stringify(response))).toEqual(response);
+  }
+});
+
+test("interrupted outcome bookkeeping is isolated between runner invocations", async () => {
+  const submitted = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const firstController = new AbortController();
+  const first = runOperation(
+    Effect.gen(function* () {
+      submitted.resolve();
+      yield* Effect.promise(() => release.promise);
+      yield* recordMutationSuccess("save");
+    }).pipe(Effect.uninterruptible),
+    firstController.signal,
+  ).catch((error: unknown) => error);
+  await submitted.promise;
+  firstController.abort();
+  const unrelated = await runOperation(Effect.interrupt).catch((error: unknown) => error);
+  expect(errorResponse(unrelated).details).toEqual({});
+  release.resolve();
+  expect(errorResponse(await first).details).toEqual({
+    remoteOperation: "save",
+    remoteOutcome: "succeeded",
+  });
 });
