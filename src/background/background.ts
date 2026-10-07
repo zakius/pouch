@@ -1,4 +1,10 @@
 import {
+  assertStorageHealthy,
+  checkStorageOnStartup,
+  getStorageDiagnostic,
+  onFatalStorage,
+} from "../utils/fatal-storage";
+import {
   IS_CHROMIUM,
   type PageStateMessage,
   QUICK_ACTIONS_ID,
@@ -85,7 +91,8 @@ type Message =
   | GetArticlesMessage
   | DeleteArticleMessage
   | SaveSettingsMessage
-  | TestConnectionMessage;
+  | TestConnectionMessage
+  | { type: "getStorageDiagnostic" };
 interface OnClickData {
   menuItemId: string | number;
   linkUrl?: string;
@@ -105,8 +112,11 @@ let urlCanonizerPromise: Promise<void> | null = null;
 // requests don't wait for them; initialize() does.
 function startup(): Promise<void> {
   startupPromise ??= (async () => {
+    await checkStorageOnStartup();
     await logger.initialize();
+    assertStorageHealthy();
     urlCanonizerPromise = initializeUrlCanonizer();
+    void urlCanonizerPromise.catch((error) => logger.error("URL initialization failed:", error));
     await tokenManager.loadTokens();
     logger.info("Token manager initialized");
   })();
@@ -114,6 +124,7 @@ function startup(): Promise<void> {
 }
 async function getArticlesRepository(): Promise<ArticlesRepository> {
   await startup();
+  assertStorageHealthy();
   if (!articlesRepository) {
     const settings = await getSettings();
     articlesRepository = new ArticlesRepository();
@@ -132,10 +143,22 @@ browser.runtime.onMessage.addListener(
       const safeSendResponse = (response: unknown) => {
         if (!responseSent) {
           responseSent = true;
-          sendResponse(response);
+          sendResponse(getStorageDiagnostic() ?? response);
         }
       };
       try {
+        if (message.type === "getStorageDiagnostic") {
+          try {
+            await startup();
+          } catch (error) {
+            logger.error("Storage initialization failed:", error);
+          }
+          safeSendResponse(getStorageDiagnostic() ?? null);
+          return;
+        }
+        assertStorageHealthy();
+        await startup();
+        assertStorageHealthy();
         switch (message.type) {
           case "saveSettings": {
             const { settings } = message.payload;
@@ -143,7 +166,9 @@ browser.runtime.onMessage.addListener(
             if (getAccountIdentity(oldSettings) !== getAccountIdentity(settings)) {
               await tokenManager.clearToken(oldSettings.backend);
             }
+            assertStorageHealthy();
             await saveSettings(settings);
+            assertStorageHealthy();
             await removeStaleAccountKeys(settings);
             clearCanonicalUrlCache();
             await logger.initialize();
@@ -290,7 +315,9 @@ browser.runtime.onMessage.addListener(
       } catch (error) {
         logger.error(`Error handling message:`, error);
         if (!responseSent) {
-          safeSendResponse({ error: (error as Error).message || "Unknown error" });
+          safeSendResponse(
+            getStorageDiagnostic() ?? { error: (error as Error).message || "Unknown error" },
+          );
         }
       }
     })();
@@ -330,12 +357,47 @@ browser.contextMenus.onClicked.addListener(async (info: OnClickData, tab?: Tab) 
 // Chromium's service worker can't draw an SVG.
 const NOTIFICATION_ICON = IS_CHROMIUM ? "icons/icon-128.png" : "icons/icon.svg";
 const ERROR_NOTIFICATION_ID = "pouch-error";
+onFatalStorage((diagnostic) => {
+  void browser.notifications
+    .create(ERROR_NOTIFICATION_ID, {
+      type: "basic",
+      iconUrl: NOTIFICATION_ICON,
+      title: "Pouch stopped: local storage failed",
+      message: diagnostic.error,
+    })
+    .catch((error) => logger.error("Storage notification failed:", error));
+  void browser.runtime.sendMessage({ type: "fatalStorage", diagnostic }).catch(() => {});
+  void browser.contextMenus
+    .update("save-page", { title: "Pouch stopped: local storage failed", enabled: false })
+    .catch(() => {});
+  void browser.contextMenus
+    .update("save-link", { title: "Pouch stopped: local storage failed", enabled: false })
+    .catch(() => {});
+  if (!IS_CHROMIUM) {
+    void browser.tabs
+      .query({})
+      .then(async (tabs) => {
+        for (const tab of tabs) {
+          if (tab.id === undefined) continue;
+          await browser.pageAction.setIcon({
+            tabId: tab.id,
+            path: browser.runtime.getURL("icons/icon.svg"),
+          });
+          browser.pageAction.setTitle({
+            tabId: tab.id,
+            title: "Pouch stopped: local storage failed",
+          });
+        }
+      })
+      .catch(() => {});
+  }
+});
 function notifyError(operation: string, error: unknown): void {
   void browser.notifications.create(ERROR_NOTIFICATION_ID, {
     type: "basic",
     iconUrl: NOTIFICATION_ICON,
     title: `Pouch — failed to ${operation}`,
-    message: (error as Error).message || "Unknown error",
+    message: getStorageDiagnostic()?.error || (error as Error).message || "Unknown error",
   });
 }
 const PERMISSIONS_NOTIFICATION_ID = "pouch-permissions";
@@ -360,7 +422,7 @@ browser.permissions.onRemoved.addListener(() => {
   void warnIfPermissionsMissing();
 });
 browser.notifications.onClicked.addListener((notificationId) => {
-  if (notificationId === PERMISSIONS_NOTIFICATION_ID) {
+  if (notificationId === PERMISSIONS_NOTIFICATION_ID || notificationId === ERROR_NOTIFICATION_ID) {
     void browser.runtime.openOptionsPage();
   }
 });
@@ -395,6 +457,7 @@ async function togglePageSave(tab: Tab): Promise<void> {
 }
 if (IS_CHROMIUM) {
   browser.runtime.onMessageExternal.addListener(async (message: QuickActionMessage, sender) => {
+    if (getStorageDiagnostic()) return;
     if (sender.id !== QUICK_ACTIONS_ID) {
       return;
     }
@@ -410,6 +473,7 @@ if (IS_CHROMIUM) {
   });
 }
 browser.commands.onCommand.addListener(async (command) => {
+  if (getStorageDiagnostic()) return;
   if (command !== "toggle-save-page") {
     return;
   }
@@ -426,6 +490,7 @@ function getIconPath(isSaved: boolean): string {
   return browser.runtime.getURL(`icons/page-action-${isSaved ? "saved" : "unsaved"}.svg`);
 }
 async function updateUiForTab(tabId: number): Promise<void> {
+  if (getStorageDiagnostic()) return;
   try {
     const tab = await browser.tabs.get(tabId);
     if (!tab.url || !isValidHttpUrl(tab.url)) {
@@ -521,6 +586,7 @@ async function initialize(): Promise<void> {
     void browser.alarms.create("refresh", { periodInMinutes: REFRESH_INTERVAL });
     void browser.alarms.create("refresh-filters", { periodInMinutes: 24 * 60 });
     await urlCanonizerPromise;
+    assertStorageHealthy();
     logger.info("Background script initialized");
 
     const articlesRepository = await getArticlesRepository();
@@ -536,6 +602,7 @@ async function initialize(): Promise<void> {
     } catch (error) {
       logger.warn("Failed to sync during initialization:", error);
     }
+    assertStorageHealthy();
     const tabs = await browser.tabs.query({
       active: true,
       currentWindow: true,
@@ -547,6 +614,14 @@ async function initialize(): Promise<void> {
   return initializePromise;
 }
 browser.alarms.onAlarm.addListener(async (alarm) => {
+  if (getStorageDiagnostic()) return;
+  try {
+    await startup();
+    assertStorageHealthy();
+  } catch (error) {
+    logger.error("Maintenance initialization failed:", error);
+    return;
+  }
   if (alarm.name === TOKEN_CHECK_ALARM_NAME) {
     // Refreshes the tokens of the backends in use since the background
     // started. A Chromium service worker that this alarm woke has none: its

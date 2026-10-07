@@ -99,6 +99,7 @@ type AnyRecord = Record<string, unknown>;
 const fakeDocument = {
   getElementById: (id: string) => elements.get(id) ?? null,
   querySelector: () => null,
+  querySelectorAll: () => [...elements.values()],
   createElement: () => makeElement(),
   createTextNode: (text: string) => ({ text }),
   addEventListener: (_: string, handler: () => void | Promise<void>) => {
@@ -118,7 +119,9 @@ const fakeBrowser = {
     ],
   },
   runtime: {
-    sendMessage: (message: AnyRecord) => handleMessage(message),
+    onMessage: { addListener: () => {} },
+    sendMessage: (message: AnyRecord) =>
+      message.type === "getStorageDiagnostic" ? Promise.resolve(null) : handleMessage(message),
     openOptionsPage: async (): Promise<void> => {},
   },
 };
@@ -141,7 +144,11 @@ function errorMessageText(): string {
   const errorDiv = articles().children.find((child) => child.className === "error-message");
   if (!errorDiv) return "";
   return errorDiv.children
-    .map((node) => (typeof (node as FakeElement).textContent === "string" ? (node as FakeElement).textContent : String((node as { text?: string }).text ?? "")))
+    .map((node) =>
+      typeof (node as FakeElement).textContent === "string"
+        ? (node as FakeElement).textContent
+        : String((node as { text?: string }).text ?? ""),
+    )
     .join("");
 }
 
@@ -354,4 +361,35 @@ test("articles with native string IDs render and delete passes the exact ID", as
   await until(() => deletePayloads.length === 1, "delete sent for string ID");
 
   expect(deletePayloads[0]).toBe("12abcDEF_-xy");
+});
+
+test("fatal storage response shows confirmed remote success and blocks another save", async () => {
+  let saves = 0;
+  const diagnostic = {
+    code: "FATAL_LOCAL_STORAGE",
+    error:
+      "Pouch stopped: persist articles failed. QuotaExceededError: quota. Remote save succeeded. Do not repeat it. Restart the extension.",
+    remoteOutcome: "succeeded",
+  };
+  handleMessage = async (message) => {
+    if (message.type === "getArticles") return listResponse([]);
+    if (message.type === "checkArticle") return undefined;
+    if (message.type === "saveArticle") {
+      saves++;
+      return diagnostic;
+    }
+    return {};
+  };
+  await initializePopup();
+  click(el("save-page-button"));
+  await until(
+    () => errorMessageText().includes("Remote save succeeded"),
+    "fatal diagnostic visible",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(el("save-page-button").disabled).toBe(true);
+  expect(el("save-page-button").textContent).toBe("!");
+  click(el("save-page-button"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(saves).toBe(1);
 });

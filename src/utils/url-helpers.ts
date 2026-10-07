@@ -1,3 +1,4 @@
+import { assertStorageHealthy } from "./fatal-storage";
 import { initializeUrlCleanerWithRemoteLists } from "./filter-list-manager";
 import { cleanUrl as filterListCleanUrl } from "./filter-list-url-cleaner";
 
@@ -9,6 +10,7 @@ export async function initializeUrlCanonizer(): Promise<void> {
   try {
     await initializeUrlCleanerWithRemoteLists();
   } catch (error) {
+    assertStorageHealthy();
     console.warn("Failed to initialize filter list cleaner:", error);
   }
 
@@ -138,6 +140,7 @@ export function clearCanonicalUrlCache(): void {
 }
 
 export async function canonicalizeUrl(urlString: string): Promise<string> {
+  assertStorageHealthy();
   const cached = canonicalUrlCache.get(urlString);
   if (cached !== undefined) {
     return cached;
@@ -169,6 +172,7 @@ export async function canonicalizeUrl(urlString: string): Promise<string> {
 
     return url.toString();
   } catch {
+    assertStorageHealthy();
     return urlString;
   }
 }

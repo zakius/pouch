@@ -1,0 +1,510 @@
+import assert from "node:assert/strict";
+import {
+  ArticlesRepository,
+  getAccountStorageKeys,
+  removeStaleAccountKeys,
+} from "../../src/background/articles-repository";
+import { TokenManager } from "../../src/background/token-manager";
+import { ApiClient } from "../../src/background/api/api-client";
+import { DEFAULT_SETTINGS } from "../../src/utils/settings";
+import {
+  checkStorageOnStartup,
+  getStorageDiagnostic,
+  FatalStorageError,
+  setLocal,
+  storageShutdownSignal,
+  onFatalStorage,
+} from "../../src/utils/fatal-storage";
+import {
+  saveCachedFilterLists,
+  clearFilterListCache,
+  refreshFilterLists,
+  setFilterListSources,
+} from "../../src/utils/filter-list-manager";
+
+const scenario = process.argv[2];
+const settings = { ...DEFAULT_SETTINGS, backend: "bookmarks" } as const;
+const keys = getAccountStorageKeys(settings);
+const original = {
+  id: "old-GUID",
+  title: "Old",
+  url: "https://example.com/old",
+  created_at: "2026-01-01",
+};
+const store: Record<string, unknown> = { [keys.articles]: [original] };
+let rejectSet = false;
+let rejectRemove = false;
+let rejectRead = false;
+let failKey: string | undefined;
+let writes = 0;
+let removes = 0;
+let remoteSaves = 0;
+let remoteDeletes = 0;
+let remoteReads = 0;
+let fetches = 0;
+let commands = 0;
+const notifications: string[] = [];
+const broadcasts: unknown[] = [];
+const events: Record<string, (...args: any[]) => any> = {};
+const event = (name: string) => ({
+  addListener: (listener: (...args: any[]) => any) => {
+    events[name] = listener;
+  },
+});
+const quota = new DOMException(
+  "QUOTA_BYTES exceeded https://user:secret@example.com token=SECRET",
+  "QuotaExceededError",
+);
+Object.assign(globalThis, {
+  browser: {
+    storage: {
+      local: {
+        get: async (names: string | string[] | null) => {
+          if (rejectRead) throw new Error("Storage unavailable");
+          if (names === null) return { ...store };
+          return Object.fromEntries(
+            (typeof names === "string" ? [names] : names).map((key) => [key, store[key]]),
+          );
+        },
+        set: async (values: Record<string, unknown>) => {
+          writes++;
+          if (rejectSet || (failKey && failKey in values)) throw quota;
+          Object.assign(store, values);
+        },
+        remove: async (names: string | string[]) => {
+          removes++;
+          if (rejectRemove) throw quota;
+          for (const key of typeof names === "string" ? [names] : names) delete store[key];
+        },
+      },
+      sync: {
+        get: async () => settings,
+        set: async () => {
+          commands++;
+        },
+      },
+    },
+    bookmarks: {
+      getTree: async () => [{ id: "folder", title: "Pouch", children: [] }],
+      getChildren: async () => {
+        remoteReads++;
+        return [];
+      },
+      create: async (details: Record<string, string>) => {
+        remoteSaves++;
+        return { ...details, id: "new-GUID" };
+      },
+      remove: async () => {
+        remoteDeletes++;
+      },
+    },
+    idle: { queryState: async () => "active" },
+    permissions: { contains: async () => true, onRemoved: event("permission") },
+    alarms: { get: async () => undefined, create: async () => {}, onAlarm: event("alarm") },
+    runtime: {
+      onMessage: event("message"),
+      onInstalled: event("installed"),
+      onStartup: event("startup"),
+      onMessageExternal: event("external"),
+      sendMessage: async (message: unknown) => {
+        broadcasts.push(message);
+      },
+      getURL: (path: string) => path,
+      openOptionsPage: async () => {},
+    },
+    notifications: {
+      create: async (_id: string, data: { message: string }) => {
+        notifications.push(data.message);
+      },
+      onClicked: event("notification"),
+    },
+    contextMenus: {
+      onClicked: event("menu"),
+      removeAll: async () => {},
+      create: () => {},
+      update: async () => {},
+    },
+    commands: { onCommand: event("command") },
+    pageAction: {
+      onClicked: event("page"),
+      setIcon: async () => {},
+      setTitle: async () => {},
+      show: async () => {},
+    },
+    tabs: {
+      query: async () => [],
+      get: async () => ({}),
+      onUpdated: event("tab"),
+      onActivated: event("active"),
+    },
+  },
+  fetch: async () => {
+    fetches++;
+    return new Response("! empty", { status: 200 });
+  },
+});
+setFilterListSources([{ name: "empty", url: "data:text/plain;base64,ISBlbXB0eQ==" }]);
+const repository = new ArticlesRepository();
+await repository.initialize(settings);
+const priorCache = await repository.getAllArticles();
+const tokens = new TokenManager();
+const baseToken = {
+  accessToken: "old",
+  refreshToken: "refresh",
+  tokenType: "Bearer",
+  expiresAt: Date.now() + 60000,
+  issuedAt: Date.now(),
+  refreshCount: 0,
+};
+const rejectsFatal = async (work: () => unknown) => {
+  await assert.rejects(async () => {
+    await work();
+  }, FatalStorageError);
+  assert.equal(getStorageDiagnostic()?.code, "FATAL_LOCAL_STORAGE");
+  assert.equal(storageShutdownSignal().aborted, true);
+};
+const queuedFailure = async () => {
+  rejectSet = true;
+  const first = repository.updateArticles([]);
+  const second = repository.mergeArticles([{ ...original, id: "queued" }]);
+  await Promise.all([rejectsFatal(() => first), rejectsFatal(() => second)]);
+  assert.equal(writes, 1);
+};
+
+switch (scenario) {
+  case "articles":
+    rejectSet = true;
+    await rejectsFatal(() =>
+      repository.saveArticle({ url: "https://example.com/new", title: "New" }),
+    );
+    assert.equal(remoteSaves, 1);
+    assert.equal(getStorageDiagnostic()?.remoteOutcome, "succeeded");
+    assert.match(getStorageDiagnostic()!.error, /Remote save succeeded/);
+    break;
+  case "delete":
+    rejectSet = true;
+    await rejectsFatal(() => repository.deleteArticle(original.id));
+    assert.equal(remoteDeletes, 1);
+    assert.equal(getStorageDiagnostic()?.remoteOperation, "delete");
+    break;
+  case "queued":
+    await queuedFailure();
+    break;
+  case "sync-articles":
+    rejectSet = true;
+    await rejectsFatal(() => repository.syncWithAPI({ mode: "overwrite" }));
+    assert.equal(getStorageDiagnostic()?.remoteOutcome, "succeeded");
+    assert.equal(getStorageDiagnostic()?.remoteOperation, "sync");
+    break;
+  case "timestamps":
+    failKey = keys.lastSyncTimestamp;
+    await rejectsFatal(() => repository.syncWithAPI({ mode: "overwrite" }));
+    assert.equal(store[keys.lastSyncTimestamp], undefined);
+    assert.equal(Reflect.get(repository, "lastSyncTimestamp"), null);
+    assert.equal(getStorageDiagnostic()?.operation, "persist sync timestamps");
+    break;
+  case "tokens":
+    rejectSet = true;
+    await rejectsFatal(() => tokens.storeToken("service", baseToken));
+    assert.equal(tokens.getTokenMetadata("service"), null);
+    break;
+  case "token-clear":
+  case "token-clear-all":
+  case "token-refresh":
+  case "token-refresh-failed": {
+    await tokens.storeToken("service", baseToken);
+    const before = structuredClone(tokens.getTokenMetadata("service"));
+    rejectSet = true;
+    if (scenario === "token-clear") await rejectsFatal(() => tokens.clearToken("service"));
+    else if (scenario === "token-clear-all") await rejectsFatal(() => tokens.clearAllTokens());
+    else {
+      globalThis.fetch = async () =>
+        new Response(JSON.stringify({ access_token: "new", expires_in: 3600 }), {
+          status: scenario === "token-refresh-failed" ? 401 : 200,
+        });
+      await rejectsFatal(() =>
+        tokens.refreshToken("service", {
+          serviceName: "service",
+          refreshUrl: "https://example.com/token",
+          clientId: "id",
+          clientSecret: "secret",
+          refreshToken: "refresh",
+        }),
+      );
+      assert.equal(
+        getStorageDiagnostic()?.remoteOutcome,
+        scenario === "token-refresh-failed" ? "failed" : "succeeded",
+      );
+    }
+    assert.deepEqual(tokens.getTokenMetadata("service"), before);
+    assert.equal(store.api_tokens instanceof Array, true);
+    break;
+  }
+  case "options-ui": {
+    const elements = new Map(
+      [
+        "backend-select",
+        "config-container",
+        "save",
+        "test-connection",
+        "enable-verbose-logging",
+        "status",
+        "normalize-on-save",
+        "normalize-on-compare",
+      ].map((id) => [
+        id,
+        {
+          id,
+          disabled: false,
+          textContent: "",
+          className: "",
+          classList: { add: () => {}, remove: () => {} },
+        },
+      ]),
+    );
+    let ready!: () => Promise<void>;
+    const timers: (() => void)[] = [];
+    Object.assign(globalThis, {
+      document: {
+        getElementById: (id: string) => elements.get(id),
+        querySelectorAll: () => [...elements.values()],
+        addEventListener: (_event: string, listener: () => Promise<void>) => {
+          ready = listener;
+        },
+      },
+      setTimeout: (callback: () => void) => {
+        timers.push(callback);
+        return 1;
+      },
+    });
+    rejectSet = true;
+    await rejectsFatal(() => setLocal("persist articles", {}, "succeeded", "save"));
+    rejectRead = true;
+    (browser.runtime.sendMessage as unknown) = async () => getStorageDiagnostic();
+    await import("../../src/options/options");
+    await ready();
+    for (const timer of timers) timer();
+    assert.match(elements.get("status")!.textContent, /Remote save succeeded/);
+    assert.equal(timers.length, 1);
+    assert.equal(elements.get("save")!.disabled, true);
+    break;
+  }
+  case "ui-initial":
+  case "ui-broadcast": {
+    const control = {
+      id: "save-page-button",
+      disabled: false,
+      textContent: "+",
+      title: "Save",
+      setAttribute: () => {},
+    };
+    Object.assign(globalThis, { document: { querySelectorAll: () => [control] } });
+    let displayed = "";
+    (browser.runtime.sendMessage as unknown) = async () =>
+      scenario === "ui-initial" ? getStorageDiagnostic() : null;
+    const { initializeStorageDiagnostics } = await import("../../src/utils/storage-diagnostics-ui");
+    if (scenario === "ui-broadcast")
+      await initializeStorageDiagnostics((message) => {
+        displayed = message;
+      });
+    rejectSet = true;
+    await rejectsFatal(() => setLocal("persist articles", {}, "succeeded", "save"));
+    rejectRead = true;
+    if (scenario === "ui-initial")
+      await initializeStorageDiagnostics((message) => {
+        displayed = message;
+      });
+    else events.message({ type: "fatalStorage", diagnostic: getStorageDiagnostic() });
+    assert.match(displayed, /Remote save succeeded/);
+    assert.equal(control.disabled, true);
+    assert.equal(control.textContent, "!");
+    break;
+  }
+  case "token-schema": {
+    await tokens.storeToken("service", baseToken);
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ access_token: 12 }), { status: 200 });
+    const result = await tokens.refreshToken("service", {
+      serviceName: "service",
+      refreshUrl: "https://example.com/token",
+      clientId: "id",
+      clientSecret: "secret",
+      refreshToken: "refresh",
+    });
+    assert.equal(result.success, false);
+    assert.match(result.error!, /Invalid refresh response/);
+    assert.equal(getStorageDiagnostic(), undefined);
+    break;
+  }
+  case "draft": {
+    rejectSet = true;
+    const draft = new TokenManager({ persist: false });
+    await draft.storeToken("service", baseToken);
+    assert.equal(writes, 0);
+    assert.equal(getStorageDiagnostic(), undefined);
+    break;
+  }
+  case "filter-set":
+    rejectSet = true;
+    await rejectsFatal(() => saveCachedFilterLists([]));
+    break;
+  case "filter-remove":
+    rejectRemove = true;
+    await rejectsFatal(() => clearFilterListCache());
+    break;
+  case "clear":
+    rejectRemove = true;
+    await rejectsFatal(() => repository.clear());
+    break;
+  case "stale":
+    store.articles = [];
+    rejectRemove = true;
+    await rejectsFatal(() => removeStaleAccountKeys(settings));
+    break;
+  case "startup-set":
+    rejectSet = true;
+    await rejectsFatal(() => checkStorageOnStartup());
+    break;
+  case "startup-remove":
+    rejectRemove = true;
+    await rejectsFatal(() => checkStorageOnStartup());
+    break;
+  case "startup-read":
+    rejectRead = true;
+    await rejectsFatal(() => checkStorageOnStartup());
+    break;
+  case "startup-healthy":
+    await Promise.all([checkStorageOnStartup(), checkStorageOnStartup()]);
+    assert.equal(writes, 1);
+    assert.equal(removes, 1);
+    assert.equal(store.pouch_storage_health, undefined);
+    assert.equal(getStorageDiagnostic(), undefined);
+    break;
+  case "network": {
+    globalThis.fetch = async () => {
+      throw new TypeError("Network down");
+    };
+    const client = new ApiClient("test", "https://example.com");
+    await assert.rejects(client.get("/", { authenticated: false }), /Network down/);
+    assert.equal(getStorageDiagnostic(), undefined);
+    await repository.updateArticles([original]);
+    break;
+  }
+  case "interrupt": {
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    globalThis.fetch = async (_url, init) => {
+      started();
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
+      });
+    };
+    const request = new ApiClient("test", "https://example.com").get("/", { authenticated: false });
+    const failure = rejectsFatal(() => request);
+    await ready;
+    rejectSet = true;
+    await rejectsFatal(() => setLocal("test failure", {}));
+    await failure;
+    break;
+  }
+  case "late-save": {
+    let complete!: () => void;
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    (browser.bookmarks.create as unknown) = async () => {
+      started();
+      await new Promise<void>((resolve) => {
+        complete = resolve;
+      });
+      return { id: "late-GUID", title: "Late", url: "https://example.com/late" };
+    };
+    const save = repository.saveArticle({ url: "https://example.com/late", title: "Late" });
+    const failure = rejectsFatal(() => save);
+    await ready;
+    rejectSet = true;
+    await rejectsFatal(() => setLocal("other work", {}));
+    complete();
+    await failure;
+    assert.equal(getStorageDiagnostic()?.remoteOperation, "save");
+    assert.match(getStorageDiagnostic()!.error, /Remote save succeeded/);
+    break;
+  }
+  case "background":
+  case "worker-restart": {
+    if (scenario === "worker-restart") rejectSet = true;
+    await import("../../src/background/background");
+    const message = (request: unknown) =>
+      new Promise<any>((resolve) => {
+        events.message(request, {}, resolve);
+      });
+    if (scenario === "background") {
+      await message({ type: "getArticles", payload: {} });
+      assert.equal(
+        (await message({ type: "saveArticle", payload: { url: "invalid", title: "Invalid" } }))
+          .error,
+        "Invalid URL format",
+      );
+      assert.equal(getStorageDiagnostic(), undefined);
+      rejectSet = true;
+      const result = await message({
+        type: "saveArticle",
+        payload: { url: "https://example.com/new", title: "New" },
+      });
+      assert.equal(result.code, "FATAL_LOCAL_STORAGE");
+      assert.equal(result.remoteOutcome, "succeeded");
+    }
+    const diagnostic = await message({ type: "getStorageDiagnostic" });
+    assert.equal(diagnostic.code, "FATAL_LOCAL_STORAGE");
+    rejectRead = true;
+    const counts = [writes, removes, remoteSaves, remoteDeletes, remoteReads, commands, fetches];
+    for (const request of [
+      { type: "saveArticle", payload: { url: "https://example.com/new", title: "New" } },
+      { type: "deleteArticle", payload: { articleId: original.id } },
+      { type: "getArticles", payload: {} },
+      { type: "saveSettings", payload: { settings } },
+      { type: "testConnection", payload: { settings } },
+    ])
+      assert.equal((await message(request)).code, "FATAL_LOCAL_STORAGE");
+    await events.command("toggle-save-page");
+    for (const name of ["refresh", "refresh-filters", "token-refresh-check"])
+      await events.alarm({ name });
+    await events.menu({ menuItemId: "save-link", linkUrl: "https://example.com/new" });
+    assert.deepEqual(
+      [writes, removes, remoteSaves, remoteDeletes, remoteReads, commands, fetches],
+      counts,
+    );
+    assert.equal((await message({ type: "getStorageDiagnostic" })).code, "FATAL_LOCAL_STORAGE");
+    assert.ok(notifications.some((text) => text.includes("Pouch stopped")));
+    assert.ok(broadcasts.length > 0);
+    break;
+  }
+  default:
+    throw new Error(`Unknown scenario ${scenario}`);
+}
+
+if (getStorageDiagnostic()) {
+  assert.equal(getStorageDiagnostic()!.error.includes("SECRET"), false);
+  assert.equal(getStorageDiagnostic()!.error.includes("https://"), false);
+  const count = [writes, removes, remoteSaves, remoteDeletes, fetches];
+  await rejectsFatal(() =>
+    repository.saveArticle({ url: "https://example.com/blocked", title: "Blocked" }),
+  );
+  await rejectsFatal(() => repository.deleteArticle(original.id));
+  await rejectsFatal(() => repository.syncWithAPI());
+  await rejectsFatal(() => refreshFilterLists());
+  await rejectsFatal(() => tokens.checkAndRefreshTokens());
+  assert.deepEqual([writes, removes, remoteSaves, remoteDeletes, fetches], count);
+  if (!["timestamps", "background", "worker-restart"].includes(scenario!)) {
+    assert.strictEqual(Reflect.get(repository, "articlesCache"), priorCache);
+    assert.deepEqual(priorCache, [original]);
+  }
+  let received: unknown;
+  onFatalStorage((diagnostic) => {
+    received = diagnostic;
+  });
+  assert.strictEqual(received, getStorageDiagnostic());
+}

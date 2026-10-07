@@ -1,3 +1,10 @@
+import {
+  assertStorageHealthy,
+  reportRemoteOutcome,
+  setLocal,
+  removeLocal,
+  type RemoteOutcome,
+} from "../utils/fatal-storage";
 import type { Article } from "../types/common";
 import { getAdapter } from "../utils/adapter-factory";
 import { hasBackendPermissions, missingPermissionMessage } from "../utils/backend-permissions";
@@ -46,13 +53,14 @@ export function getAccountStorageKeys(settings: Settings): AccountStorageKeys {
 
 /** Removes cached articles and sync timestamps left behind by other (or pre-per-account) accounts. */
 export async function removeStaleAccountKeys(settings: Settings): Promise<void> {
+  assertStorageHealthy();
   const current = new Set(Object.values(getAccountStorageKeys(settings)));
   const prefixes = ["articles", "lastSyncTimestamp", "lastFullSyncTimestamp"];
   const stale = Object.keys(await browser.storage.local.get(null)).filter(
     (key) => !current.has(key) && prefixes.some((p) => key === p || key.startsWith(`${p}:`)),
   );
   if (stale.length > 0) {
-    await browser.storage.local.remove(stale);
+    await removeLocal("remove stale account data", stale);
   }
 }
 
@@ -76,6 +84,7 @@ export class ArticlesRepository {
   constructor(private readonly tokens?: TokenManager) {}
 
   async initialize(settings: Settings): Promise<void> {
+    assertStorageHealthy();
     logger.info("Initializing ArticlesRepository with settings:", settings);
     this.settings = settings;
     this.api = null;
@@ -85,6 +94,7 @@ export class ArticlesRepository {
   }
 
   private getApi(): Promise<ReadItLaterAPI> {
+    assertStorageHealthy();
     if (this.api) {
       return Promise.resolve(this.api);
     }
@@ -94,12 +104,15 @@ export class ArticlesRepository {
         if (!(await hasBackendPermissions(this.settings))) {
           throw new Error(missingPermissionMessage(this.settings));
         }
+        assertStorageHealthy();
         const api = getAdapter(this.settings.backend, this.tokens);
         await api.initialize(this.settings);
         logger.info("On-demand API initialization completed");
+        assertStorageHealthy();
         this.api = api;
         return api;
       })().catch((error: unknown) => {
+        assertStorageHealthy();
         this.apiInitPromise = null;
         logger.error("Failed to initialize API:", error);
         throw new Error(
@@ -112,7 +125,10 @@ export class ArticlesRepository {
 
   async testConnection(): Promise<boolean> {
     const api = await this.getApi();
-    return api.testConnection();
+    assertStorageHealthy();
+    const result = await api.testConnection();
+    assertStorageHealthy();
+    return result;
   }
 
   async getArticle(id: number | string): Promise<Article | undefined> {
@@ -124,22 +140,37 @@ export class ArticlesRepository {
   }
 
   async getAllArticles(): Promise<Article[]> {
+    assertStorageHealthy();
     if (!this.articlesCache) {
       const result = await browser.storage.local.get([this.storageKeys.articles]);
       const articles: Article[] = result?.[this.storageKeys.articles] || [];
+      assertStorageHealthy();
       this.articlesCache = articles;
       return articles;
     }
     return this.articlesCache;
   }
 
-  private async storeArticles(articles: Article[]): Promise<void> {
+  private async storeArticles(
+    articles: Article[],
+    remoteOutcome?: RemoteOutcome,
+    remoteOperation?: string,
+  ): Promise<void> {
+    await setLocal(
+      "persist articles",
+      { [this.storageKeys.articles]: articles },
+      remoteOutcome,
+      remoteOperation,
+    );
+    assertStorageHealthy();
     this.articlesCache = articles;
-    await browser.storage.local.set({ [this.storageKeys.articles]: articles });
   }
 
   private enqueueCommit<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.commitQueue.then(operation);
+    const result = this.commitQueue.then(() => {
+      assertStorageHealthy();
+      return operation();
+    });
     this.commitQueue = result.then(
       () => undefined,
       () => undefined,
@@ -210,18 +241,20 @@ export class ArticlesRepository {
     const urlToSave = this.settings.normalizeOnSave ? canonicalUrl : article.url;
 
     try {
+      assertStorageHealthy();
       const savedArticle = await api.saveArticle({
         url: urlToSave,
         title: article.title,
       });
 
+      reportRemoteOutcome("save", "succeeded");
       const articleWithCanonicalUrl = {
         ...savedArticle,
         canonicalUrl: canonicalUrl,
       };
 
       logger.debug("Saved article, now adding to cache", articleWithCanonicalUrl);
-      await this.addArticle(articleWithCanonicalUrl);
+      await this.addArticle(articleWithCanonicalUrl, "succeeded", "save");
 
       // Track this operation if sync is in progress
       if (this.syncInProgress) {
@@ -248,8 +281,10 @@ export class ArticlesRepository {
       throw new Error("Article ID is required");
     }
     try {
+      assertStorageHealthy();
       await api.deleteArticle(id);
-      await this.removeArticle(id);
+      reportRemoteOutcome("delete", "succeeded");
+      await this.removeArticle(id, "succeeded", "delete");
       logger.debug("Deleted article from API", id);
 
       // Track this operation if sync is in progress
@@ -271,6 +306,7 @@ export class ArticlesRepository {
   async syncWithAPI(
     options?: SyncOptions,
   ): Promise<{ items: Article[]; total: number; syncResult: SyncResult }> {
+    assertStorageHealthy();
     if (this.syncInProgress) {
       logger.debug("Sync already in progress, waiting for completion");
       await this.syncInProgress;
@@ -319,7 +355,9 @@ export class ArticlesRepository {
         });
 
         const fetchStartedAt = new Date().toISOString();
+        assertStorageHealthy();
         const syncResult = await api.sync(syncOptions);
+        assertStorageHealthy();
         logger.debug(
           `Synced ${syncResult.articles.length} articles from API using ${syncResult.mode} mode`,
           {
@@ -347,10 +385,10 @@ export class ArticlesRepository {
         // Handle different sync modes
         if (syncResult.mode === "overwrite") {
           // Replace all articles with the new ones
-          await this.updateArticles(processedArticles);
+          await this.updateArticles(processedArticles, "succeeded", "sync");
         } else if (syncResult.mode === "update") {
           // Merge new articles with existing ones
-          await this.mergeArticles(processedArticles);
+          await this.mergeArticles(processedArticles, "succeeded", "sync");
         }
 
         // Update sync timestamps
@@ -390,18 +428,23 @@ export class ArticlesRepository {
       try {
         if (op.type === "save" && op.article) {
           logger.debug("Re-applying save operation for:", op.article);
-          await this.addArticle(op.article);
+          await this.addArticle(op.article, "succeeded", "save");
         } else if (op.type === "delete" && op.articleId !== undefined) {
           logger.debug("Re-applying delete operation for:", op.articleId);
-          await this.removeArticle(op.articleId);
+          await this.removeArticle(op.articleId, "succeeded", "delete");
         }
       } catch (error) {
+        assertStorageHealthy();
         logger.error("Error re-applying pending operation:", op, error);
       }
     }
   }
 
-  private addArticle(article: Article): Promise<void> {
+  private addArticle(
+    article: Article,
+    remoteOutcome?: RemoteOutcome,
+    remoteOperation?: string,
+  ): Promise<void> {
     logger.debug("Adding article to cache:", article);
 
     return this.enqueueCommit(async () => {
@@ -421,12 +464,16 @@ export class ArticlesRepository {
         return;
       }
 
-      await this.storeArticles([article, ...existingArticles]);
+      await this.storeArticles([article, ...existingArticles], remoteOutcome, remoteOperation);
       logger.debug("Article added to cache:", article);
     });
   }
 
-  private removeArticle(id: number | string): Promise<void> {
+  private removeArticle(
+    id: number | string,
+    remoteOutcome?: RemoteOutcome,
+    remoteOperation?: string,
+  ): Promise<void> {
     logger.debug("Removing article from cache:", id);
     if (id === undefined || id === null || id === "") {
       logger.error("Cannot remove article from cache: No ID provided");
@@ -437,16 +484,30 @@ export class ArticlesRepository {
       // String comparison, so entries stored with the other id type (see
       // getArticle) still match.
       const target = String(id);
-      await this.storeArticles(articles.filter((a) => String(a.id) !== target));
+      await this.storeArticles(
+        articles.filter((a) => String(a.id) !== target),
+        remoteOutcome,
+        remoteOperation,
+      );
     });
   }
 
-  updateArticles(newArticles: Article[]): Promise<void> {
+  updateArticles(
+    newArticles: Article[],
+    remoteOutcome?: RemoteOutcome,
+    remoteOperation?: string,
+  ): Promise<void> {
     logger.debug("Updating articles in cache:", newArticles.length);
-    return this.enqueueCommit(() => this.storeArticles(newArticles));
+    return this.enqueueCommit(() =>
+      this.storeArticles(newArticles, remoteOutcome, remoteOperation),
+    );
   }
 
-  mergeArticles(newArticles: Article[]): Promise<void> {
+  mergeArticles(
+    newArticles: Article[],
+    remoteOutcome?: RemoteOutcome,
+    remoteOperation?: string,
+  ): Promise<void> {
     logger.debug("Merging articles in cache:", newArticles.length);
     return this.enqueueCommit(async () => {
       const existingArticles = await this.getAllArticles();
@@ -473,14 +534,15 @@ export class ArticlesRepository {
       }
 
       const mergedArticles = Array.from(existingMap.values());
-      await this.storeArticles(mergedArticles);
+      await this.storeArticles(mergedArticles, remoteOutcome, remoteOperation);
       logger.debug("Merged articles count:", mergedArticles.length);
     });
   }
 
   async clear(): Promise<void> {
+    await removeLocal("clear articles", this.storageKeys.articles);
+    assertStorageHealthy();
     this.articlesCache = null;
-    await browser.storage.local.remove(this.storageKeys.articles);
   }
 
   private async loadSyncTimestamps(): Promise<void> {
@@ -489,6 +551,7 @@ export class ArticlesRepository {
         this.storageKeys.lastFullSyncTimestamp,
         this.storageKeys.lastSyncTimestamp,
       ]);
+      assertStorageHealthy();
       this.lastFullSyncTimestamp = result[this.storageKeys.lastFullSyncTimestamp] || null;
       this.lastSyncTimestamp = result[this.storageKeys.lastSyncTimestamp] || null;
       logger.debug("Loaded sync timestamps:", {
@@ -498,20 +561,10 @@ export class ArticlesRepository {
           : null,
       });
     } catch (error) {
+      assertStorageHealthy();
       logger.error("Failed to load sync timestamps:", error);
       this.lastFullSyncTimestamp = null;
       this.lastSyncTimestamp = null;
-    }
-  }
-
-  private async saveSyncTimestamps(): Promise<void> {
-    try {
-      await browser.storage.local.set({
-        [this.storageKeys.lastFullSyncTimestamp]: this.lastFullSyncTimestamp,
-        [this.storageKeys.lastSyncTimestamp]: this.lastSyncTimestamp,
-      });
-    } catch (error) {
-      logger.error("Failed to save sync timestamps:", error);
     }
   }
 
@@ -528,32 +581,18 @@ export class ArticlesRepository {
   }
 
   private async updateSyncTimestamp(mode: SyncMode, fetchStartedAt: string): Promise<void> {
-    const now = fetchStartedAt;
-
-    // Always update lastSyncTimestamp for any sync
-    const oldLastSync = this.lastSyncTimestamp;
-    this.lastSyncTimestamp = now;
-
-    // Update lastFullSyncTimestamp only for overwrite syncs
-    if (mode === "overwrite") {
-      const oldFullSync = this.lastFullSyncTimestamp;
-      this.lastFullSyncTimestamp = Date.parse(fetchStartedAt);
-      await this.saveSyncTimestamps();
-      logger.debug("Updated sync timestamps:", {
-        oldLastSync,
-        newLastSync: this.lastSyncTimestamp,
-        oldFullSync: oldFullSync ? new Date(oldFullSync).toISOString() : null,
-        newFullSync: new Date(this.lastFullSyncTimestamp).toISOString(),
-        mode,
-      });
-    } else {
-      // For update syncs, just save the lastSyncTimestamp
-      await this.saveSyncTimestamps();
-      logger.debug("Updated sync timestamp:", {
-        oldLastSync,
-        newLastSync: this.lastSyncTimestamp,
-        mode,
-      });
-    }
+    const full = mode === "overwrite" ? Date.parse(fetchStartedAt) : this.lastFullSyncTimestamp;
+    await setLocal(
+      "persist sync timestamps",
+      {
+        [this.storageKeys.lastFullSyncTimestamp]: full,
+        [this.storageKeys.lastSyncTimestamp]: fetchStartedAt,
+      },
+      "succeeded",
+      "sync",
+    );
+    assertStorageHealthy();
+    this.lastFullSyncTimestamp = full;
+    this.lastSyncTimestamp = fetchStartedAt;
   }
 }

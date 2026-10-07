@@ -1,3 +1,4 @@
+import { assertStorageHealthy, storageShutdownSignal } from "../../../utils/fatal-storage";
 import * as v from "valibot";
 import { wallabagConfigSchema, wallabagSettingsSchema } from "../../../utils/settings-schemas";
 export { wallabagConfigSchema, wallabagSettingsSchema };
@@ -187,7 +188,9 @@ export class WallabagAdapter implements ReadItLaterAPI<WallabagSettings>, Tokeni
       password: this.config.password || "",
     });
 
+    assertStorageHealthy();
     const response = await fetch(this.getAuthEndpoint(), {
+      signal: storageShutdownSignal(),
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",

@@ -1,3 +1,9 @@
+import {
+  assertStorageHealthy,
+  setLocal,
+  storageShutdownSignal,
+  type RemoteOutcome,
+} from "../utils/fatal-storage";
 import { logger } from "../utils/logger";
 
 export const TOKEN_CHECK_ALARM_NAME = "token-refresh-check";
@@ -61,6 +67,7 @@ export class TokenManager {
   }
 
   public async initializeAlarm(): Promise<void> {
+    assertStorageHealthy();
     if (this.alarmInitialized || !this.config.persist) {
       return;
     }
@@ -94,8 +101,7 @@ export class TokenManager {
       serviceName,
     };
 
-    this.tokens.set(serviceName, tokenMetadata);
-    await this.persistTokens();
+    await this.commitTokens((tokens) => tokens.set(serviceName, tokenMetadata));
 
     logger.info(`Token stored for ${serviceName}`, {
       expiresAt: new Date(tokenMetadata.expiresAt).toISOString(),
@@ -114,6 +120,7 @@ export class TokenManager {
   }
 
   public async getAccessToken(serviceName: string): Promise<string> {
+    assertStorageHealthy();
     const token = this.tokens.get(serviceName);
     if (!token) {
       logger.error(
@@ -139,6 +146,7 @@ export class TokenManager {
       }
     }
 
+    assertStorageHealthy();
     const updatedToken = this.tokens.get(serviceName);
     if (!updatedToken) {
       logger.error(`No token available for service: ${serviceName} after refresh attempt`);
@@ -164,6 +172,7 @@ export class TokenManager {
     serviceName: string,
     refreshConfig?: TokenRefreshConfig,
   ): Promise<TokenRefreshResult> {
+    assertStorageHealthy();
     const inFlight = this.refreshPromises.get(serviceName);
     if (inFlight) {
       logger.debug(`Refresh already in progress for ${serviceName}, sharing result`);
@@ -220,10 +229,13 @@ export class TokenManager {
       };
     }
 
-    token.lastRefreshAttempt = Date.now();
-    token.refreshCount++;
+    const attempt = {
+      ...token,
+      lastRefreshAttempt: Date.now(),
+      refreshCount: token.refreshCount + 1,
+    };
 
-    if (token.refreshCount > this.config.maxRefreshAttempts) {
+    if (attempt.refreshCount > this.config.maxRefreshAttempts) {
       logger.warn(`Max refresh attempts exceeded for ${serviceName}, clearing token`);
       await this.clearToken(serviceName);
       return {
@@ -234,7 +246,9 @@ export class TokenManager {
     }
 
     try {
+      assertStorageHealthy();
       const response = await fetch(config.refreshUrl, {
+        signal: storageShutdownSignal(),
         method: "POST",
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
@@ -252,13 +266,15 @@ export class TokenManager {
         const errorText = await response.text();
         logger.error(`Token refresh failed for ${serviceName}: ${response.status} ${errorText}`);
         if (response.status === 400 || response.status === 401 || response.status === 403) {
-          await this.clearToken(serviceName);
+          await this.clearToken(serviceName, "failed");
           return {
             success: false,
             requiresReauth: true,
             error: `Token refresh failed: ${response.status} ${errorText}`,
           };
         }
+        assertStorageHealthy();
+        this.tokens.set(serviceName, attempt);
         return {
           success: false,
           requiresReauth: false,
@@ -268,6 +284,8 @@ export class TokenManager {
 
       const tokenData = (await response.json()) as Record<string, unknown>;
       if (typeof tokenData?.access_token !== "string" || !tokenData.access_token) {
+        assertStorageHealthy();
+        this.tokens.set(serviceName, attempt);
         logger.error(`Invalid refresh response for ${serviceName}`);
         return {
           success: false,
@@ -276,7 +294,7 @@ export class TokenManager {
         };
       }
 
-      await this.updateTokenFromResponse(serviceName, tokenData);
+      await this.updateTokenFromResponse(serviceName, tokenData, attempt.lastRefreshAttempt);
 
       logger.info(`Token refreshed successfully for ${serviceName}`, {
         expiresAt: new Date(this.tokens.get(serviceName)?.expiresAt || Date.now()).toISOString(),
@@ -285,6 +303,8 @@ export class TokenManager {
 
       return { success: true, requiresReauth: false };
     } catch (error) {
+      assertStorageHealthy();
+      this.tokens.set(serviceName, attempt);
       logger.error(`Token refresh error for ${serviceName}:`, error);
       return {
         success: false,
@@ -294,9 +314,8 @@ export class TokenManager {
     }
   }
 
-  public async clearToken(serviceName: string): Promise<void> {
-    this.tokens.delete(serviceName);
-    await this.persistTokens();
+  public async clearToken(serviceName: string, remoteOutcome?: RemoteOutcome): Promise<void> {
+    await this.commitTokens((tokens) => tokens.delete(serviceName), remoteOutcome, "token refresh");
     logger.info(`Token cleared for ${serviceName}`);
   }
 
@@ -306,8 +325,7 @@ export class TokenManager {
   }
 
   public async clearAllTokens(): Promise<void> {
-    this.tokens.clear();
-    await this.persistTokens();
+    await this.commitTokens((tokens) => tokens.clear());
     logger.info("All tokens cleared");
   }
 
@@ -330,8 +348,10 @@ export class TokenManager {
   }
 
   public async loadTokens(): Promise<void> {
+    assertStorageHealthy();
     try {
       const result = await browser.storage.local.get(this.config.storageKey);
+      assertStorageHealthy();
       const storedTokens = result[this.config.storageKey];
 
       if (storedTokens) {
@@ -344,16 +364,19 @@ export class TokenManager {
         }
       }
     } catch (error) {
+      assertStorageHealthy();
       logger.error("Failed to load tokens from storage:", error);
     }
   }
 
   public async checkAndRefreshTokens(): Promise<void> {
+    assertStorageHealthy();
     const now = Date.now();
     const thresholdMs =
       this.config.checkIntervalMinutes * this.config.expirationThresholdChecks * 60 * 1000;
 
     for (const [serviceName, token] of this.tokens) {
+      assertStorageHealthy();
       // Skip tokens without refresh capability (static API keys)
       if (!token.refreshToken) {
         continue;
@@ -374,18 +397,32 @@ export class TokenManager {
     }
   }
 
-  private async persistTokens(): Promise<void> {
-    if (!this.config.persist) {
-      return;
-    }
-    try {
-      const tokensArray = Array.from(this.tokens.entries());
-      await browser.storage.local.set({
-        [this.config.storageKey]: tokensArray,
-      });
-    } catch (error) {
-      logger.error("Failed to persist tokens:", error);
-    }
+  private tokenCommitQueue: Promise<unknown> = Promise.resolve();
+
+  private commitTokens(
+    change: (tokens: Map<string, TokenMetadata>) => unknown,
+    remoteOutcome?: RemoteOutcome,
+    remoteOperation?: string,
+  ): Promise<void> {
+    const result = this.tokenCommitQueue.then(async () => {
+      assertStorageHealthy();
+      const tokens = new Map(this.tokens);
+      change(tokens);
+      if (this.config.persist) {
+        await setLocal(
+          "persist tokens",
+          {
+            [this.config.storageKey]: Array.from(tokens.entries()),
+          },
+          remoteOutcome,
+          remoteOperation,
+        );
+      }
+      assertStorageHealthy();
+      this.tokens = tokens;
+    });
+    this.tokenCommitQueue = result.catch(() => {});
+    return result;
   }
 
   private needsRefresh(token: TokenMetadata): boolean {
@@ -395,8 +432,10 @@ export class TokenManager {
   private async updateTokenFromResponse(
     serviceName: string,
     tokenData: Record<string, unknown>,
+    lastRefreshAttempt: number,
   ): Promise<void> {
-    const token = this.tokens.get(serviceName);
+    const existing = this.tokens.get(serviceName);
+    const token = existing ? { ...existing } : undefined;
     if (!token) {
       throw new Error(`No existing token found for service: ${serviceName}`);
     }
@@ -411,10 +450,13 @@ export class TokenManager {
     token.issuedAt = now;
     token.scope = (tokenData.scope as string) || token.scope;
 
-    this.tokens.set(serviceName, token);
-    // Reset refresh count on successful refresh
     token.refreshCount = 0;
-    await this.persistTokens();
+    token.lastRefreshAttempt = lastRefreshAttempt;
+    await this.commitTokens(
+      (tokens) => tokens.set(serviceName, token),
+      "succeeded",
+      "token refresh",
+    );
   }
 }
 

@@ -1,3 +1,4 @@
+import { assertStorageHealthy } from "../../../utils/fatal-storage";
 import * as v from "valibot";
 import { IS_CHROMIUM } from "../../../utils/chromium";
 import { bookmarksSettingsSchema } from "../../../utils/settings-schemas";
@@ -55,6 +56,7 @@ export class BookmarksAdapter implements ReadItLaterAPI<BookmarksSettings> {
       return this.pouchFolderId;
     }
 
+    assertStorageHealthy();
     const folder = await browser.bookmarks.create({
       title: this.POUCH_FOLDER_NAME,
       // Other bookmarks; Chromium's ID for it is "2".
@@ -87,6 +89,7 @@ export class BookmarksAdapter implements ReadItLaterAPI<BookmarksSettings> {
   async saveArticle(article: SavingArticle): Promise<Article> {
     const folderId = await this.ensurePouchFolder();
 
+    assertStorageHealthy();
     const bookmark = await browser.bookmarks.create({
       parentId: folderId,
       title: article.title,
@@ -104,6 +107,7 @@ export class BookmarksAdapter implements ReadItLaterAPI<BookmarksSettings> {
   }
 
   async deleteArticle(id: number | string): Promise<void> {
+    assertStorageHealthy();
     await browser.bookmarks.remove(String(id));
   }
 

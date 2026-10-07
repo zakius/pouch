@@ -1,3 +1,4 @@
+import { TokenManager } from "../src/background/token-manager";
 import "../src/utils/settings";
 import { createHmac } from "node:crypto";
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
@@ -24,7 +25,7 @@ const syncResponse = (bookmarks: number[], deleteIds?: number[]) => ({
 });
 
 const makeAdapter = () => {
-  const adapter = new InstapaperAdapter();
+  const adapter = new InstapaperAdapter(new TokenManager({ persist: false }));
   const internal = adapter as unknown as {
     config: Record<string, string>;
     accessToken: string;
@@ -96,9 +97,7 @@ test("sync stops after a short page", async () => {
 
 test("sync requests the next page after an exactly-500 page", async () => {
   const full = Array.from({ length: 500 }, (_, i) => i + 1);
-  const fetchMock = listBodies((call) =>
-    call === 1 ? syncResponse(full) : syncResponse([]),
-  );
+  const fetchMock = listBodies((call) => (call === 1 ? syncResponse(full) : syncResponse([])));
   const result = await makeAdapter().sync({ mode: "overwrite" });
   expect(result.articles).toHaveLength(500);
   expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -117,9 +116,7 @@ test("sync accumulates multiple batches with stable ids", async () => {
 test("sync fails instead of looping on a repeated full page", async () => {
   const full = Array.from({ length: 500 }, (_, i) => i + 1);
   const fetchMock = listBodies(() => syncResponse(full));
-  await expect(makeAdapter().sync({ mode: "overwrite" })).rejects.toThrow(
-    "already-seen bookmarks",
-  );
+  await expect(makeAdapter().sync({ mode: "overwrite" })).rejects.toThrow("already-seen bookmarks");
   expect(fetchMock).toHaveBeenCalledTimes(2);
 });
 
@@ -161,7 +158,7 @@ test("authenticate signs the xAuth access_token request with OAuth", async () =>
   const fetchMock = spyOn(globalThis, "fetch").mockImplementation(
     async () => new Response("oauth_token=t&oauth_token_secret=s"),
   );
-  await new InstapaperAdapter().initialize({
+  await new InstapaperAdapter(new TokenManager({ persist: false })).initialize({
     apiConfig: { consumerKey: "key", consumerSecret: "secret", username: "user", password: "pw" },
   } as never);
   const [url, init] = fetchMock.mock.calls[0];
@@ -173,15 +170,13 @@ test("authenticate signs the xAuth access_token request with OAuth", async () =>
 });
 
 test("saveArticle signs RFC 3986-encoded params so URLs with ( ) verify", async () => {
-  const fetchMock = spyOn(globalThis, "fetch").mockImplementation(async () =>
-    json([bookmark(1)]),
-  );
+  const fetchMock = spyOn(globalThis, "fetch").mockImplementation(async () => json([bookmark(1)]));
   await makeAdapter().saveArticle({
     url: "https://en.wikipedia.org/wiki/Foo_(bar)",
     title: "t",
   } as never);
-  expectValidSignature(
-    fetchMock.mock.calls[0],
-    ["title=t", "url=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FFoo_%28bar%29"],
-  );
+  expectValidSignature(fetchMock.mock.calls[0], [
+    "title=t",
+    "url=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FFoo_%28bar%29",
+  ]);
 });

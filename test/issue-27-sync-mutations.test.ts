@@ -178,20 +178,6 @@ test("failed sync fetch propagates the error and preserves cached data", async (
   expect(storage[keys.lastSyncTimestamp]).toBeUndefined();
 });
 
-test("failed cache persistence propagates and keeps prior cache intact", async () => {
-  const failure = new Error("storage quota exceeded");
-  makeBrowserMock({ failWrites: failure });
-  const repository = await makeRepository();
-
-  spyOn(BookmarksAdapter.prototype, "saveArticle").mockResolvedValue(
-    article(9, "https://example.com/x"),
-  );
-
-  await expect(
-    repository.saveArticle({ url: "https://example.com/x", title: "X" }),
-  ).rejects.toThrow("storage quota exceeded");
-});
-
 test("concurrent cache mutations commit in order without losing writes", async () => {
   const { storage } = makeBrowserMock();
   const repository = await makeRepository();
@@ -284,4 +270,18 @@ test("sync returns the final stored collection, including articles saved mid-syn
 
   const storedIds = (await repository.getAllArticles()).map((a) => a.id);
   expect(result.items.map((a) => a.id).sort()).toEqual(storedIds.sort());
+});
+
+test("failed cache persistence propagates and keeps prior cache intact", async () => {
+  const failure = new Error("storage quota exceeded");
+  makeBrowserMock({ failWrites: failure });
+  const repository = await makeRepository();
+
+  spyOn(BookmarksAdapter.prototype, "saveArticle").mockResolvedValue(
+    article(9, "https://example.com/x"),
+  );
+
+  await expect(
+    repository.saveArticle({ url: "https://example.com/x", title: "X" }),
+  ).rejects.toThrow("Pouch stopped: persist articles failed");
 });

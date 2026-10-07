@@ -82,6 +82,14 @@ src/
 └── utils/          # Utility functions
 ```
 
+## Local storage failures
+
+If a local storage write fails, Pouch stops saves, deletes, sync, and maintenance. The popup, settings page, and browser notification show the failed operation, safe browser details, and the remote outcome when known. Do not repeat a confirmed remote save. Stopping Pouch cannot undo operations already sent to the browser or backend.
+
+Restart the extension after fixing the storage problem. Each new background instance checks local storage reads, writes, and removal before accepting normal work. Chromium can terminate its MV3 worker and discard the in-memory failure state. Its next worker checks storage before resuming.
+
+Pouch does not automatically retry or reconcile a remote mutation after a local failure.
+
 ## License
 
 MIT License
