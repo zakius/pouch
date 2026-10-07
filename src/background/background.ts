@@ -373,7 +373,11 @@ onFatalStorage((diagnostic) => {
   void browser.contextMenus
     .update("save-link", { title: "Pouch stopped: local storage failed", enabled: false })
     .catch(() => {});
-  if (!IS_CHROMIUM) {
+  if (IS_CHROMIUM) {
+    void browser.runtime
+      .sendMessage(QUICK_ACTIONS_ID, { type: "fatalStorage", error: diagnostic.error })
+      .catch(() => {});
+  } else {
     void browser.tabs
       .query({})
       .then(async (tabs) => {
@@ -457,8 +461,14 @@ async function togglePageSave(tab: Tab): Promise<void> {
 }
 if (IS_CHROMIUM) {
   browser.runtime.onMessageExternal.addListener(async (message: QuickActionMessage, sender) => {
-    if (getStorageDiagnostic()) return;
     if (sender.id !== QUICK_ACTIONS_ID) {
+      return;
+    }
+    const diagnostic = getStorageDiagnostic();
+    if (diagnostic) {
+      await browser.runtime
+        .sendMessage(QUICK_ACTIONS_ID, { type: "fatalStorage", error: diagnostic.error })
+        .catch(() => {});
       return;
     }
     if (message?.type === "togglePage") {
@@ -498,6 +508,7 @@ async function updateUiForTab(tabId: number): Promise<void> {
     }
     const articlesRepository = await getArticlesRepository();
     const existingArticle = await articlesRepository.findSaved(tab.url);
+    assertStorageHealthy();
     const isSaved = !!existingArticle;
     if (IS_CHROMIUM) {
       const state: PageStateMessage = { type: "pageState", tabId, saved: isSaved };

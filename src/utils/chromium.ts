@@ -12,6 +12,8 @@ export interface PageStateMessage {
   tabId: number;
   saved: boolean;
 }
+export type QuickActionStateMessage = PageStateMessage | { type: "fatalStorage"; error: string };
+
 /** Quick Actions to Pouch: save or remove a tab's page, or resend the active tab's state. */
 export type QuickActionMessage = { type: "togglePage"; tabId: number } | { type: "refreshUi" };
 
