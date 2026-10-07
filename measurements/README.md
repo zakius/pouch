@@ -63,3 +63,18 @@ This is a substantial relative bundle increase, with a small absolute startup in
 Validation: 199 tests passed, including all retained #72 fatal lifecycle tests. Typecheck, type-aware Oxlint, formatting, diff checks, Effect diagnostics, and both package builds passed. Firefox `web-ext lint` reported zero errors and one existing Android minimum-version warning. Mozilla's validator rejects Chromium manifests for unsupported service workers and missing Firefox add-on IDs. Its Chromium output is not a Chromium compatibility verdict.
 
 Both packaged background entries execute in the measurement script, and the build retains MV3 manifests and the separate Quick Actions package. Native extension installation remains outside the available preview controls.
+
+## Review fixes (#73)
+
+The follow-up samples in `effect-73-fix.json` execute product source commit `bc39ba80d1881bb25a16c024e2bed6585a0642dc`. They use the same host, script, ten cold processes, and mocked APIs as the original pilot.
+
+- Firefox: minified JavaScript 260,656 bytes, background entry 132,940 bytes, ZIP 85,837 bytes, mocked startup median 8.844 ms.
+- Chromium: minified JavaScript 260,767 bytes, background entry 132,977 bytes, ZIP 94,974 bytes, mocked startup median 7.120 ms.
+
+The fixes add 4,011 JavaScript bytes per target over the original pilot. The increase over baseline is 100,714 bytes per target (about 63%). Startup samples vary between runs and remain measurements of a mocked Bun host.
+
+Create Chromium packages without an existing ZIP when measuring or validating package contents. The build updates an existing ZIP and can retain stale hashed bundles. The first follow-up archive included obsolete options bundles from baseline and pilot builds. Removing the generated Chromium ZIPs before rebuilding produced the sizes recorded here. Preserve the original samples as historical evidence, but do not interpret their Chromium ZIP comparison as a clean-package comparison. JavaScript totals come from the unpackaged directories and exclude stale archive entries.
+
+Validation after the fixes: 213 tests passed with 437 assertions across 16 files. Cancellation coverage gates save/delete before submission, during the browser mutation, during local commit, and during overwrite-sync replay. It also verifies late remote success after fatal shutdown, failed local commit after cancellation, and isolation between runner invocations. Browser failure coverage distinguishes missing folders, denied permission, unavailable APIs, and unknown payloads without exposing credentials.
+
+Typecheck, type-aware lint, formatting, diff checks, both package builds, and all three ZIP integrity checks passed. Strict Effect diagnostics checked 34 product files with zero errors, warnings, or messages. A temporary floating Effect proof failed with `effect(floatingEffect)` and exit 1, then was removed. Firefox manifest validation still reports zero errors and the existing Android warning. Browser performance acceptance and live extension lifecycle verification remain provisional.
