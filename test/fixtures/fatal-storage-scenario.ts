@@ -482,6 +482,184 @@ switch (scenario) {
     assert.ok(broadcasts.length > 0);
     break;
   }
+  case "ui-race":
+  case "ui-menu-race": {
+    await import("../../src/background/background");
+    await new Promise<void>((resolve) =>
+      events.message({ type: "getStorageDiagnostic" }, {}, resolve),
+    );
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let release!: () => void;
+    const updates: any[] = [];
+    (browser.tabs.get as any) = async () => ({ id: 1, url: "https://example.com/old" });
+    (browser.contextMenus.update as any) = async (id: string, values: any) => {
+      if (scenario === "ui-menu-race" && values.enabled === true) {
+        started();
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      }
+      updates.push({ id, ...values });
+    };
+    (browser.runtime.sendMessage as any) = async (_target: unknown, message: any) => {
+      if (scenario === "ui-race" && message?.type === "pageState") {
+        started();
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      }
+    };
+    const ui = events.active({ tabId: 1 });
+    await ready;
+    rejectSet = true;
+    await rejectsFatal(() => setLocal("race failure", {}));
+    release();
+    await ui;
+    assert.equal(
+      updates.at(-1)?.enabled,
+      false,
+      "normal context menu must stay disabled after fatal storage",
+    );
+    break;
+  }
+  case "auth-outcome":
+  case "instapaper-auth-outcome": {
+    const { WallabagAdapter } = await import("../../src/background/api/adapters/wallabag-adapter");
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          access_token: "new-token",
+          refresh_token: "new-refresh",
+          expires_in: 3600,
+          token_type: "bearer",
+        }),
+        { status: 200 },
+      );
+    rejectSet = true;
+    if (scenario === "auth-outcome") {
+      const adapter = new WallabagAdapter(tokens);
+      await rejectsFatal(() =>
+        adapter.initialize({
+          ...settings,
+          backend: "wallabag",
+          apiConfig: {
+            url: "https://example.com",
+            clientId: "client",
+            clientSecret: "secret",
+            username: "user",
+            password: "password",
+          },
+        }),
+      );
+    } else {
+      const { InstapaperAdapter } =
+        await import("../../src/background/api/adapters/instapaper-adapter");
+      globalThis.fetch = async () => new Response("oauth_token=token&oauth_token_secret=secret");
+      await rejectsFatal(() =>
+        new InstapaperAdapter(tokens).initialize({
+          ...settings,
+          backend: "instapaper",
+          apiConfig: {
+            consumerKey: "client",
+            consumerSecret: "secret",
+            username: "user",
+            password: "password",
+          },
+        }),
+      );
+    }
+    assert.equal(getStorageDiagnostic()?.remoteOperation, "authentication");
+    assert.equal(tokens.getTokenMetadata("service"), null);
+    assert.equal(
+      getStorageDiagnostic()?.remoteOutcome,
+      "succeeded",
+      "successful token acquisition is a known remote outcome",
+    );
+    break;
+  }
+  case "queued-outcome":
+  case "queued-mutations": {
+    let writeStarted!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      writeStarted = resolve;
+    });
+    let rejectWrite!: (error: unknown) => void;
+    (browser.storage.local.set as any) = async () => {
+      writeStarted();
+      await new Promise<void>((_resolve, reject) => {
+        rejectWrite = reject;
+      });
+    };
+    let queuedSave!: () => void;
+    const queued = new Promise<void>((resolve) => {
+      queuedSave = resolve;
+    });
+    const enqueue = Reflect.get(repository, "enqueueCommit").bind(repository);
+    let commits = 0;
+    Reflect.set(repository, "enqueueCommit", (work: any, ...outcome: any[]) => {
+      const result = enqueue(work, ...outcome);
+      if (++commits === 2) queuedSave();
+      return result;
+    });
+    const first = repository.updateArticles([]);
+    const firstFailure = rejectsFatal(() => first);
+    await ready;
+    let saveDiagnostic: any;
+    let deleteDiagnostic: any;
+    const save = repository
+      .saveArticle({ url: "https://example.com/new", title: "New" })
+      .catch((error) => {
+        saveDiagnostic = error.diagnostic;
+        throw error;
+      });
+    const saveFailure = rejectsFatal(() => save);
+    await queued;
+    assert.equal(remoteSaves, 1);
+    let deleted: Promise<void> | undefined;
+    if (scenario === "queued-mutations") {
+      let deletionQueued!: () => void;
+      const deletionReady = new Promise<void>((resolve) => {
+        deletionQueued = resolve;
+      });
+      Reflect.set(repository, "enqueueCommit", (work: any, ...outcome: any[]) => {
+        const result = enqueue(work, ...outcome);
+        deletionQueued();
+        return result;
+      });
+      deleted = rejectsFatal(() =>
+        repository.deleteArticle(original.id).catch((error) => {
+          deleteDiagnostic = error.diagnostic;
+          throw error;
+        }),
+      );
+      await deletionReady;
+      assert.equal(remoteDeletes, 1);
+    }
+    rejectWrite(quota);
+    await Promise.all([firstFailure, saveFailure, deleted]);
+    assert.equal(saveDiagnostic.remoteOutcome, "succeeded");
+    assert.equal(saveDiagnostic.remoteOperation, "save");
+    if (scenario === "queued-mutations") {
+      assert.equal(deleteDiagnostic.remoteOutcome, "succeeded");
+      assert.equal(deleteDiagnostic.remoteOperation, "delete");
+    }
+    assert.equal(
+      getStorageDiagnostic()?.remoteOutcome,
+      "succeeded",
+      "queued completed save must retain its known success",
+    );
+    assert.equal(
+      getStorageDiagnostic()?.remoteOperation,
+      scenario === "queued-mutations" ? "delete" : "save",
+    );
+    assert.match(getStorageDiagnostic()!.error, /Remote save succeeded. Do not repeat it/);
+    if (scenario === "queued-mutations")
+      assert.match(getStorageDiagnostic()!.error, /Remote delete succeeded. Do not repeat it/);
+    break;
+  }
   default:
     throw new Error(`Unknown scenario ${scenario}`);
 }

@@ -224,7 +224,12 @@ export class WallabagAdapter implements ReadItLaterAPI<WallabagSettings>, Tokeni
     }
 
     const tokenMetadata = this.createTokenMetadata(validatedTokenData);
-    await this.tokens.storeToken(this.getServiceName(), tokenMetadata);
+    await this.tokens.storeToken(
+      this.getServiceName(),
+      tokenMetadata,
+      "succeeded",
+      "authentication",
+    );
 
     logger.debug("Wallabag authentication successful", {
       tokenType: tokenMetadata.tokenType,

@@ -23,8 +23,17 @@ export function getStorageDiagnostic(): StorageDiagnostic | undefined {
   return fatal?.diagnostic;
 }
 
-export function assertStorageHealthy(): void {
-  if (fatal) throw fatal;
+export function assertStorageHealthy(
+  remoteOutcome?: RemoteOutcome,
+  remoteOperation?: string,
+): void {
+  if (fatal) {
+    if (remoteOutcome && remoteOperation) {
+      reportRemoteOutcome(remoteOperation, remoteOutcome);
+      throw new FatalStorageError({ ...fatal.diagnostic, remoteOutcome, remoteOperation });
+    }
+    throw fatal;
+  }
 }
 
 export function onFatalStorage(listener: (diagnostic: StorageDiagnostic) => void): void {
@@ -85,8 +94,12 @@ function stopStorage(
     });
     shutdown.abort(fatal);
     publishDiagnostic();
+  } else if (remoteOutcome !== "unknown" && remoteOperation) {
+    reportRemoteOutcome(remoteOperation, remoteOutcome);
   }
-  return fatal;
+  return remoteOperation && remoteOutcome !== "unknown"
+    ? new FatalStorageError({ ...fatal.diagnostic, remoteOutcome, remoteOperation })
+    : fatal;
 }
 
 /** A browser/backend mutation can finish after shutdown has already started. */
@@ -112,13 +125,13 @@ async function localWrite(
   remoteOutcome: RemoteOutcome = "unknown",
   remoteOperation?: string,
 ): Promise<void> {
-  assertStorageHealthy();
+  assertStorageHealthy(remoteOutcome, remoteOperation);
   try {
     await write();
   } catch (error) {
     throw stopStorage(operation, error, remoteOutcome, remoteOperation);
   }
-  assertStorageHealthy();
+  assertStorageHealthy(remoteOutcome, remoteOperation);
 }
 
 export function setLocal(

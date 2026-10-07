@@ -188,7 +188,12 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
     }
 
     const tokenMetadata = this.createTokenMetadata({});
-    await this.tokens.storeToken(this.getServiceName(), tokenMetadata);
+    await this.tokens.storeToken(
+      this.getServiceName(),
+      tokenMetadata,
+      "succeeded",
+      "authentication",
+    );
   }
   async testConnection(): Promise<boolean> {
     try {

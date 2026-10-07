@@ -1,5 +1,6 @@
 import {
   assertStorageHealthy,
+  FatalStorageError,
   checkStorageOnStartup,
   getStorageDiagnostic,
   onFatalStorage,
@@ -143,7 +144,11 @@ browser.runtime.onMessage.addListener(
       const safeSendResponse = (response: unknown) => {
         if (!responseSent) {
           responseSent = true;
-          sendResponse(getStorageDiagnostic() ?? response);
+          sendResponse(
+            response instanceof FatalStorageError
+              ? response.diagnostic
+              : (getStorageDiagnostic() ?? response),
+          );
         }
       };
       try {
@@ -316,7 +321,9 @@ browser.runtime.onMessage.addListener(
         logger.error(`Error handling message:`, error);
         if (!responseSent) {
           safeSendResponse(
-            getStorageDiagnostic() ?? { error: (error as Error).message || "Unknown error" },
+            error instanceof FatalStorageError
+              ? error
+              : (getStorageDiagnostic() ?? { error: (error as Error).message || "Unknown error" }),
           );
         }
       }
@@ -367,18 +374,22 @@ onFatalStorage((diagnostic) => {
     })
     .catch((error) => logger.error("Storage notification failed:", error));
   void browser.runtime.sendMessage({ type: "fatalStorage", diagnostic }).catch(() => {});
-  void browser.contextMenus
-    .update("save-page", { title: "Pouch stopped: local storage failed", enabled: false })
-    .catch(() => {});
-  void browser.contextMenus
-    .update("save-link", { title: "Pouch stopped: local storage failed", enabled: false })
-    .catch(() => {});
   if (IS_CHROMIUM) {
     void browser.runtime
       .sendMessage(QUICK_ACTIONS_ID, { type: "fatalStorage", error: diagnostic.error })
       .catch(() => {});
-  } else {
-    void browser.tabs
+  }
+  void showFatalUi();
+});
+async function showFatalUi(): Promise<void> {
+  await browser.contextMenus
+    .update("save-page", { title: "Pouch stopped: local storage failed", enabled: false })
+    .catch(() => {});
+  await browser.contextMenus
+    .update("save-link", { title: "Pouch stopped: local storage failed", enabled: false })
+    .catch(() => {});
+  if (!IS_CHROMIUM) {
+    await browser.tabs
       .query({})
       .then(async (tabs) => {
         for (const tab of tabs) {
@@ -395,7 +406,7 @@ onFatalStorage((diagnostic) => {
       })
       .catch(() => {});
   }
-});
+}
 function notifyError(operation: string, error: unknown): void {
   void browser.notifications.create(ERROR_NOTIFICATION_ID, {
     type: "basic",
@@ -503,6 +514,7 @@ async function updateUiForTab(tabId: number): Promise<void> {
   if (getStorageDiagnostic()) return;
   try {
     const tab = await browser.tabs.get(tabId);
+    assertStorageHealthy();
     if (!tab.url || !isValidHttpUrl(tab.url)) {
       return;
     }
@@ -516,22 +528,31 @@ async function updateUiForTab(tabId: number): Promise<void> {
       await browser.runtime.sendMessage(QUICK_ACTIONS_ID, state).catch(() => {});
     } else {
       await browser.pageAction.setIcon({ tabId, path: getIconPath(isSaved) });
+      assertStorageHealthy();
       browser.pageAction.setTitle({
         tabId,
         title: isSaved ? "Article saved" : "Save to Pouch",
       });
+      assertStorageHealthy();
       await browser.pageAction.show(tabId);
     }
+    assertStorageHealthy();
     await browser.contextMenus.update("save-page", {
       title: isSaved ? "Remove page" : "Save page",
       enabled: true,
     });
+    assertStorageHealthy();
   } catch (error) {
+    if (getStorageDiagnostic()) {
+      await showFatalUi();
+      return;
+    }
     logger.error("Error updating UI for tab:", error);
     await browser.contextMenus.update("save-page", {
       title: "Unable to determine page status",
       enabled: false,
     });
+    if (getStorageDiagnostic()) await showFatalUi();
   }
 }
 // Popup-initiated saves and deletes bypass the page-action toggle, so the

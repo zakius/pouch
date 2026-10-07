@@ -1,5 +1,6 @@
 import {
   assertStorageHealthy,
+  FatalStorageError,
   reportRemoteOutcome,
   setLocal,
   removeLocal,
@@ -112,6 +113,7 @@ export class ArticlesRepository {
         this.api = api;
         return api;
       })().catch((error: unknown) => {
+        if (error instanceof FatalStorageError) throw error;
         assertStorageHealthy();
         this.apiInitPromise = null;
         logger.error("Failed to initialize API:", error);
@@ -166,11 +168,20 @@ export class ArticlesRepository {
     this.articlesCache = articles;
   }
 
-  private enqueueCommit<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.commitQueue.then(() => {
-      assertStorageHealthy();
-      return operation();
-    });
+  private enqueueCommit<T>(
+    operation: () => Promise<T>,
+    remoteOutcome?: RemoteOutcome,
+    remoteOperation?: string,
+  ): Promise<T> {
+    const result = this.commitQueue
+      .then(() => {
+        assertStorageHealthy(remoteOutcome, remoteOperation);
+        return operation();
+      })
+      .catch((error: unknown) => {
+        assertStorageHealthy(remoteOutcome, remoteOperation);
+        throw error;
+      });
     this.commitQueue = result.then(
       () => undefined,
       () => undefined,
@@ -447,26 +458,30 @@ export class ArticlesRepository {
   ): Promise<void> {
     logger.debug("Adding article to cache:", article);
 
-    return this.enqueueCommit(async () => {
-      const existingArticles = await this.getAllArticles();
+    return this.enqueueCommit(
+      async () => {
+        const existingArticles = await this.getAllArticles();
 
-      const canonicalUrl = article.canonicalUrl || article.url;
-      let isDuplicate = false;
-      for (const a of existingArticles) {
-        if (await this.sameUrl(a.url, article.url)) {
-          isDuplicate = true;
-          break;
+        const canonicalUrl = article.canonicalUrl || article.url;
+        let isDuplicate = false;
+        for (const a of existingArticles) {
+          if (await this.sameUrl(a.url, article.url)) {
+            isDuplicate = true;
+            break;
+          }
         }
-      }
 
-      if (isDuplicate) {
-        logger.debug("Article already exists in cache, skipping add:", canonicalUrl);
-        return;
-      }
+        if (isDuplicate) {
+          logger.debug("Article already exists in cache, skipping add:", canonicalUrl);
+          return;
+        }
 
-      await this.storeArticles([article, ...existingArticles], remoteOutcome, remoteOperation);
-      logger.debug("Article added to cache:", article);
-    });
+        await this.storeArticles([article, ...existingArticles], remoteOutcome, remoteOperation);
+        logger.debug("Article added to cache:", article);
+      },
+      remoteOutcome,
+      remoteOperation,
+    );
   }
 
   private removeArticle(
@@ -479,17 +494,21 @@ export class ArticlesRepository {
       logger.error("Cannot remove article from cache: No ID provided");
       return Promise.resolve();
     }
-    return this.enqueueCommit(async () => {
-      const articles = await this.getAllArticles();
-      // String comparison, so entries stored with the other id type (see
-      // getArticle) still match.
-      const target = String(id);
-      await this.storeArticles(
-        articles.filter((a) => String(a.id) !== target),
-        remoteOutcome,
-        remoteOperation,
-      );
-    });
+    return this.enqueueCommit(
+      async () => {
+        const articles = await this.getAllArticles();
+        // String comparison, so entries stored with the other id type (see
+        // getArticle) still match.
+        const target = String(id);
+        await this.storeArticles(
+          articles.filter((a) => String(a.id) !== target),
+          remoteOutcome,
+          remoteOperation,
+        );
+      },
+      remoteOutcome,
+      remoteOperation,
+    );
   }
 
   updateArticles(
@@ -498,8 +517,10 @@ export class ArticlesRepository {
     remoteOperation?: string,
   ): Promise<void> {
     logger.debug("Updating articles in cache:", newArticles.length);
-    return this.enqueueCommit(() =>
-      this.storeArticles(newArticles, remoteOutcome, remoteOperation),
+    return this.enqueueCommit(
+      () => this.storeArticles(newArticles, remoteOutcome, remoteOperation),
+      remoteOutcome,
+      remoteOperation,
     );
   }
 
@@ -509,34 +530,38 @@ export class ArticlesRepository {
     remoteOperation?: string,
   ): Promise<void> {
     logger.debug("Merging articles in cache:", newArticles.length);
-    return this.enqueueCommit(async () => {
-      const existingArticles = await this.getAllArticles();
-      const existingMap = new Map(existingArticles.map((article) => [article.id, article]));
-      const compareKeyOf = (article: Article): string =>
-        this.settings.normalizeOnCompare ? article.canonicalUrl || article.url : article.url;
-      const existingCanonicalMap = new Map(
-        existingArticles.map((article) => [compareKeyOf(article), article]),
-      );
+    return this.enqueueCommit(
+      async () => {
+        const existingArticles = await this.getAllArticles();
+        const existingMap = new Map(existingArticles.map((article) => [article.id, article]));
+        const compareKeyOf = (article: Article): string =>
+          this.settings.normalizeOnCompare ? article.canonicalUrl || article.url : article.url;
+        const existingCanonicalMap = new Map(
+          existingArticles.map((article) => [compareKeyOf(article), article]),
+        );
 
-      for (const newArticle of newArticles) {
-        const compareKey = compareKeyOf(newArticle);
-        const existingByCanonical = existingCanonicalMap.get(compareKey);
+        for (const newArticle of newArticles) {
+          const compareKey = compareKeyOf(newArticle);
+          const existingByCanonical = existingCanonicalMap.get(compareKey);
 
-        if (existingByCanonical && existingByCanonical.id !== newArticle.id) {
-          const existingById = existingMap.get(existingByCanonical.id);
-          if (existingById && existingById.id === existingByCanonical.id) {
-            continue;
+          if (existingByCanonical && existingByCanonical.id !== newArticle.id) {
+            const existingById = existingMap.get(existingByCanonical.id);
+            if (existingById && existingById.id === existingByCanonical.id) {
+              continue;
+            }
           }
+
+          existingMap.set(newArticle.id, newArticle);
+          existingCanonicalMap.set(compareKey, newArticle);
         }
 
-        existingMap.set(newArticle.id, newArticle);
-        existingCanonicalMap.set(compareKey, newArticle);
-      }
-
-      const mergedArticles = Array.from(existingMap.values());
-      await this.storeArticles(mergedArticles, remoteOutcome, remoteOperation);
-      logger.debug("Merged articles count:", mergedArticles.length);
-    });
+        const mergedArticles = Array.from(existingMap.values());
+        await this.storeArticles(mergedArticles, remoteOutcome, remoteOperation);
+        logger.debug("Merged articles count:", mergedArticles.length);
+      },
+      remoteOutcome,
+      remoteOperation,
+    );
   }
 
   async clear(): Promise<void> {

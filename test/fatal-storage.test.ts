@@ -5,6 +5,12 @@ for (const scenario of [
   "articles",
   "delete",
   "queued",
+  "queued-outcome",
+  "queued-mutations",
+  "ui-race",
+  "ui-menu-race",
+  "auth-outcome",
+  "instapaper-auth-outcome",
   "sync-articles",
   "timestamps",
   "tokens",
@@ -37,7 +43,9 @@ for (const scenario of [
       {
         env: {
           ...process.env,
-          POUCH_TARGET: scenario === "worker-restart" ? "chromium" : "firefox",
+          POUCH_TARGET: ["worker-restart", "ui-race", "ui-menu-race"].includes(scenario)
+            ? "chromium"
+            : "firefox",
         },
         timeout: 10_000,
       },

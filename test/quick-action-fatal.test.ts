@@ -6,6 +6,10 @@ const disabled: (number | undefined)[] = [];
 const enabled: number[] = [];
 const badges: string[] = [];
 const titles: string[] = [];
+let diagnostic: unknown = { code: "FATAL_LOCAL_STORAGE" };
+let holdBadge = false;
+let releaseBadge!: () => void;
+let badgeStarted!: () => void;
 let listener!: (message: unknown, sender: { id: string }) => Promise<void>;
 Object.assign(globalThis, {
   browser: {
@@ -17,6 +21,12 @@ Object.assign(globalThis, {
         enabled.push(id);
       },
       setBadgeText: async ({ text }: { text: string }) => {
+        if (holdBadge && text === "") {
+          badgeStarted();
+          await new Promise<void>((resolve) => {
+            releaseBadge = resolve;
+          });
+        }
         badges.push(text);
       },
       setTitle: async ({ title }: { title: string }) => {
@@ -27,7 +37,7 @@ Object.assign(globalThis, {
     },
     tabs: { query: async () => [{ id: 1 }, { id: 2 }] },
     runtime: {
-      sendMessage: async () => {},
+      sendMessage: async () => diagnostic,
       onMessageExternal: {
         addListener: (callback: typeof listener) => {
           listener = callback;
@@ -49,13 +59,26 @@ test("Chromium Quick Actions shows fatal diagnostics and disables each tab until
     { id: "untrusted" },
   );
   expect(disabled).toEqual([undefined]);
+  holdBadge = true;
+  const ready = new Promise<void>((resolve) => {
+    badgeStarted = resolve;
+  });
+  const pending = listener({ type: "pageState", tabId: 1, saved: false }, { id: POUCH_ID });
+  await ready;
   await listener(
     { type: "fatalStorage", error: "Pouch stopped. Remote save succeeded." },
     { id: POUCH_ID },
   );
-  expect(disabled).toEqual([undefined, undefined, 1, 2]);
+  holdBadge = false;
+  releaseBadge();
+  await pending;
+  expect(disabled).toEqual([undefined, undefined, 1, 2, undefined, 1, 2]);
   expect(badges.at(-1)).toBe("!");
   expect(titles.at(-1)).toContain("Remote save succeeded");
+  await listener({ type: "pageState", tabId: 1, saved: true }, { id: POUCH_ID });
+  expect(badges.at(-1)).toBe("!");
+  expect(enabled).toEqual([1]);
+  diagnostic = null;
   await listener({ type: "pageState", tabId: 1, saved: true }, { id: POUCH_ID });
   expect(badges.at(-1)).toBe("");
   expect(enabled).toEqual([1, 1]);

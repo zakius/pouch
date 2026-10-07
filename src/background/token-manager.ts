@@ -1,5 +1,6 @@
 import {
   assertStorageHealthy,
+  FatalStorageError,
   setLocal,
   storageShutdownSignal,
   type RemoteOutcome,
@@ -95,13 +96,19 @@ export class TokenManager {
   public async storeToken(
     serviceName: string,
     tokenData: Omit<TokenMetadata, "serviceName">,
+    remoteOutcome?: RemoteOutcome,
+    remoteOperation?: string,
   ): Promise<void> {
     const tokenMetadata: TokenMetadata = {
       ...tokenData,
       serviceName,
     };
 
-    await this.commitTokens((tokens) => tokens.set(serviceName, tokenMetadata));
+    await this.commitTokens(
+      (tokens) => tokens.set(serviceName, tokenMetadata),
+      remoteOutcome,
+      remoteOperation,
+    );
 
     logger.info(`Token stored for ${serviceName}`, {
       expiresAt: new Date(tokenMetadata.expiresAt).toISOString(),
@@ -303,6 +310,7 @@ export class TokenManager {
 
       return { success: true, requiresReauth: false };
     } catch (error) {
+      if (error instanceof FatalStorageError) throw error;
       assertStorageHealthy();
       this.tokens.set(serviceName, attempt);
       logger.error(`Token refresh error for ${serviceName}:`, error);
@@ -404,23 +412,28 @@ export class TokenManager {
     remoteOutcome?: RemoteOutcome,
     remoteOperation?: string,
   ): Promise<void> {
-    const result = this.tokenCommitQueue.then(async () => {
-      assertStorageHealthy();
-      const tokens = new Map(this.tokens);
-      change(tokens);
-      if (this.config.persist) {
-        await setLocal(
-          "persist tokens",
-          {
-            [this.config.storageKey]: Array.from(tokens.entries()),
-          },
-          remoteOutcome,
-          remoteOperation,
-        );
-      }
-      assertStorageHealthy();
-      this.tokens = tokens;
-    });
+    const result = this.tokenCommitQueue
+      .then(async () => {
+        assertStorageHealthy(remoteOutcome, remoteOperation);
+        const tokens = new Map(this.tokens);
+        change(tokens);
+        if (this.config.persist) {
+          await setLocal(
+            "persist tokens",
+            {
+              [this.config.storageKey]: Array.from(tokens.entries()),
+            },
+            remoteOutcome,
+            remoteOperation,
+          );
+        }
+        assertStorageHealthy();
+        this.tokens = tokens;
+      })
+      .catch((error: unknown) => {
+        assertStorageHealthy(remoteOutcome, remoteOperation);
+        throw error;
+      });
     this.tokenCommitQueue = result.catch(() => {});
     return result;
   }
