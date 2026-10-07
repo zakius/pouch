@@ -47,4 +47,19 @@ error effect(floatingEffect): This Effect value is neither yielded nor used in a
 
 The proof fixture no longer exists. Clean product diagnostics checked 34 files and reported zero errors, warnings, and messages. The proof used the same project configuration and CLI command as the quality checks.
 
-The temporary Promise bridges in `effect-adapter.ts`, `BookmarksAdapter`, and repository sync/commit coordination have removal tracked by #81, after #80 migrates shared coordination. Ready bookmark save/delete and connection testing already compose native Effects. Browser Promise rejections are classified at the browser boundary. Synchronous implementation exceptions, Effect defects, and interruption remain separate at the runner. Fatal writes retain the #72 shutdown latch and known remote outcome.
+The temporary Promise bridges in `effect-adapter.ts`, `BookmarksAdapter`, and repository sync/commit coordination have removal tracked by #81, after #80 migrates shared coordination. Ready bookmark save/delete and connection testing already compose native Effects. The browser boundary classifies Promise rejections. Synchronous implementation exceptions, Effect defects, and interruption remain separate at the runner. Fatal writes retain the #72 shutdown latch and known remote outcome.
+
+# Bookmarks pilot (#73)
+
+The baseline and pilot JSON files retain all twenty samples. The pilot executes product source commit `877d33ee84b5216bb934ab2cc3048225eb44d8a2`.
+
+- Firefox: minified JavaScript 159,942 → 256,645 bytes. Background entry 80,609 → 130,833 bytes. ZIP 53,029 → 84,640 bytes. Mocked startup median 4.898 → 8.921 ms.
+- Chromium: minified JavaScript 160,053 → 256,756 bytes. Background entry 80,646 → 130,870 bytes. ZIP 62,088 → 109,549 bytes. Mocked startup median 4.463 → 7.081 ms.
+
+Both targets add 96,703 minified JavaScript bytes (about 60%). Mocked startup adds 4.023 ms for Firefox and 2.619 ms for Chromium. Effect also enters the options bundle through the legacy adapter factory. No runtime devtools server or external tracing infrastructure runs.
+
+This is a substantial relative bundle increase, with a small absolute startup increase under the mocked host. The implementation passes the behavior pilot. Browser performance acceptance remains provisional until the integration owner measures real extension worker wake. Repeat this procedure for #74 and assess the combined pilot before migrating the remaining adapters.
+
+Validation: 199 tests passed, including all retained #72 fatal lifecycle tests. Typecheck, type-aware Oxlint, formatting, diff checks, Effect diagnostics, and both package builds passed. Firefox `web-ext lint` reported zero errors and one existing Android minimum-version warning. Mozilla's validator rejects Chromium manifests for unsupported service workers and missing Firefox add-on IDs. Its Chromium output is not a Chromium compatibility verdict.
+
+Both packaged background entries execute in the measurement script, and the build retains MV3 manifests and the separate Quick Actions package. Native extension installation remains outside the available preview controls.
