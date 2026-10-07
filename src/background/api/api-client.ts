@@ -1,3 +1,4 @@
+import { assertStorageHealthy, storageShutdownSignal } from "../../utils/fatal-storage";
 /**
  * API Client with Token Management
  *
@@ -164,6 +165,7 @@ export class ApiClient {
     endpoint: string,
     options: RequestOptions = {},
   ): Promise<ApiResponse<T>> {
+    assertStorageHealthy();
     const url = this.buildUrl(endpoint);
     const requestOptions = await this.buildRequestOptions(options);
 
@@ -191,6 +193,7 @@ export class ApiClient {
         headers: response.headers,
       };
     } catch (error) {
+      assertStorageHealthy();
       if (error instanceof Error && error.name === "AbortError" && !options.signal?.aborted) {
         throw new Error(`Request timeout after ${options.timeout || this.config.timeoutMs}ms`);
       }
@@ -218,6 +221,7 @@ export class ApiClient {
       });
       return response.status >= 200 && response.status < 300;
     } catch (error) {
+      assertStorageHealthy();
       logger.error(`Connection test failed for ${this.serviceName}:`, error);
       return false;
     }
@@ -263,6 +267,7 @@ export class ApiClient {
           headers.Authorization = authHeader;
         }
       } catch (error) {
+        assertStorageHealthy();
         logger.warn(`Failed to get auth header for ${this.serviceName}:`, error);
       }
     }
@@ -285,6 +290,7 @@ export class ApiClient {
       const tokenType = tokenMetadata?.tokenType || "Bearer";
       return `${tokenType} ${accessToken}`;
     } catch (error) {
+      assertStorageHealthy();
       logger.debug(`Failed to get access token for ${this.serviceName}:`, error);
       return null;
     }
@@ -295,11 +301,15 @@ export class ApiClient {
     options: RequestOptions,
   ): Promise<{ response: Response; dispose: () => void }> {
     const timeout = options.timeout || this.config.timeoutMs;
-    const callerSignal = options.signal;
+    const callerSignal = AbortSignal.any([
+      storageShutdownSignal(),
+      ...(options.signal ? [options.signal] : []),
+    ]);
     let rateLimitRetries = this.config.rateLimit.maxRetries;
     let authRetries = this.config.maxAuthRetries;
 
     for (;;) {
+      assertStorageHealthy();
       const controller = new AbortController();
       const signal = callerSignal
         ? AbortSignal.any([callerSignal, controller.signal])
@@ -405,6 +415,7 @@ export class ApiClient {
         resolve();
       }, delay);
       signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
     });
   }
 
@@ -420,6 +431,7 @@ export class ApiClient {
       );
       return await this.attemptReAuthentication();
     } catch (error) {
+      assertStorageHealthy();
       logger.error(`Error handling auth failure for ${this.serviceName}:`, error);
       return false;
     }
@@ -452,6 +464,7 @@ export class ApiClient {
 
       return false;
     } catch (error) {
+      assertStorageHealthy();
       logger.error(`Error during token refresh for ${this.serviceName}:`, error);
       return false;
     }
@@ -471,6 +484,7 @@ export class ApiClient {
       logger.info(`Full re-authentication successful for ${this.serviceName}`);
       return true;
     } catch (error) {
+      assertStorageHealthy();
       logger.error(`Error during re-authentication for ${this.serviceName}:`, error);
       return false;
     }
@@ -498,7 +512,7 @@ export class ApiClient {
     if (timeSinceLastRequest < this.config.rateLimit.delayMs) {
       const delay = this.config.rateLimit.delayMs - timeSinceLastRequest;
       logger.debug(`Rate limiting: waiting ${delay}ms`);
-      await new Promise((resolve) => setTimeout(resolve, delay));
+      await this.waitForRetry(delay, storageShutdownSignal());
     }
 
     this.lastRequestTime = Date.now();

@@ -65,13 +65,20 @@ Object.assign(globalThis, {
       onAlarm: { addListener: () => {} },
     },
     contextMenus: {
-      create: () => ({}),
+      create: (_details: unknown, callback?: () => void) => {
+        callback?.();
+        return "menu";
+      },
       onClicked: { addListener: () => {} },
       removeAll: async () => {},
     },
     idle: { queryState: async () => "active" },
     action: { setBadgeText: async () => {}, setTitle: async () => {} },
-    pageAction: { onClicked: { addListener: () => {} }, show: async () => {}, hide: async () => {} },
+    pageAction: {
+      onClicked: { addListener: () => {} },
+      show: async () => {},
+      hide: async () => {},
+    },
     commands: { onCommand: { addListener: () => {} } },
     notifications: { create: async () => {}, onClicked: { addListener: () => {} } },
     permissions: {
@@ -89,9 +96,12 @@ Object.assign(globalThis, {
   },
   fetch: (async (input: unknown) => {
     fetchCalls.push(String(input));
-    return new Response(JSON.stringify({ access_token: "tok", refresh_token: "ref", expires_in: 3600 }), {
-      status: 200,
-    });
+    return new Response(
+      JSON.stringify({ access_token: "tok", refresh_token: "ref", expires_in: 3600 }),
+      {
+        status: 200,
+      },
+    );
   }) as typeof fetch,
 });
 

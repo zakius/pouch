@@ -1,3 +1,8 @@
+import {
+  initializeStorageDiagnostics,
+  isStorageStopped,
+  showStorageDiagnostic,
+} from "../utils/storage-diagnostics-ui";
 import "../utils/chromium";
 import type { Article } from "../types/common";
 import { logger } from "../utils/logger";
@@ -27,6 +32,9 @@ const deleteConfirmMs = 4000;
 let deleteArmTimer: ReturnType<typeof setTimeout> | undefined;
 async function initializePopup(): Promise<void> {
   try {
+    document.body.addEventListener("click", handleBodyClick);
+    await initializeStorageDiagnostics((message) => showError(message));
+    if (isStorageStopped()) return;
     logger.debug("Initializing popup...");
 
     const tabs = await browser.tabs.query({
@@ -37,16 +45,17 @@ async function initializePopup(): Promise<void> {
     if (!searchInput || !pageSelect) return;
     searchInput.addEventListener("input", handleSearch);
     pageSelect.addEventListener("change", handlePageSelect);
-    document.body.addEventListener("click", handleBodyClick);
     await loadRecentArticles();
     await updateSavePageButtonState();
   } catch (error: unknown) {
     logger.error("Error initializing popup:", error);
+    if (isStorageStopped()) return;
     const errorMessage = error instanceof Error ? error.message : "Failed to initialize popup";
     showError(`Could not load articles. ${errorMessage}`, true);
   }
 }
 async function loadRecentArticles(): Promise<void> {
+  if (isStorageStopped()) return;
   if (isLoadingArticles) {
     pendingReload = true;
     return;
@@ -83,6 +92,7 @@ async function loadRecentArticles(): Promise<void> {
 
     logger.debug("Received response from background:", response);
 
+    if (showStorageDiagnostic(response) || isStorageStopped()) return;
     if (response.error) {
       logger.error("Background script reported error:", response.error);
       throw new Error(response.error);
@@ -111,6 +121,7 @@ async function loadRecentArticles(): Promise<void> {
     await displayArticles(response.items || []);
   } catch (error) {
     logger.error("Runtime error:", error);
+    if (isStorageStopped()) return;
     showError("Could not connect to the background service.", false);
     throw new Error("Could not connect to the background service.");
   } finally {
@@ -119,7 +130,7 @@ async function loadRecentArticles(): Promise<void> {
       articleListContainer.classList.remove("is-loading");
       articleListContainer.setAttribute("aria-busy", "false");
     }
-    if (pendingReload) {
+    if (pendingReload && !isStorageStopped()) {
       pendingReload = false;
       void loadRecentArticles();
     }
@@ -266,6 +277,7 @@ function errorMessageFor(
   fallback: string,
 ): { text: string; needsSettings: boolean } {
   const message = error instanceof Error && error.message ? error.message : "";
+  if (isStorageStopped()) return { text: message, needsSettings: false };
   if (/permission/i.test(message)) {
     return { text: message, needsSettings: true };
   }
@@ -273,7 +285,7 @@ function errorMessageFor(
 }
 
 async function handleDeleteArticle(button: HTMLButtonElement): Promise<void> {
-  if (isSavingOrDeleting) return;
+  if (isStorageStopped() || isSavingOrDeleting) return;
   if (!button.classList.contains("is-arming")) {
     disarmDeleteButton();
     button.classList.add("is-arming");
@@ -316,7 +328,7 @@ async function handleDeleteArticle(button: HTMLButtonElement): Promise<void> {
     showError(text, needsSettings);
   } finally {
     isSavingOrDeleting = false;
-    button.disabled = false;
+    button.disabled = isStorageStopped();
     button.classList.remove("is-busy");
     button.setAttribute("aria-busy", "false");
   }
@@ -424,6 +436,7 @@ interface ErrorResponse {
 }
 async function sendBackgroundMessage<T>(message: Record<string, unknown>): Promise<T> {
   const response = (await browser.runtime.sendMessage(message)) as ErrorResponse | undefined;
+  showStorageDiagnostic(response);
   if (response?.error) {
     throw new Error(response.error);
   }
@@ -431,6 +444,7 @@ async function sendBackgroundMessage<T>(message: Record<string, unknown>): Promi
 }
 
 async function updateSavePageButtonState(): Promise<void> {
+  if (isStorageStopped()) return;
   if (!savePageButton || !currentTab?.url) {
     if (savePageButton) savePageButton.style.display = "none";
     return;
@@ -440,6 +454,7 @@ async function updateSavePageButtonState(): Promise<void> {
       type: "checkArticle",
       payload: { url: currentTab.url },
     });
+    if (isStorageStopped()) return;
     savedArticleForCurrentPage = response;
     if (response) {
       savePageButton.textContent = "✓";
@@ -460,7 +475,7 @@ async function updateSavePageButtonState(): Promise<void> {
   }
 }
 async function handleSavePageClick(): Promise<void> {
-  if (!currentTab?.url || !savePageButton || isSavingOrDeleting) return;
+  if (isStorageStopped() || !currentTab?.url || !savePageButton || isSavingOrDeleting) return;
   const url = currentTab.url.trim();
   if (!url || url.length === 0) {
     logger.warn("Cannot save article: empty URL");
@@ -508,7 +523,7 @@ async function handleSavePageClick(): Promise<void> {
     showError(text, needsSettings);
   } finally {
     isSavingOrDeleting = false;
-    savePageButton.disabled = false;
+    savePageButton.disabled = isStorageStopped();
     savePageButton.classList.remove("is-busy");
     savePageButton.setAttribute("aria-busy", "false");
   }

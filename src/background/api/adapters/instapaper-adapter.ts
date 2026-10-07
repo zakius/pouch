@@ -1,3 +1,4 @@
+import { assertStorageHealthy, storageShutdownSignal } from "../../../utils/fatal-storage";
 import * as v from "valibot";
 import { instapaperConfigSchema, instapaperSettingsSchema } from "../../../utils/settings-schemas";
 export { instapaperConfigSchema, instapaperSettingsSchema };
@@ -165,7 +166,9 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
       x_auth_password: this.config.password || "",
       x_auth_mode: "client_auth",
     };
+    assertStorageHealthy();
     const response = await fetch(url, {
+      signal: storageShutdownSignal(),
       method: "POST",
       headers: {
         Authorization: await this._oauthHeader(url, xAuthParams, "", ""),
@@ -185,7 +188,12 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
     }
 
     const tokenMetadata = this.createTokenMetadata({});
-    await this.tokens.storeToken(this.getServiceName(), tokenMetadata);
+    await this.tokens.storeToken(
+      this.getServiceName(),
+      tokenMetadata,
+      "succeeded",
+      "authentication",
+    );
   }
   async testConnection(): Promise<boolean> {
     try {
@@ -335,7 +343,9 @@ export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, To
       throw new Error("Instapaper adapter not initialized");
     }
     const baseUrl = `${this.apiUrl}${endpoint}`;
+    assertStorageHealthy();
     const response = await fetch(baseUrl, {
+      signal: storageShutdownSignal(),
       method: "POST",
       headers: {
         Authorization: await this._oauthHeader(
