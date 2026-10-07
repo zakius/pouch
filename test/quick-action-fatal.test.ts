@@ -78,6 +78,10 @@ test("Chromium Quick Actions shows fatal diagnostics and disables each tab until
   await listener({ type: "pageState", tabId: 1, saved: true }, { id: POUCH_ID });
   expect(badges.at(-1)).toBe("!");
   expect(enabled).toEqual([1]);
+  diagnostic = undefined;
+  await listener({ type: "pageState", tabId: 1, saved: true }, { id: POUCH_ID });
+  expect(badges.at(-1)).toBe("!");
+  expect(enabled).toEqual([1]);
   diagnostic = null;
   await listener({ type: "pageState", tabId: 1, saved: true }, { id: POUCH_ID });
   expect(badges.at(-1)).toBe("");

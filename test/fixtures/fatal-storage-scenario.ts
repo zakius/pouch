@@ -22,6 +22,7 @@ import {
   setFilterListSources,
 } from "../../src/utils/filter-list-manager";
 
+const { POUCH_ID, QUICK_ACTIONS_ID } = await import("../../src/utils/chromium");
 const scenario = process.argv[2];
 const settings = { ...DEFAULT_SETTINGS, backend: "bookmarks" } as const;
 const keys = getAccountStorageKeys(settings);
@@ -480,6 +481,147 @@ switch (scenario) {
     assert.equal((await message({ type: "getStorageDiagnostic" })).code, "FATAL_LOCAL_STORAGE");
     assert.ok(notifications.some((text) => text.includes("Pouch stopped")));
     assert.ok(broadcasts.length > 0);
+    break;
+  }
+  case "external-health":
+  case "external-fatal": {
+    const enabled: number[] = [];
+    const titles: string[] = [];
+    Object.assign(browser, {
+      action: {
+        disable: async () => {},
+        enable: async (id: number) => {
+          enabled.push(id);
+        },
+        setBadgeText: async () => {},
+        setIcon: async () => {},
+        setTitle: async ({ title }: { title: string }) => {
+          titles.push(title);
+        },
+        onClicked: event("quickClick"),
+      },
+    });
+    await import("../../src/quick-actions/background");
+    const quickListener = events.external;
+    await quickListener(
+      { type: "fatalStorage", error: "Previous worker stopped" },
+      { id: POUCH_ID },
+    );
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let release!: () => void;
+    const originalSet = browser.storage.local.set;
+    (browser.storage.local.set as any) = async (values: Record<string, unknown>) => {
+      if ("pouch_storage_health" in values) {
+        started();
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      }
+      await originalSet(values);
+    };
+    await import("../../src/background/background");
+    const pouchListener = events.external;
+    await ready;
+    const before = writes;
+    assert.equal(
+      await pouchListener({ type: "getStorageDiagnostic" }, { id: "untrusted" }),
+      undefined,
+    );
+    assert.equal(writes, before, "unauthorized diagnostic request must not write storage");
+    (browser.runtime.sendMessage as any) = async (target: string, message: any) => {
+      if (target === POUCH_ID) return pouchListener(message, { id: QUICK_ACTIONS_ID });
+      if (target === QUICK_ACTIONS_ID) return quickListener(message, { id: POUCH_ID });
+    };
+    const pending = quickListener({ type: "pageState", tabId: 1, saved: true }, { id: POUCH_ID });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(enabled, [], "page state alone cannot recover before the health check");
+    if (scenario === "external-fatal") rejectSet = true;
+    release();
+    await pending;
+    const diagnostic = await pouchListener(
+      { type: "getStorageDiagnostic" },
+      { id: QUICK_ACTIONS_ID },
+    );
+    if (scenario === "external-health") {
+      assert.equal(diagnostic, null);
+      assert.deepEqual(enabled, [1]);
+      assert.equal(titles.at(-1), "Article saved");
+      assert.equal(store.pouch_storage_health, undefined);
+      assert.ok(removes > 0, "healthy response requires health cleanup");
+    } else {
+      assert.equal(diagnostic.code, "FATAL_LOCAL_STORAGE");
+      assert.deepEqual(enabled, []);
+      assert.match(titles.at(-1)!, /Pouch stopped/);
+    }
+    break;
+  }
+  case "firefox-icon-race":
+  case "firefox-title-race":
+  case "firefox-show-race": {
+    (browser.bookmarks.getChildren as any) = async () => [
+      { ...original, dateAdded: Date.parse(original.created_at) },
+    ];
+    await import("../../src/background/background");
+    await events.startup();
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let release!: () => void;
+    let fatalShown!: () => void;
+    const fatalReady = new Promise<void>((resolve) => {
+      fatalShown = resolve;
+    });
+    const completed: string[] = [];
+    const titles: string[] = [];
+    const icons: string[] = [];
+    (browser.tabs.get as any) = async () => ({ id: 1, url: original.url });
+    (browser.tabs.query as any) = async () => [{ id: 1, url: original.url }];
+    for (const method of ["setIcon", "setTitle", "show"] as const) {
+      (browser.pageAction[method] as any) = async (details: any) => {
+        const normal =
+          method === "show" ||
+          details.title === "Article saved" ||
+          details.title === "Save to Pouch" ||
+          details.path?.includes("page-action");
+        const held =
+          scenario ===
+          `firefox-${{ setIcon: "icon", setTitle: "title", show: "show" }[method]}-race`;
+        if (normal && held) {
+          started();
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        }
+        completed.push(`${method}:${normal ? "normal" : "fatal"}`);
+        if (method === "setIcon") icons.push(details.path);
+        if (method === "setTitle") {
+          titles.push(details.title);
+          if (!normal) fatalShown();
+        }
+      };
+    }
+    const ui = events.active({ tabId: 1 });
+    await ready;
+    rejectSet = true;
+    await rejectsFatal(() => setLocal("race failure", {}));
+    await fatalReady;
+    release();
+    await ui;
+    assert.equal(titles.at(-1), "Pouch stopped: local storage failed");
+    assert.equal(icons.at(-1), "icons/icon.svg");
+    const heldMethod = {
+      "firefox-icon-race": "setIcon",
+      "firefox-title-race": "setTitle",
+      "firefox-show-race": "show",
+    }[scenario];
+    assert.ok(
+      completed.lastIndexOf("setTitle:fatal") > completed.lastIndexOf(`${heldMethod}:normal`),
+      "fatal presentation must complete after the pending normal write",
+    );
     break;
   }
   case "ui-race":

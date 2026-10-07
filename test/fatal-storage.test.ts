@@ -9,6 +9,11 @@ for (const scenario of [
   "queued-mutations",
   "ui-race",
   "ui-menu-race",
+  "firefox-icon-race",
+  "firefox-title-race",
+  "firefox-show-race",
+  "external-health",
+  "external-fatal",
   "auth-outcome",
   "instapaper-auth-outcome",
   "sync-articles",
@@ -43,7 +48,13 @@ for (const scenario of [
       {
         env: {
           ...process.env,
-          POUCH_TARGET: ["worker-restart", "ui-race", "ui-menu-race"].includes(scenario)
+          POUCH_TARGET: [
+            "worker-restart",
+            "ui-race",
+            "ui-menu-race",
+            "external-health",
+            "external-fatal",
+          ].includes(scenario)
             ? "chromium"
             : "firefox",
         },

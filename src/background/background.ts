@@ -123,6 +123,15 @@ function startup(): Promise<void> {
   })();
   return startupPromise;
 }
+async function readStorageDiagnostic() {
+  try {
+    await startup();
+    return getStorageDiagnostic() ?? null;
+  } catch (error) {
+    logger.error("Storage initialization failed:", error);
+    return getStorageDiagnostic() ?? { error: "Storage initialization failed" };
+  }
+}
 async function getArticlesRepository(): Promise<ArticlesRepository> {
   await startup();
   assertStorageHealthy();
@@ -153,12 +162,7 @@ browser.runtime.onMessage.addListener(
       };
       try {
         if (message.type === "getStorageDiagnostic") {
-          try {
-            await startup();
-          } catch (error) {
-            logger.error("Storage initialization failed:", error);
-          }
-          safeSendResponse(getStorageDiagnostic() ?? null);
+          safeSendResponse(await readStorageDiagnostic());
           return;
         }
         assertStorageHealthy();
@@ -398,10 +402,12 @@ async function showFatalUi(): Promise<void> {
             tabId: tab.id,
             path: browser.runtime.getURL("icons/icon.svg"),
           });
-          browser.pageAction.setTitle({
-            tabId: tab.id,
-            title: "Pouch stopped: local storage failed",
-          });
+          await Promise.resolve(
+            browser.pageAction.setTitle({
+              tabId: tab.id,
+              title: "Pouch stopped: local storage failed",
+            }),
+          );
         }
       })
       .catch(() => {});
@@ -473,20 +479,24 @@ async function togglePageSave(tab: Tab): Promise<void> {
 if (IS_CHROMIUM) {
   browser.runtime.onMessageExternal.addListener(async (message: QuickActionMessage, sender) => {
     if (sender.id !== QUICK_ACTIONS_ID) {
-      return;
+      return undefined;
+    }
+    if (message?.type === "getStorageDiagnostic") {
+      return readStorageDiagnostic();
     }
     const diagnostic = getStorageDiagnostic();
     if (diagnostic) {
       await browser.runtime
         .sendMessage(QUICK_ACTIONS_ID, { type: "fatalStorage", error: diagnostic.error })
         .catch(() => {});
-      return;
+      return undefined;
     }
     if (message?.type === "togglePage") {
       await togglePageSave(await browser.tabs.get(message.tabId));
     } else if (message?.type === "refreshUi") {
       await refreshActiveTabUi();
     }
+    return undefined;
   });
 } else {
   browser.pageAction.onClicked.addListener((tab) => {
@@ -529,10 +539,12 @@ async function updateUiForTab(tabId: number): Promise<void> {
     } else {
       await browser.pageAction.setIcon({ tabId, path: getIconPath(isSaved) });
       assertStorageHealthy();
-      browser.pageAction.setTitle({
-        tabId,
-        title: isSaved ? "Article saved" : "Save to Pouch",
-      });
+      await Promise.resolve(
+        browser.pageAction.setTitle({
+          tabId,
+          title: isSaved ? "Article saved" : "Save to Pouch",
+        }),
+      );
       assertStorageHealthy();
       await browser.pageAction.show(tabId);
     }
