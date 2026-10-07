@@ -2,6 +2,26 @@ import { expect, test } from "bun:test";
 
 // Each scenario gets a fresh worker: the production latch intentionally has no reset API.
 for (const scenario of [
+  "quick-recovery-disable",
+  "quick-recovery-badge",
+  "quick-recovery-title",
+  "quick-recovery-tab-disable",
+  "quick-recovery-tab-title",
+  "startup-token-get-race",
+  "startup-token-create-race",
+  "startup-refresh-create-race",
+  "startup-menu-create-race",
+  "quick-normal-disable",
+  "quick-normal-badge",
+  "quick-normal-title",
+  "quick-normal-icon",
+  "quick-normal-tab-title",
+  "quick-normal-enable",
+  "startup-page-menu-create-race",
+  "startup-filter-alarm-create-race",
+  "startup-remove-all-race",
+  "startup-token-get-race-chromium",
+  "startup-menu-create-race-chromium",
   "articles",
   "delete",
   "queued",
@@ -48,15 +68,18 @@ for (const scenario of [
       {
         env: {
           ...process.env,
-          POUCH_TARGET: [
-            "worker-restart",
-            "ui-race",
-            "ui-menu-race",
-            "external-health",
-            "external-fatal",
-          ].includes(scenario)
-            ? "chromium"
-            : "firefox",
+          POUCH_TARGET:
+            [
+              "worker-restart",
+              "ui-race",
+              "ui-menu-race",
+              "external-health",
+              "external-fatal",
+            ].includes(scenario) ||
+            scenario.startsWith("quick-") ||
+            scenario.endsWith("-chromium")
+              ? "chromium"
+              : "firefox",
         },
         timeout: 10_000,
       },

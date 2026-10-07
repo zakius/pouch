@@ -119,6 +119,7 @@ function startup(): Promise<void> {
     urlCanonizerPromise = initializeUrlCanonizer();
     void urlCanonizerPromise.catch((error) => logger.error("URL initialization failed:", error));
     await tokenManager.loadTokens();
+    assertStorageHealthy();
     logger.info("Token manager initialized");
   })();
   return startupPromise;
@@ -608,27 +609,44 @@ browser.tabs.onActivated.addListener(async (activeInfo) => {
   await updateUiForTab(activeInfo.tabId);
 });
 
+async function createMenu(properties: browser.menus._CreateCreateProperties): Promise<void> {
+  assertStorageHealthy();
+  await new Promise<void>((resolve) => browser.contextMenus.create(properties, resolve));
+  if (getStorageDiagnostic()) await showFatalUi();
+  assertStorageHealthy();
+}
+
+async function createMaintenanceAlarm(name: string, periodInMinutes: number): Promise<void> {
+  assertStorageHealthy();
+  await browser.alarms.create(name, { periodInMinutes });
+  if (getStorageDiagnostic()) await browser.alarms.clear(name);
+  assertStorageHealthy();
+}
+
 async function initialize(): Promise<void> {
+  assertStorageHealthy();
   if (initializePromise) {
     return initializePromise;
   }
   initializePromise = (async () => {
     await browser.contextMenus.removeAll();
+    assertStorageHealthy();
     await startup();
+    assertStorageHealthy();
     // Menus and alarms first: a Chromium service worker may be stopped while
     // the filter lists or the first sync still load.
-    browser.contextMenus.create({
+    await createMenu({
       id: "save-link",
       title: "Save link",
       contexts: ["link"],
     });
-    browser.contextMenus.create({
+    await createMenu({
       id: "save-page",
       title: "Save page",
       contexts: [IS_CHROMIUM ? "action" : "browser_action"] as browser.menus.ContextType[],
     });
-    void browser.alarms.create("refresh", { periodInMinutes: REFRESH_INTERVAL });
-    void browser.alarms.create("refresh-filters", { periodInMinutes: 24 * 60 });
+    await createMaintenanceAlarm("refresh", REFRESH_INTERVAL);
+    await createMaintenanceAlarm("refresh-filters", 24 * 60);
     await urlCanonizerPromise;
     assertStorageHealthy();
     logger.info("Background script initialized");

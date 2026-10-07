@@ -2,28 +2,65 @@ import { type QuickActionStateMessage, POUCH_ID } from "../utils/chromium";
 
 let fatalError: string | undefined;
 let generation = 0;
+const pageStates = new Map<number, { saved: boolean; title?: string }>();
 
 // Like Firefox's page action: off until Pouch reports a page it can save.
-void browser.action.disable();
+const initiallyDisabled = browser.action.disable();
 
-async function showFatal(): Promise<void> {
-  if (!fatalError) return;
-  await browser.action.disable();
-  await browser.action.setBadgeText({ text: "!" });
-  await browser.action.setTitle({ title: fatalError });
-  for (const tab of await browser.tabs.query({})) {
-    if (tab.id === undefined) continue;
-    await browser.action.disable(tab.id);
-    await browser.action.setTitle({ tabId: tab.id, title: fatalError });
+async function render(): Promise<void> {
+  await initiallyDisabled;
+  for (;;) {
+    const currentGeneration = generation;
+    const error = fatalError;
+    const states = new Map(pageStates);
+    const updates: (() => Promise<void>)[] = [
+      () => browser.action.disable(),
+      () => browser.action.setBadgeText({ text: error ? "!" : "" }),
+      () => browser.action.setTitle({ title: error ?? "Save to Pouch" }),
+    ];
+    if (error) {
+      for (const tab of await browser.tabs.query({})) {
+        if (tab.id === undefined) continue;
+        const tabId = tab.id;
+        updates.push(
+          () => browser.action.disable(tabId),
+          () => browser.action.setTitle({ tabId, title: error }),
+        );
+      }
+    } else {
+      for (const [tabId, { saved, title }] of states) {
+        const icon = `icons/${saved ? "saved" : "unsaved"}`;
+        updates.push(
+          () =>
+            browser.action.setIcon({ tabId, path: { 16: `${icon}-16.png`, 32: `${icon}-32.png` } }),
+          () =>
+            browser.action.setTitle({
+              tabId,
+              title: title ?? (saved ? "Article saved" : "Save to Pouch"),
+            }),
+          () => browser.action.enable(tabId),
+        );
+      }
+    }
+    for (const update of updates) {
+      if (generation !== currentGeneration) break;
+      await update();
+    }
+    // Browser calls already dispatched can finish after a state change in either direction.
+    if (generation === currentGeneration) return;
   }
 }
 
 browser.action.onClicked.addListener((tab) => {
   if (fatalError) return;
   if (tab.id !== undefined) {
-    browser.runtime.sendMessage(POUCH_ID, { type: "togglePage", tabId: tab.id }).catch(() => {
-      if (fatalError) return;
-      void browser.action.setTitle({ tabId: tab.id, title: "Pouch isn't installed" });
+    const tabId = tab.id;
+    const currentGeneration = generation;
+    browser.runtime.sendMessage(POUCH_ID, { type: "togglePage", tabId }).catch(() => {
+      if (fatalError || generation !== currentGeneration) return;
+      pageStates.set(tabId, { saved: false, title: "Pouch isn't installed" });
+      generation++;
+      void render();
     });
   }
 });
@@ -32,8 +69,9 @@ browser.runtime.onMessageExternal.addListener(async (message: QuickActionStateMe
   if (sender.id !== POUCH_ID) return;
   if (message?.type === "fatalStorage") {
     fatalError = message.error;
+    pageStates.clear();
     generation++;
-    await showFatal();
+    await render();
     return;
   }
   if (message?.type !== "pageState") return;
@@ -46,20 +84,13 @@ browser.runtime.onMessageExternal.addListener(async (message: QuickActionStateMe
     if (diagnostic !== null || generation !== currentGeneration) return;
     fatalError = undefined;
   }
-  const { tabId, saved } = message;
-  const icon = `icons/${saved ? "saved" : "unsaved"}`;
-  for (const update of [
-    () => browser.action.setBadgeText({ text: "" }),
-    () => browser.action.setIcon({ tabId, path: { 16: `${icon}-16.png`, 32: `${icon}-32.png` } }),
-    () => browser.action.setTitle({ tabId, title: saved ? "Article saved" : "Save to Pouch" }),
-    () => browser.action.enable(tabId),
-  ]) {
-    await update();
-    if (generation !== currentGeneration) {
-      await showFatal();
-      return;
-    }
-  }
+  pageStates.set(message.tabId, { saved: message.saved });
+  generation++;
+  await render();
+});
+browser.tabs.onRemoved.addListener((tabId) => {
+  pageStates.delete(tabId);
+  generation++;
 });
 
 // Pouch may have started first: ask it for the active tab's state.

@@ -122,7 +122,9 @@ Object.assign(globalThis, {
     contextMenus: {
       onClicked: event("menu"),
       removeAll: async () => {},
-      create: () => {},
+      create: (_details: unknown, callback?: () => void) => {
+        callback?.();
+      },
       update: async () => {},
     },
     commands: { onCommand: event("command") },
@@ -135,6 +137,7 @@ Object.assign(globalThis, {
     tabs: {
       query: async () => [],
       get: async () => ({}),
+      onRemoved: event("removed"),
       onUpdated: event("tab"),
       onActivated: event("active"),
     },
@@ -481,6 +484,232 @@ switch (scenario) {
     assert.equal((await message({ type: "getStorageDiagnostic" })).code, "FATAL_LOCAL_STORAGE");
     assert.ok(notifications.some((text) => text.includes("Pouch stopped")));
     assert.ok(broadcasts.length > 0);
+    break;
+  }
+  case "quick-recovery-disable":
+  case "quick-recovery-badge":
+  case "quick-recovery-title":
+  case "quick-recovery-tab-disable":
+  case "quick-recovery-tab-title": {
+    const state = { enabled: false, badge: "", title: "" };
+    let release!: () => void;
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let held = false;
+    let holding = true;
+    const hold = async (operation: string) => {
+      if (!holding || held || scenario !== `quick-recovery-${operation}`) return;
+      held = true;
+      started();
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    };
+    (browser.tabs.query as any) = async () => [{ id: 1 }];
+    Object.assign(browser, {
+      action: {
+        disable: async (id?: number) => {
+          if (holding) await hold(id === undefined ? "disable" : "tab-disable");
+          state.enabled = false;
+        },
+        enable: async () => {
+          state.enabled = true;
+        },
+        setBadgeText: async ({ text }: { text: string }) => {
+          if (text === "!") await hold("badge");
+          state.badge = text;
+        },
+        setTitle: async ({ tabId, title }: { tabId?: number; title: string }) => {
+          assert.equal(typeof title, "string", "diagnostic title must be an immutable string");
+          if (title === "Previous worker stopped")
+            await hold(tabId === undefined ? "title" : "tab-title");
+          state.title = title;
+        },
+        setIcon: async () => {},
+        onClicked: event("quickClick"),
+      },
+    });
+    // The default disable is not the fatal operation under test.
+    holding = false;
+    await import("../../src/quick-actions/background");
+    const quickListener = events.external;
+    holding = true;
+    const fatal = quickListener(
+      { type: "fatalStorage", error: "Previous worker stopped" },
+      { id: POUCH_ID },
+    );
+    await ready;
+    await import("../../src/background/background");
+    const pouchListener = events.external;
+    (browser.runtime.sendMessage as any) = async (target: string, message: any) => {
+      if (target === POUCH_ID) return pouchListener(message, { id: QUICK_ACTIONS_ID });
+      if (target === QUICK_ACTIONS_ID) return quickListener(message, { id: POUCH_ID });
+    };
+    await quickListener({ type: "pageState", tabId: 1, saved: true }, { id: POUCH_ID });
+    assert.equal(
+      state.enabled,
+      true,
+      "healthy recovery completes while the old fatal call is pending",
+    );
+    holding = false;
+    release();
+    await fatal;
+    assert.deepEqual(state, { enabled: true, badge: "", title: "Article saved" });
+    break;
+  }
+  case "quick-normal-disable":
+  case "quick-normal-badge":
+  case "quick-normal-title":
+  case "quick-normal-icon":
+  case "quick-normal-tab-title":
+  case "quick-normal-enable": {
+    const state = { enabled: false, badge: "", title: "" };
+    let release!: () => void;
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let holding = false;
+    let held = false;
+    const hold = async (operation: string) => {
+      if (!holding || held || scenario !== `quick-normal-${operation}`) return;
+      held = true;
+      started();
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    };
+    (browser.tabs.query as any) = async () => [{ id: 1 }];
+    Object.assign(browser, {
+      action: {
+        disable: async () => {
+          await hold("disable");
+          state.enabled = false;
+        },
+        enable: async () => {
+          await hold("enable");
+          state.enabled = true;
+        },
+        setBadgeText: async ({ text }: { text: string }) => {
+          if (text === "") await hold("badge");
+          state.badge = text;
+        },
+        setTitle: async ({ tabId, title }: { tabId?: number; title: string }) => {
+          if (!title.includes("stopped")) await hold(tabId === undefined ? "title" : "tab-title");
+          state.title = title;
+        },
+        setIcon: async () => {
+          await hold("icon");
+        },
+        onClicked: event("quickClick"),
+      },
+    });
+    await import("../../src/quick-actions/background");
+    const quickListener = events.external;
+    holding = true;
+    const normal = quickListener({ type: "pageState", tabId: 1, saved: true }, { id: POUCH_ID });
+    await ready;
+    await quickListener({ type: "fatalStorage", error: "Pouch stopped" }, { id: POUCH_ID });
+    holding = false;
+    release();
+    await normal;
+    assert.deepEqual(state, { enabled: false, badge: "!", title: "Pouch stopped" });
+    break;
+  }
+  case "startup-token-get-race":
+  case "startup-token-create-race":
+  case "startup-refresh-create-race":
+  case "startup-menu-create-race":
+  case "startup-page-menu-create-race":
+  case "startup-filter-alarm-create-race":
+  case "startup-remove-all-race":
+  case "startup-token-get-race-chromium":
+  case "startup-menu-create-race-chromium": {
+    const ordering = scenario.replace("-chromium", "");
+    store.api_tokens = [["service", { ...baseToken, serviceName: "service" }]];
+    const menus = new Map<string, any>();
+    const alarms = new Set<string>();
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let release!: () => void;
+    const hold = async () => {
+      started();
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    };
+    (browser.alarms.get as any) = async () => {
+      if (ordering === "startup-token-get-race") await hold();
+      return undefined;
+    };
+    (browser.alarms.create as any) = async (name: string) => {
+      if (
+        (ordering === "startup-token-create-race" && name === "token-refresh-check") ||
+        (ordering === "startup-refresh-create-race" && name === "refresh") ||
+        (ordering === "startup-filter-alarm-create-race" && name === "refresh-filters")
+      )
+        await hold();
+      alarms.add(name);
+    };
+    (browser.alarms.clear as any) = async (name: string) => {
+      alarms.delete(name);
+      return true;
+    };
+    (browser.contextMenus.create as any) = (details: any, callback?: () => void) => {
+      void (async () => {
+        if (
+          (ordering === "startup-menu-create-race" && details.id === "save-link") ||
+          (ordering === "startup-page-menu-create-race" && details.id === "save-page")
+        )
+          await hold();
+        menus.set(details.id, { enabled: true, ...details });
+        callback?.();
+      })();
+      return details.id;
+    };
+    (browser.contextMenus.update as any) = async (id: string, details: any) => {
+      if (!menus.has(id)) throw new Error("Menu does not exist");
+      Object.assign(menus.get(id), details);
+    };
+    (browser.contextMenus.removeAll as any) = async () => {
+      if (ordering === "startup-remove-all-race") await hold();
+      menus.clear();
+    };
+    await import("../../src/background/background");
+    const initialization = (
+      scenario.endsWith("-chromium") ? events.installed({ reason: "install" }) : events.startup()
+    ).catch((error: unknown) => error);
+    await ready;
+    rejectSet = true;
+    await rejectsFatal(() => setLocal("startup race failure", {}));
+    release();
+    await initialization;
+    assert.ok(
+      [...menus.values()].every((menu) => menu.enabled === false),
+      "startup must not leave enabled menus after shutdown",
+    );
+    assert.equal(alarms.has("refresh"), ordering === "startup-filter-alarm-create-race");
+    assert.equal(alarms.has("refresh-filters"), false);
+    assert.equal(
+      alarms.has("token-refresh-check"),
+      [
+        "startup-refresh-create-race",
+        "startup-menu-create-race",
+        "startup-page-menu-create-race",
+        "startup-filter-alarm-create-race",
+      ].includes(ordering),
+    );
+    for (const callback of [() => events.startup(), () => events.installed({ reason: "update" })]) {
+      await assert.rejects(callback, FatalStorageError);
+    }
+    const counts = [remoteReads, fetches, writes];
+    for (const name of ["refresh", "refresh-filters", "token-refresh-check"])
+      await events.alarm({ name });
+    assert.deepEqual([remoteReads, fetches, writes], counts);
     break;
   }
   case "external-health":

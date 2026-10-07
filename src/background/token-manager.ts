@@ -1,5 +1,6 @@
 import {
   assertStorageHealthy,
+  getStorageDiagnostic,
   FatalStorageError,
   setLocal,
   storageShutdownSignal,
@@ -78,17 +79,21 @@ export class TokenManager {
       // the alarm on every wake would push it back each time. The background
       // script's onAlarm listener calls checkAndRefreshTokens().
       const existing = await browser.alarms.get(TOKEN_CHECK_ALARM_NAME);
+      assertStorageHealthy();
       if (existing?.periodInMinutes !== this.config.checkIntervalMinutes) {
         await browser.alarms.create(TOKEN_CHECK_ALARM_NAME, {
           periodInMinutes: this.config.checkIntervalMinutes,
         });
+        if (getStorageDiagnostic()) await browser.alarms.clear(TOKEN_CHECK_ALARM_NAME);
       }
+      assertStorageHealthy();
 
       this.alarmInitialized = true;
       logger.info("Token refresh alarm initialized", {
         interval: `${this.config.checkIntervalMinutes} minutes`,
       });
     } catch (error) {
+      assertStorageHealthy();
       logger.error("Failed to initialize token refresh alarm:", error);
     }
   }
