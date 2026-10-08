@@ -49,6 +49,7 @@ export function errorResponse(error: unknown) {
       code: error._tag,
       details: {
         operation: error.operation,
+        ...error.mutation,
         ...(error._tag === "BrowserFailure"
           ? { reason: error.reason, ...(error.cause ? { cause: error.cause } : {}) }
           : {}),
@@ -61,7 +62,7 @@ export function errorResponse(error: unknown) {
   if (error instanceof OperationInterrupted)
     return { error: error.message, code: "OPERATION_INTERRUPTED", details: error.mutation ?? {} };
   if (error instanceof OperationDefect)
-    return { error: error.message, code: "INTERNAL_DEFECT", details: {} };
+    return { error: error.message, code: "INTERNAL_DEFECT", details: error.mutation ?? {} };
   // #81 removes the legacy Promise error response after every backend has a typed failure contract.
   return {
     error: error instanceof Error ? error.message : "Unknown error",

@@ -4,6 +4,8 @@ Use this procedure for #74 and #81 from an exclusive checkout. Build Firefox fir
 
 ```sh
 bun install --frozen-lockfile
+# ZIP updates retain obsolete entries; remove generated archives before measuring.
+rm -f dist/packages/pouch-*.zip
 bun run package
 bun run package:chromium
 python3 scripts/measure-effect.py measurements/effect-74-pilot.json

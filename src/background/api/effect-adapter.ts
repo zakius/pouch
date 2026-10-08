@@ -8,13 +8,27 @@ import {
 } from "../../utils/fatal-storage";
 import type { SavingArticle, SyncOptions, SyncResult, FormConfig } from "./read-it-later-adapter";
 
-export class ConfigurationFailure extends Error {
+type MutationOutcome = { remoteOperation: "save" | "delete"; remoteOutcome: "succeeded" };
+
+class OperationError extends Error {
+  mutation?: MutationOutcome;
+
+  withMutation(mutation?: MutationOutcome): this {
+    if (mutation) {
+      this.mutation = mutation;
+      this.message = `Remote ${mutation.remoteOperation} succeeded, but Pouch could not finish the operation. Do not repeat it. Check extension diagnostics before refreshing local articles with sync.`;
+    }
+    return this;
+  }
+}
+
+export class ConfigurationFailure extends OperationError {
   readonly _tag = "ConfigurationFailure";
   constructor(readonly operation: string) {
     super("Invalid backend settings. Open Pouch settings and check the configuration.");
   }
 }
-export class PermissionFailure extends Error {
+export class PermissionFailure extends OperationError {
   readonly _tag = "PermissionFailure";
   constructor(
     readonly operation: string,
@@ -25,7 +39,7 @@ export class PermissionFailure extends Error {
     );
   }
 }
-export class BrowserFailure extends Error {
+export class BrowserFailure extends OperationError {
   readonly _tag = "BrowserFailure";
   constructor(
     readonly operation: string,
@@ -102,13 +116,12 @@ export function fromLegacyPromise<A>(operation: () => Promise<A>): Effect.Effect
   );
 }
 
-export class OperationDefect extends Error {
+export class OperationDefect extends OperationError {
   readonly _tag = "OperationDefect";
   constructor(readonly cause: Cause.Cause<unknown>) {
     super("Unexpected background error. Check the extension diagnostics.");
   }
 }
-type MutationOutcome = { remoteOperation: "save" | "delete"; remoteOutcome: "succeeded" };
 const OperationProgress = Context.Service<{ mutation?: MutationOutcome }>(
   "pouch/OperationProgress",
 );
@@ -147,12 +160,15 @@ export async function runOperation<A, E>(
   if (Exit.isSuccess(exit)) return exit.value;
   if (Cause.hasDies(exit.cause)) {
     logger.error("Effect operation defect:", Cause.pretty(exit.cause));
-    throw new OperationDefect(exit.cause);
+    throw new OperationDefect(exit.cause).withMutation(progress.mutation);
   }
   const failure = Cause.findErrorOption(exit.cause);
   if (Option.isSome(failure) && failure.value instanceof FatalStorageError) throw failure.value;
   if (Cause.hasInterrupts(exit.cause))
     throw new OperationInterrupted(exit.cause, progress.mutation);
-  if (Option.isSome(failure)) throw failure.value;
-  throw new OperationDefect(exit.cause);
+  if (Option.isSome(failure))
+    throw failure.value instanceof OperationError
+      ? failure.value.withMutation(progress.mutation)
+      : failure.value;
+  throw new OperationDefect(exit.cause).withMutation(progress.mutation);
 }

@@ -1,6 +1,6 @@
 import { setFilterListSources, resetFilterListSources } from "../src/utils/filter-list-manager";
 import { initializeUrlCanonizer } from "../src/utils/url-helpers";
-import { ArticlesRepository } from "../src/background/articles-repository";
+import { getAccountStorageKeys, ArticlesRepository } from "../src/background/articles-repository";
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Cause, Effect, Exit } from "effect";
 import { createBookmarksAdapter } from "../src/background/api/adapters/bookmarks-adapter";
@@ -14,6 +14,8 @@ import {
   runOperation,
   recordMutationSuccess,
 } from "../src/background/api/effect-adapter";
+import { getStorageDiagnostic } from "../src/utils/fatal-storage";
+import type { Article } from "../src/types/common";
 import { DEFAULT_SETTINGS } from "../src/utils/settings";
 import type { BookmarksSettings } from "../src/utils/settings-schemas";
 import { errorResponse, parseRuntimeMessage } from "../src/background/runtime-message";
@@ -284,4 +286,115 @@ test("interrupted outcome bookkeeping is isolated between runner invocations", a
     remoteOperation: "save",
     remoteOutcome: "succeeded",
   });
+});
+
+for (const operation of ["save", "delete"] as const) {
+  test(`${operation} success survives a local article read failure without repeating the mutation`, async () => {
+    const key = getAccountStorageKeys(settings).articles;
+    let rejectArticles = false;
+    let writes = 0;
+    let stored: Article[] = [];
+    Object.assign(browser, {
+      storage: {
+        local: {
+          get: async (keys: string[]) => {
+            if (rejectArticles && keys.includes(key))
+              throw new Error("read failed secret=https://private.example/token");
+            return { [key]: stored };
+          },
+          set: async (values: Record<string, Article[]>) => {
+            writes++;
+            if (values[key]) stored = values[key];
+          },
+        },
+      },
+      idle: { queryState: async () => "active" },
+    });
+    setFilterListSources([{ name: "empty", url: "data:text/plain;base64,IQ==" }]);
+    await initializeUrlCanonizer();
+    const repo = new ArticlesRepository();
+    await repo.initialize(settings);
+    await repo.testConnection();
+    rejectArticles = true;
+    const error = await (
+      operation === "save"
+        ? repo.saveArticle({ title: "Saved", url: "https://example.com" })
+        : repo.deleteArticle(bookmarkId)
+    ).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(BrowserFailure);
+    const response = errorResponse(error);
+    expect(response.code).toBe("BrowserFailure");
+    expect(response.details).toEqual({
+      operation: "read local articles",
+      reason: "unknown",
+      remoteOperation: operation,
+      remoteOutcome: "succeeded",
+    });
+    expect(response.error).toContain(`Remote ${operation} succeeded`);
+    expect(response.error).toContain("Do not repeat it");
+    expect(response.error).not.toContain("try again");
+    expect(JSON.stringify(response)).not.toMatch(/secret|private.example|token/);
+    expect(JSON.parse(JSON.stringify(response))).toEqual(response);
+    expect(writes).toBe(0);
+    expect(created).toHaveLength(operation === "save" ? 1 : 0);
+    expect(removed).toHaveLength(operation === "delete" ? 1 : 0);
+    expect(getStorageDiagnostic()).toBeUndefined();
+    rejectArticles = false;
+    expect(await repo.getAllArticles()).toEqual([]);
+    if (operation === "delete") browser.bookmarks.getChildren = async () => [];
+    const synced = await repo.syncWithAPI();
+    expect(synced.items).toHaveLength(operation === "save" ? 1 : 0);
+    expect(stored).toHaveLength(operation === "save" ? 1 : 0);
+    expect(created).toHaveLength(operation === "save" ? 1 : 0);
+    expect(removed).toHaveLength(operation === "delete" ? 1 : 0);
+    const unrelated = await runOperation(Effect.fail(new BrowserFailure("unrelated read"))).catch(
+      (error: unknown) => error,
+    );
+    expect(errorResponse(unrelated).details).not.toHaveProperty("remoteOutcome");
+  });
+}
+
+test("post-mutation typed failures and defects keep distinct codes and safe known outcomes", async () => {
+  for (const failure of [
+    new ConfigurationFailure("post-save configuration"),
+    new PermissionFailure("post-save permission", "bookmarks"),
+    new BrowserFailure("post-save browser"),
+    new TypeError("secret=https://private.example/token"),
+  ]) {
+    const error = await runOperation(
+      Effect.gen(function* () {
+        yield* recordMutationSuccess("save");
+        if (failure instanceof TypeError) return yield* Effect.die(failure);
+        return yield* Effect.fail(failure);
+      }),
+    ).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(
+      failure instanceof TypeError ? OperationDefect : failure.constructor,
+    );
+    const response = errorResponse(error);
+    expect(response.code).toBe(failure instanceof TypeError ? "INTERNAL_DEFECT" : failure._tag);
+    expect(response.details).toMatchObject({ remoteOperation: "save", remoteOutcome: "succeeded" });
+    expect(response.error).toContain("Do not repeat it");
+    expect(response.error).not.toContain("try again");
+    expect(JSON.stringify(response)).not.toMatch(/secret|private.example|token/);
+    expect(JSON.parse(JSON.stringify(response))).toEqual(response);
+  }
+});
+
+test("a bookmark conversion defect after create retains confirmed success", async () => {
+  const api = await runOperation(createBookmarksAdapter(settings));
+  browser.bookmarks.create = async (details) => {
+    created.push(details);
+    return { ...details, id: bookmarkId, dateAdded: Infinity };
+  };
+  const error = await runOperation(
+    api.saveArticle({ title: "Saved", url: "https://example.com" }),
+  ).catch((error: unknown) => error);
+  expect(error).toBeInstanceOf(OperationDefect);
+  expect(created).toHaveLength(1);
+  const response = errorResponse(error);
+  expect(response.code).toBe("INTERNAL_DEFECT");
+  expect(response.details).toEqual({ remoteOperation: "save", remoteOutcome: "succeeded" });
+  expect(response.error).toContain("Remote save succeeded");
+  expect(response.error).toContain("Do not repeat it");
 });
