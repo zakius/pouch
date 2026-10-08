@@ -44,6 +44,7 @@ for (const scenario of [
   "token-refresh",
   "token-refresh-failed",
   "token-refresh-transient",
+  "effect-rate-wait-shutdown",
   "wallabag-save-storage",
   "wallabag-delete-storage",
   "wallabag-sync-storage",

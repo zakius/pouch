@@ -251,6 +251,30 @@ switch (scenario) {
     assert.equal(store.api_tokens instanceof Array, true);
     break;
   }
+  case "effect-rate-wait-shutdown": {
+    const { requestJson } = await import("../../src/background/api/effect-api-client");
+    const { runOperation } = await import("../../src/background/api/effect-adapter");
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    globalThis.fetch = async () => {
+      fetches++;
+      started();
+      return new Response(null, { status: 429, headers: { "Retry-After": "60" } });
+    };
+    const request = runOperation(
+      requestJson({ operation: "wallabag.sync", url: "https://example.com/api/entries.json" }),
+    );
+    const result = rejectsFatal(() => request);
+    await ready;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    rejectSet = true;
+    await rejectsFatal(() => setLocal("failed during retry wait", {}));
+    await result;
+    assert.equal(fetches, 1);
+    break;
+  }
   case "wallabag-save-storage":
   case "wallabag-delete-storage":
   case "wallabag-sync-storage":

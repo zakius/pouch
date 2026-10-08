@@ -4,6 +4,7 @@ import type { Article } from "../../types/common";
 import {
   FatalStorageError,
   assertStorageHealthy,
+  storageShutdownSignal,
   type StorageDiagnostic,
 } from "../../utils/fatal-storage";
 import type { SavingArticle, SyncOptions, SyncResult, FormConfig } from "./read-it-later-adapter";
@@ -228,7 +229,7 @@ export async function runOperation<A, E>(
   const progress: { mutation?: MutationOutcome } = {};
   const exit = await Effect.runPromiseExit(
     operation.pipe(Effect.provideService(OperationProgress, progress)),
-    { signal },
+    { signal: AbortSignal.any([storageShutdownSignal(), ...(signal ? [signal] : [])]) },
   );
   if (Exit.isSuccess(exit)) return exit.value;
   if (Cause.hasDies(exit.cause)) {
@@ -238,7 +239,12 @@ export async function runOperation<A, E>(
   const failure = Cause.findErrorOption(exit.cause);
   if (Option.isSome(failure) && failure.value instanceof FatalStorageError) throw failure.value;
   if (Cause.hasInterrupts(exit.cause)) {
-    assertStorageHealthy(progress.mutation?.remoteOutcome, progress.mutation?.remoteOperation);
+    try {
+      assertStorageHealthy(progress.mutation?.remoteOutcome, progress.mutation?.remoteOperation);
+    } catch (error) {
+      if (error instanceof FatalStorageError) throw new FatalStorageFailure(error.diagnostic);
+      throw error;
+    }
     throw new OperationInterrupted(exit.cause, progress.mutation);
   }
   if (Option.isSome(failure))
