@@ -1,4 +1,5 @@
-import { afterEach, expect, test, mock, spyOn } from "bun:test";
+import { mockReadyAdapter } from "./fixtures/ready-adapter-mock";
+import { beforeEach, afterEach, expect, test, mock, spyOn } from "bun:test";
 import type { Article } from "../src/types/common";
 import { BookmarksAdapter } from "../src/background/api/adapters/bookmarks-adapter";
 import { ArticlesRepository, getAccountStorageKeys } from "../src/background/articles-repository";
@@ -7,6 +8,8 @@ import { DEFAULT_SETTINGS } from "../src/utils/settings";
 const keys = getAccountStorageKeys({ ...DEFAULT_SETTINGS, backend: "bookmarks" } as Parameters<
   ArticlesRepository["initialize"]
 >[0]);
+
+beforeEach(() => { mockReadyAdapter(); });
 
 const originalBrowser = Object.getOwnPropertyDescriptor(globalThis, "browser");
 

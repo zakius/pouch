@@ -1,3 +1,5 @@
+import { createBookmarksAdapter } from "../background/api/adapters/bookmarks-adapter";
+import type { BookmarksSettings } from "./settings-schemas";
 import { BookmarksAdapter } from "../background/api/adapters/bookmarks-adapter";
 import { InstapaperAdapter } from "../background/api/adapters/instapaper-adapter";
 import { KarakeepAdapter } from "../background/api/adapters/karakeep-adapter";
@@ -27,4 +29,8 @@ export function getAdapter(backend: keyof typeof adapters, tokens?: TokenManager
     throw new Error("Invalid backend specified");
   }
   return new AdapterClass(tokens);
+}
+
+export function getReadyAdapter(settings: BookmarksSettings) {
+  return createBookmarksAdapter(settings);
 }

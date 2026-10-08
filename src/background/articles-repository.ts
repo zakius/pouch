@@ -1,3 +1,12 @@
+import { Effect } from "effect";
+import {
+  fromLegacyPromise,
+  isAdapterError,
+  runOperation,
+  storageHealthy,
+  BrowserFailure,
+  type EffectAdapter,
+} from "./api/effect-adapter";
 import {
   assertStorageHealthy,
   FatalStorageError,
@@ -7,7 +16,7 @@ import {
   type RemoteOutcome,
 } from "../utils/fatal-storage";
 import type { Article } from "../types/common";
-import { getAdapter } from "../utils/adapter-factory";
+import { getAdapter, getReadyAdapter } from "../utils/adapter-factory";
 import { hasBackendPermissions, missingPermissionMessage } from "../utils/backend-permissions";
 import { logger } from "../utils/logger";
 import type { Settings } from "../utils/settings";
@@ -67,6 +76,7 @@ export async function removeStaleAccountKeys(settings: Settings): Promise<void> 
 
 export class ArticlesRepository {
   private api: ReadItLaterAPI | null = null;
+  private bookmarkApi: Promise<EffectAdapter> | undefined;
   private apiInitPromise: Promise<ReadItLaterAPI> | null = null;
   private settings!: Settings;
   private lastFullSyncTimestamp: number | null = null;
@@ -89,6 +99,7 @@ export class ArticlesRepository {
     logger.info("Initializing ArticlesRepository with settings:", settings);
     this.settings = settings;
     this.api = null;
+    this.bookmarkApi = undefined;
     this.apiInitPromise = null;
     this.storageKeys = getAccountStorageKeys(settings);
     await this.loadSyncTimestamps();
@@ -106,7 +117,10 @@ export class ArticlesRepository {
           throw new Error(missingPermissionMessage(this.settings));
         }
         assertStorageHealthy();
-        const api = getAdapter(this.settings.backend, this.tokens);
+        const api: ReadItLaterAPI =
+          this.settings.backend === "bookmarks"
+            ? this.bookmarkPromiseBridge(await this.getBookmarkApi())
+            : getAdapter(this.settings.backend, this.tokens);
         await api.initialize(this.settings);
         logger.info("On-demand API initialization completed");
         assertStorageHealthy();
@@ -116,6 +130,7 @@ export class ArticlesRepository {
         if (error instanceof FatalStorageError) throw error;
         assertStorageHealthy();
         this.apiInitPromise = null;
+        if (isAdapterError(error) || this.settings.backend === "bookmarks") throw error;
         logger.error("Failed to initialize API:", error);
         throw new Error(
           `Failed to initialize ${this.settings.backend} API: ${error instanceof Error ? error.message : "Unknown error"}`,
@@ -125,12 +140,100 @@ export class ArticlesRepository {
     return this.apiInitPromise;
   }
 
-  async testConnection(): Promise<boolean> {
+  private async testConnectionLegacy(): Promise<boolean> {
     const api = await this.getApi();
     assertStorageHealthy();
     const result = await api.testConnection();
     assertStorageHealthy();
     return result;
+  }
+
+  private bookmarkPromiseBridge(api: EffectAdapter): ReadItLaterAPI {
+    return {
+      displayName: api.displayName,
+      formConfig: api.formConfig,
+      initialize: async () => {},
+      saveArticle: (article) => runOperation(api.saveArticle(article)),
+      deleteArticle: (id) => runOperation(api.deleteArticle(id)),
+      sync: (options) => runOperation(api.sync(options)),
+      testConnection: () => runOperation(api.testConnection),
+    };
+  }
+
+  private getBookmarkApi(): Promise<EffectAdapter> {
+    if (this.settings.backend !== "bookmarks") throw new Error("Bookmarks backend required");
+    this.bookmarkApi ??= runOperation(getReadyAdapter(this.settings)).catch((error: unknown) => {
+      this.bookmarkApi = undefined;
+      throw error;
+    });
+    return this.bookmarkApi;
+  }
+
+  readonly saveArticleEffect = Effect.fn("repository.save")(function* (
+    this: ArticlesRepository,
+    article: Pick<Article, "url" | "title">,
+  ) {
+    const api = yield* fromLegacyPromise(() => this.getBookmarkApi());
+    const canonicalUrl = yield* fromLegacyPromise(() => canonicalizeUrl(article.url));
+    // Browser mutations cannot be cancelled after submission; commit and bookkeeping must finish together.
+    return yield* Effect.gen({ self: this }, function* () {
+      const savedArticle = yield* api.saveArticle({
+        url: this.settings.normalizeOnSave ? canonicalUrl : article.url,
+        title: article.title,
+      });
+      reportRemoteOutcome("save", "succeeded");
+      const saved = { ...savedArticle, canonicalUrl };
+      yield* fromLegacyPromise(() => this.addArticle(saved, "succeeded", "save"));
+      if (this.syncInProgress)
+        this.pendingOperations.push({ type: "save", article: saved, timestamp: Date.now() });
+      return saved;
+    }).pipe(Effect.uninterruptible);
+  });
+  readonly deleteArticleEffect = Effect.fn("repository.delete")(function* (
+    this: ArticlesRepository,
+    id: number | string,
+  ) {
+    const api = yield* fromLegacyPromise(() => this.getBookmarkApi());
+    return yield* Effect.gen({ self: this }, function* () {
+      yield* api.deleteArticle(id);
+      reportRemoteOutcome("delete", "succeeded");
+      yield* fromLegacyPromise(() => this.removeArticle(id, "succeeded", "delete"));
+      if (this.syncInProgress)
+        this.pendingOperations.push({ type: "delete", articleId: id, timestamp: Date.now() });
+      return { success: true, id };
+    }).pipe(Effect.uninterruptible);
+  });
+  // Shared Promise sync/commit coordination is migrated in #80 and its bridge removed in #81.
+  readonly syncWithAPIEffect = Effect.fn("repository.sync")((options?: SyncOptions) =>
+    fromLegacyPromise(() => this.syncWithAPILegacy(options)),
+  );
+  readonly testConnectionEffect = Effect.gen({ self: this }, function* () {
+    const api = yield* fromLegacyPromise(() => this.getBookmarkApi());
+    yield* storageHealthy;
+    return yield* api.testConnection;
+  });
+
+  saveArticle(article: Pick<Article, "url" | "title">): Promise<Article> {
+    return this.settings.backend === "bookmarks"
+      ? runOperation(this.saveArticleEffect(article))
+      : this.saveArticleLegacy(article);
+  }
+  deleteArticle(id: number | string): Promise<{ success: boolean; id: string | number }> {
+    return this.settings.backend === "bookmarks"
+      ? runOperation(this.deleteArticleEffect(id))
+      : this.deleteArticleLegacy(id);
+  }
+  syncWithAPI(
+    options?: SyncOptions,
+  ): Promise<{ items: Article[]; total: number; syncResult: SyncResult }> {
+    return this.settings.backend === "bookmarks"
+      ? runOperation(this.syncWithAPIEffect(options))
+      : this.syncWithAPILegacy(options);
+  }
+  testConnection(): Promise<boolean> {
+    return this.settings.backend === "bookmarks"
+      ? runOperation(this.testConnectionEffect)
+      : this.testConnectionLegacy();
   }
 
   async getArticle(id: number | string): Promise<Article | undefined> {
@@ -144,7 +247,13 @@ export class ArticlesRepository {
   async getAllArticles(): Promise<Article[]> {
     assertStorageHealthy();
     if (!this.articlesCache) {
-      const result = await browser.storage.local.get([this.storageKeys.articles]);
+      const result = await browser.storage.local
+        .get([this.storageKeys.articles])
+        .catch((error: unknown) => {
+          if (this.settings.backend === "bookmarks")
+            throw new BrowserFailure("read local articles");
+          throw error;
+        });
       const articles: Article[] = result?.[this.storageKeys.articles] || [];
       assertStorageHealthy();
       this.articlesCache = articles;
@@ -243,7 +352,7 @@ export class ArticlesRepository {
     };
   }
 
-  async saveArticle(article: Pick<Article, "url" | "title">): Promise<Article> {
+  private async saveArticleLegacy(article: Pick<Article, "url" | "title">): Promise<Article> {
     const api = await this.getApi();
     logger.info("Saving article:", article);
 
@@ -284,7 +393,9 @@ export class ArticlesRepository {
     }
   }
 
-  async deleteArticle(id: number | string): Promise<{ success: boolean; id: string | number }> {
+  private async deleteArticleLegacy(
+    id: number | string,
+  ): Promise<{ success: boolean; id: string | number }> {
     const api = await this.getApi();
     logger.debug("Deleting article through cache:", id);
     if (!id) {
@@ -314,7 +425,7 @@ export class ArticlesRepository {
     }
   }
 
-  async syncWithAPI(
+  private async syncWithAPILegacy(
     options?: SyncOptions,
   ): Promise<{ items: Article[]; total: number; syncResult: SyncResult }> {
     assertStorageHealthy();
@@ -572,10 +683,12 @@ export class ArticlesRepository {
 
   private async loadSyncTimestamps(): Promise<void> {
     try {
-      const result = await browser.storage.local.get([
-        this.storageKeys.lastFullSyncTimestamp,
-        this.storageKeys.lastSyncTimestamp,
-      ]);
+      const result = await browser.storage.local
+        .get([this.storageKeys.lastFullSyncTimestamp, this.storageKeys.lastSyncTimestamp])
+        .catch((error: unknown) => {
+          if (this.settings.backend === "bookmarks") throw new BrowserFailure("read sync metadata");
+          throw error;
+        });
       assertStorageHealthy();
       this.lastFullSyncTimestamp = result[this.storageKeys.lastFullSyncTimestamp] || null;
       this.lastSyncTimestamp = result[this.storageKeys.lastSyncTimestamp] || null;
@@ -587,6 +700,7 @@ export class ArticlesRepository {
       });
     } catch (error) {
       assertStorageHealthy();
+      if (this.settings.backend === "bookmarks") throw error;
       logger.error("Failed to load sync timestamps:", error);
       this.lastFullSyncTimestamp = null;
       this.lastSyncTimestamp = null;

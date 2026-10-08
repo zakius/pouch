@@ -1,4 +1,5 @@
 {
+	"$schema": "./node_modules/@effect/tsgo/schema.json",
 	"compilerOptions": {
 		"target": "ESNext",
 		"module": "ESNext",
@@ -13,14 +14,47 @@
 		"noUnusedParameters": true,
 		"noImplicitReturns": true,
 		"noFallthroughCasesInSwitch": true,
-		"types": ["firefox-webext-browser", "node", "bun"],
-		"typeRoots": ["./types", "./node_modules/@types"],
+		"types": [
+			"firefox-webext-browser",
+			"node",
+			"bun-types"
+		],
+		"typeRoots": [
+			"./types",
+			"./node_modules/@types",
+			"./node_modules"
+		],
 		"rootDir": "./src",
 		"resolveJsonModule": true,
 		"isolatedModules": true,
-		"lib": ["ESNext", "DOM"],
-		"noEmit": true
+		"lib": [
+			"ESNext",
+			"DOM"
+		],
+		"noEmit": true,
+		"plugins": [
+			{
+				"name": "@effect/language-service",
+				"diagnosticSeverity": {
+					"floatingEffect": "error",
+					"globalErrorInEffectCatch": "error",
+					"leakingRequirements": "error",
+					"missingEffectContext": "error",
+					"missingEffectError": "error",
+					"missingLayerContext": "error",
+					"scopeInLayerEffect": "error",
+					"anyUnknownInErrorContext": "error",
+					"unknownInEffectCatch": "error",
+					"globalErrorInEffectFailure": "error"
+				}
+			}
+		]
 	},
-	"include": ["src/**/*.ts"],
-	"exclude": ["node_modules", "dist"]
+	"include": [
+		"src/**/*.ts"
+	],
+	"exclude": [
+		"node_modules",
+		"dist"
+	]
 }
