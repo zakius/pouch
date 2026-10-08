@@ -76,7 +76,7 @@ export async function removeStaleAccountKeys(settings: Settings): Promise<void> 
 
 export class ArticlesRepository {
   private api: ReadItLaterAPI | null = null;
-  private bookmarkApi: Promise<EffectAdapter> | undefined;
+  private effectApi: Promise<EffectAdapter> | undefined;
   private apiInitPromise: Promise<ReadItLaterAPI> | null = null;
   private settings!: Settings;
   private lastFullSyncTimestamp: number | null = null;
@@ -99,10 +99,14 @@ export class ArticlesRepository {
     logger.info("Initializing ArticlesRepository with settings:", settings);
     this.settings = settings;
     this.api = null;
-    this.bookmarkApi = undefined;
+    this.effectApi = undefined;
     this.apiInitPromise = null;
     this.storageKeys = getAccountStorageKeys(settings);
     await this.loadSyncTimestamps();
+  }
+
+  private get usesEffectAdapter(): boolean {
+    return this.settings.backend === "bookmarks" || this.settings.backend === "wallabag";
   }
 
   private getApi(): Promise<ReadItLaterAPI> {
@@ -117,10 +121,9 @@ export class ArticlesRepository {
           throw new Error(missingPermissionMessage(this.settings));
         }
         assertStorageHealthy();
-        const api: ReadItLaterAPI =
-          this.settings.backend === "bookmarks"
-            ? this.bookmarkPromiseBridge(await this.getBookmarkApi())
-            : getAdapter(this.settings.backend, this.tokens);
+        const api: ReadItLaterAPI = this.usesEffectAdapter
+          ? this.effectPromiseBridge(await this.getEffectApi())
+          : getAdapter(this.settings.backend, this.tokens);
         await api.initialize(this.settings);
         logger.info("On-demand API initialization completed");
         assertStorageHealthy();
@@ -130,7 +133,7 @@ export class ArticlesRepository {
         if (error instanceof FatalStorageError) throw error;
         assertStorageHealthy();
         this.apiInitPromise = null;
-        if (isAdapterError(error) || this.settings.backend === "bookmarks") throw error;
+        if (isAdapterError(error) || this.usesEffectAdapter) throw error;
         logger.error("Failed to initialize API:", error);
         throw new Error(
           `Failed to initialize ${this.settings.backend} API: ${error instanceof Error ? error.message : "Unknown error"}`,
@@ -148,7 +151,7 @@ export class ArticlesRepository {
     return result;
   }
 
-  private bookmarkPromiseBridge(api: EffectAdapter): ReadItLaterAPI {
+  private effectPromiseBridge(api: EffectAdapter): ReadItLaterAPI {
     return {
       displayName: api.displayName,
       formConfig: api.formConfig,
@@ -160,20 +163,23 @@ export class ArticlesRepository {
     };
   }
 
-  private getBookmarkApi(): Promise<EffectAdapter> {
-    if (this.settings.backend !== "bookmarks") throw new Error("Bookmarks backend required");
-    this.bookmarkApi ??= runOperation(getReadyAdapter(this.settings)).catch((error: unknown) => {
-      this.bookmarkApi = undefined;
-      throw error;
-    });
-    return this.bookmarkApi;
+  private getEffectApi(): Promise<EffectAdapter> {
+    if (this.settings.backend !== "bookmarks" && this.settings.backend !== "wallabag")
+      throw new Error("Ready backend required");
+    this.effectApi ??= runOperation(getReadyAdapter(this.settings, this.tokens)).catch(
+      (error: unknown) => {
+        this.effectApi = undefined;
+        throw error;
+      },
+    );
+    return this.effectApi;
   }
 
   readonly saveArticleEffect = Effect.fn("repository.save")(function* (
     this: ArticlesRepository,
     article: Pick<Article, "url" | "title">,
   ) {
-    const api = yield* fromLegacyPromise(() => this.getBookmarkApi());
+    const api = yield* fromLegacyPromise(() => this.getEffectApi());
     const canonicalUrl = yield* fromLegacyPromise(() => canonicalizeUrl(article.url));
     // Browser mutations cannot be cancelled after submission; commit and bookkeeping must finish together.
     return yield* Effect.gen({ self: this }, function* () {
@@ -193,7 +199,7 @@ export class ArticlesRepository {
     this: ArticlesRepository,
     id: number | string,
   ) {
-    const api = yield* fromLegacyPromise(() => this.getBookmarkApi());
+    const api = yield* fromLegacyPromise(() => this.getEffectApi());
     return yield* Effect.gen({ self: this }, function* () {
       yield* api.deleteArticle(id);
       reportRemoteOutcome("delete", "succeeded");
@@ -208,30 +214,30 @@ export class ArticlesRepository {
     fromLegacyPromise(() => this.syncWithAPILegacy(options)),
   );
   readonly testConnectionEffect = Effect.gen({ self: this }, function* () {
-    const api = yield* fromLegacyPromise(() => this.getBookmarkApi());
+    const api = yield* fromLegacyPromise(() => this.getEffectApi());
     yield* storageHealthy;
     return yield* api.testConnection;
   });
 
   saveArticle(article: Pick<Article, "url" | "title">): Promise<Article> {
-    return this.settings.backend === "bookmarks"
+    return this.usesEffectAdapter
       ? runOperation(this.saveArticleEffect(article))
       : this.saveArticleLegacy(article);
   }
   deleteArticle(id: number | string): Promise<{ success: boolean; id: string | number }> {
-    return this.settings.backend === "bookmarks"
+    return this.usesEffectAdapter
       ? runOperation(this.deleteArticleEffect(id))
       : this.deleteArticleLegacy(id);
   }
   syncWithAPI(
     options?: SyncOptions,
   ): Promise<{ items: Article[]; total: number; syncResult: SyncResult }> {
-    return this.settings.backend === "bookmarks"
+    return this.usesEffectAdapter
       ? runOperation(this.syncWithAPIEffect(options))
       : this.syncWithAPILegacy(options);
   }
   testConnection(): Promise<boolean> {
-    return this.settings.backend === "bookmarks"
+    return this.usesEffectAdapter
       ? runOperation(this.testConnectionEffect)
       : this.testConnectionLegacy();
   }
@@ -250,8 +256,7 @@ export class ArticlesRepository {
       const result = await browser.storage.local
         .get([this.storageKeys.articles])
         .catch((error: unknown) => {
-          if (this.settings.backend === "bookmarks")
-            throw new BrowserFailure("read local articles");
+          if (this.usesEffectAdapter) throw new BrowserFailure("read local articles");
           throw error;
         });
       const articles: Article[] = result?.[this.storageKeys.articles] || [];
@@ -686,7 +691,7 @@ export class ArticlesRepository {
       const result = await browser.storage.local
         .get([this.storageKeys.lastFullSyncTimestamp, this.storageKeys.lastSyncTimestamp])
         .catch((error: unknown) => {
-          if (this.settings.backend === "bookmarks") throw new BrowserFailure("read sync metadata");
+          if (this.usesEffectAdapter) throw new BrowserFailure("read sync metadata");
           throw error;
         });
       assertStorageHealthy();
@@ -700,7 +705,7 @@ export class ArticlesRepository {
       });
     } catch (error) {
       assertStorageHealthy();
-      if (this.settings.backend === "bookmarks") throw error;
+      if (this.usesEffectAdapter) throw error;
       logger.error("Failed to load sync timestamps:", error);
       this.lastFullSyncTimestamp = null;
       this.lastSyncTimestamp = null;

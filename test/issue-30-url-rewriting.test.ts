@@ -3,9 +3,17 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { DEFAULT_SETTINGS, type Settings } from "../src/utils/settings";
 import { ArticlesRepository, getAccountStorageKeys } from "../src/background/articles-repository";
 import type { Article } from "../src/types/common";
-import { refreshFilterLists, resetFilterListSources, setFilterListSources } from "../src/utils/filter-list-manager";
+import {
+  refreshFilterLists,
+  resetFilterListSources,
+  setFilterListSources,
+} from "../src/utils/filter-list-manager";
 import { initializeWithRawFilterLists } from "../src/utils/filter-list-url-cleaner";
-import { canonicalizeUrl, clearCanonicalUrlCache, initializeUrlCanonizer } from "../src/utils/url-helpers";
+import {
+  canonicalizeUrl,
+  clearCanonicalUrlCache,
+  initializeUrlCanonizer,
+} from "../src/utils/url-helpers";
 import testFilterContent from "./test-data/test-filters.txt";
 
 const originalBrowser = Object.getOwnPropertyDescriptor(globalThis, "browser");
@@ -23,7 +31,9 @@ function withStorage(): { storage: Record<string, unknown> } {
           get: async (keys?: string | string[]) => {
             if (!keys) return { ...storage };
             const names = typeof keys === "string" ? [keys] : keys;
-            return Object.fromEntries(names.filter((k) => k in storage).map((k) => [k, storage[k]]));
+            return Object.fromEntries(
+              names.filter((k) => k in storage).map((k) => [k, storage[k]]),
+            );
           },
           set: async (values: Record<string, unknown>) => {
             Object.assign(storage, values);
@@ -44,7 +54,7 @@ function dataUrl(content: string): string {
 
 type WithPrivate = ArticlesRepository & {
   addArticle: (article: Article) => Promise<void>;
-  bookmarkApi: unknown;
+  effectApi: unknown;
 };
 
 beforeEach(async () => {
@@ -75,9 +85,9 @@ test("URL-valued query parameters on ordinary hosts are preserved", async () => 
 });
 
 test("Google redirect boundary URLs are unwrapped", async () => {
-  expect(await canonicalizeUrl("https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Farticle")).toBe(
-    "https://example.com/article",
-  );
+  expect(
+    await canonicalizeUrl("https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Farticle"),
+  ).toBe("https://example.com/article");
   expect(
     await canonicalizeUrl("https://google.com/imgres?imgurl=https%3A%2F%2Fexample.com%2Fpic.jpg"),
   ).toBe("https://example.com/pic.jpg");
@@ -173,18 +183,22 @@ test("Duplicate detection follows the comparison setting", async () => {
 test("Saving honors normalizeOnSave independently", async () => {
   const fakeApi = {
     initialize: async () => {},
-    saveArticle: (input: { url: string; title: string }) => Effect.succeed({
-      id: 7,
-      url: input.url,
-      title: input.title,
-      created_at: "2026-01-01",
-    }),
+    saveArticle: (input: { url: string; title: string }) =>
+      Effect.succeed({
+        id: 7,
+        url: input.url,
+        title: input.title,
+        created_at: "2026-01-01",
+      }),
   };
 
   const rawRepository = new ArticlesRepository();
   await rawRepository.initialize({ ...DEFAULT_SETTINGS, normalizeOnSave: false });
-  (rawRepository as WithPrivate).bookmarkApi = Promise.resolve(fakeApi);
-  const rawSaved = await rawRepository.saveArticle({ url: "https://youtu.be/abc123", title: "Video" });
+  (rawRepository as WithPrivate).effectApi = Promise.resolve(fakeApi);
+  const rawSaved = await rawRepository.saveArticle({
+    url: "https://youtu.be/abc123",
+    title: "Video",
+  });
   expect(rawSaved.url).toBe("https://youtu.be/abc123");
   expect(rawSaved.canonicalUrl).toBe("https://www.youtube.com/watch?v=abc123");
 
@@ -197,7 +211,7 @@ test("Saving honors normalizeOnSave independently", async () => {
     normalizeOnSave: true,
     normalizeOnCompare: false,
   });
-  (normalizedRepository as WithPrivate).bookmarkApi = Promise.resolve(fakeApi);
+  (normalizedRepository as WithPrivate).effectApi = Promise.resolve(fakeApi);
   const normalizedSaved = await normalizedRepository.saveArticle({
     url: "https://youtu.be/abc123",
     title: "Video",
@@ -210,10 +224,14 @@ test("Filter refresh invalidates canonical results", async () => {
   const target = "https://cache.test/page?track=1&keep=1";
   setFilterListSources([{ name: "rules", url: dataUrl("$removeparam=track\n$removeparam=other") }]);
   clearCanonicalUrlCache();
-  await initializeWithRawFilterLists([{ name: "rules", content: "$removeparam=track\n$removeparam=other" }]);
+  await initializeWithRawFilterLists([
+    { name: "rules", content: "$removeparam=track\n$removeparam=other" },
+  ]);
   expect(await canonicalizeUrl(target)).toBe("https://cache.test/page?keep=1");
 
-  setFilterListSources([{ name: "rules", url: dataUrl("$removeparam=other\n@@||cache.test^$removeparam=track") }]);
+  setFilterListSources([
+    { name: "rules", url: dataUrl("$removeparam=other\n@@||cache.test^$removeparam=track") },
+  ]);
   await refreshFilterLists();
   expect(await canonicalizeUrl(target)).toBe("https://cache.test/page?track=1&keep=1");
   expect(await canonicalizeUrl(target)).toBe("https://cache.test/page?track=1&keep=1");
@@ -230,10 +248,14 @@ test("Existing stored articles are compared against recomputed canonical values"
     created_at: "2026-01-01",
   };
   storage[keys.articles] = [staleCanonical];
-  setFilterListSources([{ name: "rules", url: dataUrl("$removeparam=other\n@@||cache.test^$removeparam=track") }]);
+  setFilterListSources([
+    { name: "rules", url: dataUrl("$removeparam=other\n@@||cache.test^$removeparam=track") },
+  ]);
   await refreshFilterLists();
 
   const repository = new ArticlesRepository();
   await repository.initialize({ ...DEFAULT_SETTINGS, normalizeOnCompare: true });
-  expect(await repository.findSaved("https://cache.test/page?track=1&keep=1")).toEqual(staleCanonical);
+  expect(await repository.findSaved("https://cache.test/page?track=1&keep=1")).toEqual(
+    staleCanonical,
+  );
 });

@@ -215,17 +215,20 @@ switch (scenario) {
   case "token-clear":
   case "token-clear-all":
   case "token-refresh":
-  case "token-refresh-failed": {
+  case "token-refresh-failed":
+  case "token-refresh-transient": {
     await tokens.storeToken("service", baseToken);
     const before = structuredClone(tokens.getTokenMetadata("service"));
     rejectSet = true;
     if (scenario === "token-clear") await rejectsFatal(() => tokens.clearToken("service"));
     else if (scenario === "token-clear-all") await rejectsFatal(() => tokens.clearAllTokens());
     else {
-      globalThis.fetch = async () =>
-        new Response(JSON.stringify({ access_token: "new", expires_in: 3600 }), {
+      globalThis.fetch = async () => {
+        if (scenario === "token-refresh-transient") throw new TypeError("network failed SECRET");
+        return new Response(JSON.stringify({ access_token: "new", expires_in: 3600 }), {
           status: scenario === "token-refresh-failed" ? 401 : 200,
         });
+      };
       await rejectsFatal(() =>
         tokens.refreshToken("service", {
           serviceName: "service",
@@ -237,11 +240,78 @@ switch (scenario) {
       );
       assert.equal(
         getStorageDiagnostic()?.remoteOutcome,
-        scenario === "token-refresh-failed" ? "failed" : "succeeded",
+        scenario === "token-refresh-failed"
+          ? "failed"
+          : scenario === "token-refresh-transient"
+            ? "unknown"
+            : "succeeded",
       );
     }
     assert.deepEqual(tokens.getTokenMetadata("service"), before);
     assert.equal(store.api_tokens instanceof Array, true);
+    break;
+  }
+  case "wallabag-save-storage":
+  case "wallabag-delete-storage":
+  case "wallabag-sync-storage":
+  case "wallabag-sync-timestamp": {
+    const wallabagSettings = {
+      ...DEFAULT_SETTINGS,
+      backend: "wallabag" as const,
+      apiConfig: {
+        url: "https://example.com",
+        clientId: "client",
+        clientSecret: "secret",
+        username: "user",
+        password: "password",
+      },
+    };
+    const accountKeys = getAccountStorageKeys(wallabagSettings);
+    const saved = {
+      id: 42,
+      title: "Saved",
+      url: "https://example.com/article",
+      created_at: "2026-01-01T00:00:00Z",
+    };
+    store[accountKeys.articles] = [original];
+    await tokens.storeToken("wallabag", { ...baseToken, expiresAt: Date.now() + 3600000 });
+    const repo = new ArticlesRepository(tokens);
+    await repo.initialize(wallabagSettings);
+    await repo.getAllArticles();
+    const before = structuredClone(Reflect.get(repo, "articlesCache"));
+    globalThis.fetch = async (_url, init) => {
+      fetches++;
+      if (init?.method === "DELETE") {
+        remoteDeletes++;
+        return new Response(null, { status: 204 });
+      }
+      if (init?.method === "POST") {
+        remoteSaves++;
+        return new Response(JSON.stringify(saved));
+      }
+      remoteReads++;
+      return new Response(
+        JSON.stringify({ _embedded: { items: [saved] }, total: 1, limit: 30, pages: 1, page: 1 }),
+      );
+    };
+    failKey =
+      scenario === "wallabag-sync-timestamp" ? accountKeys.lastSyncTimestamp : accountKeys.articles;
+    if (scenario === "wallabag-save-storage") await rejectsFatal(() => repo.saveArticle(saved));
+    else if (scenario === "wallabag-delete-storage")
+      await rejectsFatal(() => repo.deleteArticle(original.id));
+    else await rejectsFatal(() => repo.syncWithAPI({ mode: "overwrite" }));
+    if (scenario !== "wallabag-sync-timestamp")
+      assert.deepEqual(Reflect.get(repo, "articlesCache"), before);
+    else {
+      assert.equal(Reflect.get(repo, "lastSyncTimestamp"), null);
+      assert.equal(store[accountKeys.lastSyncTimestamp], undefined);
+    }
+    assert.equal(getStorageDiagnostic()?.remoteOutcome, "succeeded");
+    const calls = fetches;
+    await rejectsFatal(() => repo.saveArticle(saved));
+    await rejectsFatal(() => repo.testConnection());
+    await rejectsFatal(() => tokens.checkAndRefreshTokens());
+    assert.equal(fetches, calls, "fatal shutdown blocks future transport and maintenance");
     break;
   }
   case "options-ui": {
@@ -336,7 +406,8 @@ switch (scenario) {
       refreshToken: "refresh",
     });
     assert.equal(result.success, false);
-    assert.match(result.error!, /Invalid refresh response/);
+    assert.match(result.error!, /invalid token/);
+    assert.equal(result.failure?._tag, "InvalidResponseFailure");
     assert.equal(getStorageDiagnostic(), undefined);
     break;
   }

@@ -1,9 +1,51 @@
+import { Effect } from "effect";
+import * as v from "valibot";
+import { requestJson } from "./api/effect-api-client";
+import {
+  CredentialsFailure,
+  InvalidResponseFailure,
+  fromLegacyPromise,
+  runOperation,
+  type TransportError,
+} from "./api/effect-adapter";
+
+export function fromTokenPromise<A>(operation: () => Promise<A>): Effect.Effect<A, TransportError> {
+  return fromLegacyPromise(operation).pipe(Effect.catchTag("ConfigurationFailure", Effect.die));
+}
+
+export const oauthTokenSchema = v.object({
+  access_token: v.pipe(v.string(), v.minLength(1)),
+  refresh_token: v.optional(v.pipe(v.string(), v.minLength(1))),
+  token_type: v.optional(v.pipe(v.string(), v.regex(/^[a-zA-Z]+$/))),
+  expires_in: v.optional(v.pipe(v.number(), v.finite(), v.minValue(1))),
+  scope: v.optional(v.nullable(v.string())),
+});
+export function parseOAuthToken(
+  data: unknown,
+  operation: string,
+): Effect.Effect<
+  v.InferOutput<typeof oauthTokenSchema>,
+  CredentialsFailure | InvalidResponseFailure
+> {
+  if (
+    typeof data === "object" &&
+    data !== null &&
+    "error" in data &&
+    ["invalid_grant", "invalid_client", "unauthorized_client", "access_denied"].includes(
+      String(data.error),
+    )
+  )
+    return Effect.fail(new CredentialsFailure(operation));
+  const parsed = v.safeParse(oauthTokenSchema, data);
+  return parsed.success
+    ? Effect.succeed(parsed.output)
+    : Effect.fail(new InvalidResponseFailure(operation, "token"));
+}
+
 import {
   assertStorageHealthy,
   getStorageDiagnostic,
-  FatalStorageError,
   setLocal,
-  storageShutdownSignal,
   type RemoteOutcome,
 } from "../utils/fatal-storage";
 import { logger } from "../utils/logger";
@@ -35,12 +77,12 @@ export interface TokenRefreshResult {
   success: boolean;
   requiresReauth: boolean;
   error?: string;
+  failure?: TransportError;
 }
 
 export interface TokenManagerConfig {
   storageKey: string;
   refreshBufferMs: number;
-  maxRefreshAttempts: number;
   refreshCooldownMs: number;
   checkIntervalMinutes: number;
   expirationThresholdChecks: number;
@@ -53,13 +95,13 @@ export class TokenManager {
   private alarmInitialized: boolean = false;
   private config: TokenManagerConfig;
   private refreshConfigProviders: Map<string, () => TokenRefreshConfig | null> = new Map();
-  private refreshPromises: Map<string, Promise<TokenRefreshResult>> = new Map();
+  private refreshEffects = new Map<string, Effect.Effect<TokenRefreshResult, TransportError>>();
+  private refreshConfigs = new Map<string, TokenRefreshConfig>();
 
   constructor(config: Partial<TokenManagerConfig> = {}) {
     this.config = {
       storageKey: "api_tokens",
       refreshBufferMs: 5 * 60 * 1000, // 5 minutes
-      maxRefreshAttempts: 3,
       refreshCooldownMs: 30 * 1000, // 30 seconds
       checkIntervalMinutes: 5, // Check every 5 minutes
       expirationThresholdChecks: 3, // Refresh if expiring in < 3 check periods (15 minutes)
@@ -115,6 +157,7 @@ export class TokenManager {
       remoteOperation,
     );
 
+    this.refreshEffects.delete(serviceName);
     logger.info(`Token stored for ${serviceName}`, {
       expiresAt: new Date(tokenMetadata.expiresAt).toISOString(),
       scope: tokenMetadata.scope,
@@ -138,10 +181,22 @@ export class TokenManager {
       logger.error(
         `No token found for service: ${serviceName}. Available services: ${Array.from(this.tokens.keys()).join(", ")}`,
       );
-      throw new Error(
-        `No token found for service: ${serviceName}. Please check your configuration and try re-authenticating.`,
-      );
+      throw new CredentialsFailure("access token");
     }
+
+    if (
+      !v.safeParse(
+        v.object({
+          accessToken: v.pipe(v.string(), v.minLength(1)),
+          refreshToken: v.string(),
+          tokenType: v.pipe(v.string(), v.regex(/^[a-zA-Z]+$/)),
+          expiresAt: v.pipe(v.number(), v.finite()),
+          issuedAt: v.pipe(v.number(), v.finite()),
+        }),
+        token,
+      ).success
+    )
+      throw new InvalidResponseFailure("access token", "token");
 
     if (this.needsRefresh(token)) {
       logger.info(`Token for ${serviceName} needs refresh, attempting refresh...`);
@@ -150,9 +205,7 @@ export class TokenManager {
       if (!refreshResult.success) {
         logger.error(`Token refresh failed for service: ${serviceName}. ${refreshResult.error}`);
         if (!currentToken || Date.now() >= currentToken.expiresAt) {
-          throw new Error(
-            `Token refresh failed for service: ${serviceName}. ${refreshResult.error}`,
-          );
+          throw refreshResult.failure ?? new CredentialsFailure("access token");
         }
         logger.warn(`Using existing token for ${serviceName} until expiry after failed refresh`);
       }
@@ -162,7 +215,7 @@ export class TokenManager {
     const updatedToken = this.tokens.get(serviceName);
     if (!updatedToken) {
       logger.error(`No token available for service: ${serviceName} after refresh attempt`);
-      throw new Error(`No token available for service: ${serviceName}`);
+      throw new CredentialsFailure("access token");
     }
 
     return updatedToken.accessToken;
@@ -185,150 +238,111 @@ export class TokenManager {
     refreshConfig?: TokenRefreshConfig,
   ): Promise<TokenRefreshResult> {
     assertStorageHealthy();
-    const inFlight = this.refreshPromises.get(serviceName);
-    if (inFlight) {
-      logger.debug(`Refresh already in progress for ${serviceName}, sharing result`);
-      return inFlight;
+    if (refreshConfig) this.refreshConfigs.set(serviceName, refreshConfig);
+    let shared = this.refreshEffects.get(serviceName);
+    if (!shared) {
+      // Cache failures through the cooldown so waiting requests retain the same recovery reason.
+      shared = Effect.runSync(
+        Effect.cachedWithTTL(this.performRefresh(serviceName), (exit) =>
+          exit._tag === "Success" && !exit.value.success ? this.config.refreshCooldownMs : 0,
+        ),
+      );
+      this.refreshEffects.set(serviceName, shared);
     }
-
-    const promise = this.performRefresh(serviceName, refreshConfig).finally(() => {
-      this.refreshPromises.delete(serviceName);
-    });
-    this.refreshPromises.set(serviceName, promise);
-    return promise;
+    return runOperation(shared);
   }
 
-  private async performRefresh(
-    serviceName: string,
-    refreshConfig?: TokenRefreshConfig,
-  ): Promise<TokenRefreshResult> {
-    const token = this.tokens.get(serviceName);
-    if (!token) {
-      return {
-        success: false,
-        requiresReauth: true,
-        error: `No token found for service: ${serviceName}`,
+  private performRefresh(serviceName: string): Effect.Effect<TokenRefreshResult, TransportError> {
+    return Effect.gen({ self: this }, function* () {
+      const token = this.tokens.get(serviceName);
+      if (!token)
+        return {
+          success: false,
+          requiresReauth: true,
+          failure: new CredentialsFailure("token refresh"),
+          error: "No token available",
+        };
+      if (!token.refreshToken)
+        return { success: false, requiresReauth: false, error: "No refresh token available" };
+      const config =
+        this.refreshConfigProviders.get(serviceName)?.() ?? this.refreshConfigs.get(serviceName);
+      if (!config)
+        return {
+          success: false,
+          requiresReauth: false,
+          error: "No refresh configuration available",
+        };
+      const attempt = {
+        ...token,
+        lastRefreshAttempt: Date.now(),
+        refreshCount: token.refreshCount + 1,
       };
-    }
-
-    if (!token.refreshToken) {
-      logger.debug(`Service ${serviceName} has no refresh token (static key)`);
-      return {
-        success: false,
-        requiresReauth: false,
-        error: `No refresh token available for service: ${serviceName}`,
-      };
-    }
-
-    const config = refreshConfig ?? this.refreshConfigProviders.get(serviceName)?.() ?? null;
-    if (!config) {
-      return {
-        success: false,
-        requiresReauth: false,
-        error: `No refresh configuration available for service: ${serviceName}`,
-      };
-    }
-
-    if (
-      token.lastRefreshAttempt &&
-      Date.now() - token.lastRefreshAttempt < this.config.refreshCooldownMs
-    ) {
-      logger.debug(`Refresh cooldown active for ${serviceName}`);
-      return {
-        success: false,
-        requiresReauth: false,
-        error: "Refresh cooldown active",
-      };
-    }
-
-    const attempt = {
-      ...token,
-      lastRefreshAttempt: Date.now(),
-      refreshCount: token.refreshCount + 1,
-    };
-
-    if (attempt.refreshCount > this.config.maxRefreshAttempts) {
-      logger.warn(`Max refresh attempts exceeded for ${serviceName}, clearing token`);
-      await this.clearToken(serviceName);
-      return {
-        success: false,
-        requiresReauth: true,
-        error: `Max refresh attempts exceeded for ${serviceName}`,
-      };
-    }
-
-    try {
-      assertStorageHealthy();
-      const response = await fetch(config.refreshUrl, {
-        signal: storageShutdownSignal(),
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
+      const refreshed = yield* requestJson({
+        operation: "token refresh",
+        url: config.refreshUrl,
+        responseKind: "token",
+        rateRetries: 0,
+        init: {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            ...config.additionalParams,
+            grant_type: "refresh_token",
+            client_id: config.clientId,
+            client_secret: config.clientSecret,
+            refresh_token: token.refreshToken,
+          }),
         },
-        body: new URLSearchParams({
-          grant_type: "refresh_token",
-          client_id: config.clientId,
-          client_secret: config.clientSecret,
-          refresh_token: config.refreshToken,
-          ...config.additionalParams,
-        }),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        logger.error(`Token refresh failed for ${serviceName}: ${response.status} ${errorText}`);
-        if (response.status === 400 || response.status === 401 || response.status === 403) {
-          await this.clearToken(serviceName, "failed");
-          return {
-            success: false,
-            requiresReauth: true,
-            error: `Token refresh failed: ${response.status} ${errorText}`,
-          };
-        }
-        assertStorageHealthy();
-        this.tokens.set(serviceName, attempt);
-        return {
-          success: false,
-          requiresReauth: false,
-          error: `Token refresh failed: ${response.status} ${errorText}`,
-        };
-      }
-
-      const tokenData = (await response.json()) as Record<string, unknown>;
-      if (typeof tokenData?.access_token !== "string" || !tokenData.access_token) {
-        assertStorageHealthy();
-        this.tokens.set(serviceName, attempt);
-        logger.error(`Invalid refresh response for ${serviceName}`);
-        return {
-          success: false,
-          requiresReauth: false,
-          error: `Invalid refresh response for service: ${serviceName}`,
-        };
-      }
-
-      await this.updateTokenFromResponse(serviceName, tokenData, attempt.lastRefreshAttempt);
-
-      logger.info(`Token refreshed successfully for ${serviceName}`, {
-        expiresAt: new Date(this.tokens.get(serviceName)?.expiresAt || Date.now()).toISOString(),
-        refreshCount: this.tokens.get(serviceName)?.refreshCount,
-      });
-
-      return { success: true, requiresReauth: false };
-    } catch (error) {
-      if (error instanceof FatalStorageError) throw error;
-      assertStorageHealthy();
-      this.tokens.set(serviceName, attempt);
-      logger.error(`Token refresh error for ${serviceName}:`, error);
-      return {
-        success: false,
-        requiresReauth: false,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
+      }).pipe(
+        Effect.flatMap((data) => parseOAuthToken(data, "token refresh")),
+        Effect.flatMap((data) =>
+          fromTokenPromise(() =>
+            this.updateTokenFromResponse(serviceName, data, attempt.lastRefreshAttempt, token),
+          ).pipe(Effect.as({ success: true, requiresReauth: false })),
+        ),
+        Effect.catch((failure) =>
+          Effect.gen({ self: this }, function* () {
+            const definitive = failure instanceof CredentialsFailure;
+            if (failure._tag === "FatalStorageFailure") return yield* Effect.fail(failure);
+            if (this.tokens.get(serviceName) !== token)
+              return {
+                success: false,
+                requiresReauth: false,
+                error: "Token ownership changed",
+                failure: new CredentialsFailure("token refresh"),
+              };
+            if (definitive)
+              yield* fromTokenPromise(() =>
+                this.commitTokens(
+                  (tokens) => {
+                    if (tokens.get(serviceName) === token) tokens.delete(serviceName);
+                  },
+                  "failed",
+                  "token refresh",
+                ),
+              );
+            else
+              yield* fromTokenPromise(() =>
+                this.commitTokens((tokens) => {
+                  if (tokens.get(serviceName) === token) tokens.set(serviceName, attempt);
+                }),
+              );
+            return {
+              success: false,
+              requiresReauth: definitive,
+              error: failure.message,
+              failure: definitive ? new CredentialsFailure("token refresh") : failure,
+            };
+          }),
+        ),
+      );
+      return refreshed;
+    });
   }
 
   public async clearToken(serviceName: string, remoteOutcome?: RemoteOutcome): Promise<void> {
     await this.commitTokens((tokens) => tokens.delete(serviceName), remoteOutcome, "token refresh");
+    this.refreshEffects.delete(serviceName);
     logger.info(`Token cleared for ${serviceName}`);
   }
 
@@ -339,6 +353,7 @@ export class TokenManager {
 
   public async clearAllTokens(): Promise<void> {
     await this.commitTokens((tokens) => tokens.clear());
+    this.refreshEffects.clear();
     logger.info("All tokens cleared");
   }
 
@@ -449,29 +464,34 @@ export class TokenManager {
 
   private async updateTokenFromResponse(
     serviceName: string,
-    tokenData: Record<string, unknown>,
+    tokenData: v.InferOutput<typeof oauthTokenSchema>,
     lastRefreshAttempt: number,
+    expected: TokenMetadata,
   ): Promise<void> {
     const existing = this.tokens.get(serviceName);
+    if (existing !== expected) throw new CredentialsFailure("token refresh");
     const token = existing ? { ...existing } : undefined;
     if (!token) {
       throw new Error(`No existing token found for service: ${serviceName}`);
     }
 
     const now = Date.now();
-    const expiresIn = tokenData.expires_in || 3600; // Default to 1 hour
+    const expiresIn = tokenData.expires_in ?? 3600;
 
-    token.accessToken = (tokenData.access_token as string) || token.accessToken;
-    token.refreshToken = (tokenData.refresh_token as string) || token.refreshToken;
-    token.tokenType = (tokenData.token_type as string) || token.tokenType;
-    token.expiresAt = now + (expiresIn as number) * 1000;
+    token.accessToken = tokenData.access_token;
+    token.refreshToken = tokenData.refresh_token ?? token.refreshToken;
+    token.tokenType = tokenData.token_type ?? token.tokenType;
+    token.expiresAt = now + expiresIn * 1000;
     token.issuedAt = now;
-    token.scope = (tokenData.scope as string) || token.scope;
+    token.scope = tokenData.scope ?? token.scope;
 
     token.refreshCount = 0;
     token.lastRefreshAttempt = lastRefreshAttempt;
     await this.commitTokens(
-      (tokens) => tokens.set(serviceName, token),
+      (tokens) => {
+        if (tokens.get(serviceName) !== expected) throw new CredentialsFailure("token refresh");
+        tokens.set(serviceName, token);
+      },
       "succeeded",
       "token refresh",
     );

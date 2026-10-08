@@ -49,6 +49,10 @@ export function errorResponse(error: unknown) {
       code: error._tag,
       details: {
         operation: error.operation,
+        ...(error._tag === "HttpFailure" ? { status: error.status } : {}),
+        ...(error._tag === "RateLimitFailure" ? { retryAfterMs: error.retryAfterMs } : {}),
+        ...(error._tag === "TimeoutFailure" ? { timeoutMs: error.timeoutMs } : {}),
+        ...(error._tag === "InvalidResponseFailure" ? { responseKind: error.responseKind } : {}),
         ...error.mutation,
         ...(error._tag === "BrowserFailure"
           ? { reason: error.reason, ...(error.cause ? { cause: error.cause } : {}) }
