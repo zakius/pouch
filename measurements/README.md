@@ -85,15 +85,15 @@ Typecheck, type-aware lint, formatting, diff checks, both package builds, and al
 
 [effect-74-pilot.json](./effect-74-pilot.json) records product commit `5c5d57a596ab4b26036fadd5d4010db8066617d1`. Each target has ten raw samples from the existing procedure. The reported Bun version (1.4.3), host, timer boundaries, and mocks match the baseline records. These timings exclude process creation. They measure module import and the first response with mocked browser APIs, including startup checks. They do not measure live extension startup, OAuth request latency, or MV3 worker wake.
 
-Firefox minified JavaScript grows from 159,942 to 292,577 bytes, and the background entry from 80,609 to 148,557 bytes. The mocked import median grows from 4.898 to 9.985 ms. 
+Firefox minified JavaScript grows from 159,942 to 292,577 bytes, and the background entry from 80,609 to 148,557 bytes. The mocked import median grows from 4.898 to 9.985 ms.
 
-Chromium JavaScript grows from 160,053 to 292,688 bytes, and the background entry from 80,646 to 148,594 bytes. Its mocked median grows from 4.463 to 8.086 ms. 
+Chromium JavaScript grows from 160,053 to 292,688 bytes, and the background entry from 80,646 to 148,594 bytes. Its mocked median grows from 4.463 to 8.086 ms.
 
 Both targets add 132,635 JavaScript bytes, about 83%. Compared with the approved #73 product at `310fe8834dd7b697e99a6d5ed2f640b3049560df`, this slice adds 30,893 bytes per target, about 12%.
 
 Clean Firefox and Chromium Pouch ZIPs contain 96,598 and 105,660 bytes. Quick Actions remains 11,515 bytes. The generated archives were absent before packaging. All three pass CRC, duplicate-entry, exact file/byte comparison against unpackaged output, and target/version/background-manifest checks. Historical Chromium ZIPs contain stale entries, so their deltas cannot establish package growth. The raw JavaScript totals provide the baseline comparison.
 
-Wallabag authentication, refresh, save, delete, pagination, and connection testing now use one Effect transport. Effect replaces the request retry loop, timeout timers, abort-listener waits, and refresh Promise map on these paths. Independent budgets remain explicit counters inside Effect.retry. Effect.cachedWithTTL shares complete refresh results and retains transient recovery reasons through the cooldown. Effect.sleep and a semaphore preserve account-local request spacing. 
+Wallabag authentication, refresh, save, delete, pagination, and connection testing now use one Effect transport. Effect replaces the request retry loop, timeout timers, abort-listener waits, and refresh Promise map on these paths. Independent budgets remain explicit counters inside Effect.retry. Effect.cachedWithTTL shares complete refresh results and retains transient recovery reasons through the cooldown. Effect.sleep and a semaphore preserve account-local request spacing.
 
 Definitive OAuth rejection permits reauthentication. Transient failures preserve tokens, including after repeated attempts. Persistence precedes publication of token and article state. Browser alarms continue to trigger maintenance.
 
@@ -101,6 +101,8 @@ The legacy HTTP client remains for the five unmigrated adapters. Wallabag's lega
 
 **Decision: accept the combined pilot for expansion to #75 through #79 after independent review.** The bundle increase is material, especially against the small baseline. The clean Pouch packages remain below 106 KB, and the added mocked import time remains about five milliseconds for Firefox and four for Chromium. Those absolute costs support continuing the migration, given typed recovery, complete shared refresh failures, bounded cancellation/timeout behavior, and fatal persistence checks. The measurement is a development-host result, so live browser performance acceptance remains open for #81. Further slices must retain these measurements and avoid unnecessary module imports or duplicate transport implementations.
 
-Validation: 264 tests pass with 759 assertions across 17 files. The suite retains the 221 baseline tests and adds OAuth/transport, mutation-outcome, draft/active isolation, and fatal token/article/timestamp regressions. Typecheck, type-aware lint, source and modified-test formatting, and strict Effect diagnostics pass. Diagnostics check 35 product files with zero errors, warnings, or messages. A temporary floating Effect fails diagnostics with effect(floatingEffect) and exit 1. The developer deleted that fixture. Firefox validation reports zero errors/notices and the existing Android minimum-version warning.
+Validation: 264 tests pass with 759 assertions across 17 files. The suite retains the 221 baseline tests and adds OAuth/transport, mutation-outcome, draft/active isolation, and fatal token/article/timestamp regressions.
+
+Typecheck, type-aware lint, source and modified-test formatting, and strict Effect diagnostics pass. Diagnostics check 35 product files with zero errors, warnings, or messages. A temporary floating Effect fails diagnostics with effect(floatingEffect) and exit 1. The developer deleted that fixture. Firefox validation reports zero errors/notices and the existing Android minimum-version warning.
 
 T3 preview opens HeadlessChrome 154.0.8037.92, but the page exposes neither browser nor chrome.runtime. The available tools provide no extension installation or Firefox control. Live extension install/startup, worker wake, permission gestures, and browser lifecycle remain unverified. Tests cover credentials isolation, request cancellation, fatal shutdown, and alarm behavior under mocks. They do not establish native browser compatibility. The permission request still runs directly from the user gesture.
