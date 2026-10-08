@@ -17,6 +17,17 @@ import {
 } from "./effect-adapter";
 import { reportRemoteOutcome } from "../../utils/fatal-storage";
 
+export function isOAuthRejection(data: unknown): boolean {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    "error" in data &&
+    ["invalid_grant", "invalid_client", "unauthorized_client", "access_denied"].includes(
+      String(data.error),
+    )
+  );
+}
+
 export function retryAfterDelay(headers: Headers, fallback: number, now = Date.now()): number {
   const value = headers.get("Retry-After");
   if (value !== null) {
@@ -56,6 +67,9 @@ export interface EffectRequest {
   readonly rateDelayMs?: number;
   readonly authRetries?: number;
   readonly authorization?: Effect.Effect<string, TransportError>;
+  readonly onAuthRejected?: (
+    authorization: string | undefined,
+  ) => Effect.Effect<void, TransportError>;
   readonly recoverAuth?: Effect.Effect<void, TransportError>;
   readonly mutation?: "save" | "delete";
   readonly beforeAttempt?: Effect.Effect<void, TransportError>;
@@ -75,10 +89,19 @@ export const requestJson = Effect.fn("transport.request")(function* (request: Ef
       : failure;
   const attempt = Effect.gen(function* () {
     yield* checkHostPermission(url, operation).pipe(Effect.interruptible);
+    if (request.beforeAttempt) yield* request.beforeAttempt.pipe(Effect.interruptible);
     const authorization = request.authorization
       ? yield* request.authorization.pipe(Effect.interruptible)
       : undefined;
-    if (request.beforeAttempt) yield* request.beforeAttempt.pipe(Effect.interruptible);
+    const headers = yield* Effect.try({
+      try: () => {
+        const headers = new Headers(request.init?.headers);
+        if (authorization !== undefined) headers.set("Authorization", authorization);
+        return headers;
+      },
+      catch: () =>
+        new InvalidResponseFailure(operation, authorization !== undefined ? "token" : "response"),
+    });
     yield* storageHealthy;
     return yield* Effect.gen(function* () {
       const controller = yield* Effect.acquireRelease(
@@ -91,19 +114,17 @@ export const requestJson = Effect.fn("transport.request")(function* (request: Ef
         try: () =>
           fetch(url, {
             ...request.init,
-            headers: (() => {
-              const headers = new Headers(request.init?.headers);
-              if (authorization) headers.set("Authorization", authorization);
-              return headers;
-            })(),
+            headers,
             signal: AbortSignal.any([controller.signal, storageShutdownSignal()]),
           }),
         catch: () => unknownOutcome(new NetworkFailure(operation)),
       });
       if (mutation && !response.ok && response.status < 500) yield* recordMutationOutcome();
       if (!response.ok) yield* storageHealthy;
-      if (response.status === 401 || response.status === 403)
+      if (response.status === 401 || response.status === 403) {
+        if (request.onAuthRejected) yield* request.onAuthRejected(authorization);
         return yield* Effect.fail(new CredentialsFailure(operation));
+      }
       if (response.status === 429)
         return yield* Effect.fail(
           new RateLimitFailure(
@@ -121,15 +142,7 @@ export const requestJson = Effect.fn("transport.request")(function* (request: Ef
             try: (): unknown => JSON.parse(text),
             catch: () => new InvalidResponseFailure(operation, "token"),
           });
-          if (
-            typeof data === "object" &&
-            data !== null &&
-            "error" in data &&
-            ["invalid_grant", "invalid_client", "unauthorized_client", "access_denied"].includes(
-              String(data.error),
-            )
-          )
-            return yield* Effect.fail(new CredentialsFailure(operation));
+          if (isOAuthRejection(data)) return yield* Effect.fail(new CredentialsFailure(operation));
         }
         return yield* Effect.fail(
           response.status >= 500

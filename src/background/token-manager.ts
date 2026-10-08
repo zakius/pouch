@@ -1,6 +1,6 @@
 import { Effect } from "effect";
 import * as v from "valibot";
-import { requestJson } from "./api/effect-api-client";
+import { requestJson, isOAuthRejection } from "./api/effect-api-client";
 import {
   CredentialsFailure,
   InvalidResponseFailure,
@@ -13,8 +13,17 @@ export function fromTokenPromise<A>(operation: () => Promise<A>): Effect.Effect<
   return fromLegacyPromise(operation).pipe(Effect.catchTag("ConfigurationFailure", Effect.die));
 }
 
+function isHeaderToken(value: string): boolean {
+  try {
+    new Headers({ Authorization: `Bearer ${value}` });
+    return value.trim().length > 0 && !/[\r\n]/.test(value);
+  } catch {
+    return false;
+  }
+}
+
 export const oauthTokenSchema = v.object({
-  access_token: v.pipe(v.string(), v.minLength(1)),
+  access_token: v.pipe(v.string(), v.check(isHeaderToken)),
   refresh_token: v.optional(v.pipe(v.string(), v.minLength(1))),
   token_type: v.optional(v.pipe(v.string(), v.regex(/^[a-zA-Z]+$/))),
   expires_in: v.optional(v.pipe(v.number(), v.finite(), v.minValue(1))),
@@ -27,15 +36,7 @@ export function parseOAuthToken(
   v.InferOutput<typeof oauthTokenSchema>,
   CredentialsFailure | InvalidResponseFailure
 > {
-  if (
-    typeof data === "object" &&
-    data !== null &&
-    "error" in data &&
-    ["invalid_grant", "invalid_client", "unauthorized_client", "access_denied"].includes(
-      String(data.error),
-    )
-  )
-    return Effect.fail(new CredentialsFailure(operation));
+  if (isOAuthRejection(data)) return Effect.fail(new CredentialsFailure(operation));
   const parsed = v.safeParse(oauthTokenSchema, data);
   return parsed.success
     ? Effect.succeed(parsed.output)
@@ -96,6 +97,44 @@ export class TokenManager {
   private config: TokenManagerConfig;
   private refreshConfigProviders: Map<string, () => TokenRefreshConfig | null> = new Map();
   private refreshEffects = new Map<string, Effect.Effect<TokenRefreshResult, TransportError>>();
+  private accountGenerations = new Map<string, number>();
+  private accountIdentities = new Map<string, string>();
+
+  public async bindAccount(serviceName: string, identity: string): Promise<number> {
+    const previous = this.accountIdentities.get(serviceName);
+    if (previous !== identity) {
+      this.accountIdentities.set(serviceName, identity);
+      this.invalidateAccount(serviceName);
+    }
+    const generation = this.accountGenerations.get(serviceName) ?? 0;
+    if (previous !== undefined && previous !== identity)
+      await this.commitTokens((tokens) => {
+        this.assertAccount(serviceName, generation);
+        tokens.delete(serviceName);
+      });
+    return generation;
+  }
+
+  public assertAccount(serviceName: string, generation: number): void {
+    if ((this.accountGenerations.get(serviceName) ?? 0) !== generation)
+      throw new CredentialsFailure("account ownership");
+  }
+
+  private invalidateAccount(serviceName: string): void {
+    this.accountGenerations.set(serviceName, (this.accountGenerations.get(serviceName) ?? 0) + 1);
+    this.refreshEffects.delete(serviceName);
+    this.refreshConfigs.delete(serviceName);
+    this.refreshConfigProviders.delete(serviceName);
+  }
+
+  public async discardRejectedToken(serviceName: string, expected: TokenMetadata): Promise<void> {
+    await this.commitTokens((tokens) => {
+      if (tokens.get(serviceName) !== expected) throw new CredentialsFailure("account ownership");
+      tokens.delete(serviceName);
+    });
+    this.refreshEffects.delete(serviceName);
+  }
+
   private refreshConfigs = new Map<string, TokenRefreshConfig>();
 
   constructor(config: Partial<TokenManagerConfig> = {}) {
@@ -145,6 +184,7 @@ export class TokenManager {
     tokenData: Omit<TokenMetadata, "serviceName">,
     remoteOutcome?: RemoteOutcome,
     remoteOperation?: string,
+    accountGeneration?: number,
   ): Promise<void> {
     const tokenMetadata: TokenMetadata = {
       ...tokenData,
@@ -152,7 +192,10 @@ export class TokenManager {
     };
 
     await this.commitTokens(
-      (tokens) => tokens.set(serviceName, tokenMetadata),
+      (tokens) => {
+        if (accountGeneration !== undefined) this.assertAccount(serviceName, accountGeneration);
+        tokens.set(serviceName, tokenMetadata);
+      },
       remoteOutcome,
       remoteOperation,
     );
@@ -187,7 +230,7 @@ export class TokenManager {
     if (
       !v.safeParse(
         v.object({
-          accessToken: v.pipe(v.string(), v.minLength(1)),
+          accessToken: v.pipe(v.string(), v.check(isHeaderToken)),
           refreshToken: v.string(),
           tokenType: v.pipe(v.string(), v.regex(/^[a-zA-Z]+$/)),
           expiresAt: v.pipe(v.number(), v.finite()),
@@ -254,6 +297,7 @@ export class TokenManager {
 
   private performRefresh(serviceName: string): Effect.Effect<TokenRefreshResult, TransportError> {
     return Effect.gen({ self: this }, function* () {
+      const generation = this.accountGenerations.get(serviceName) ?? 0;
       const token = this.tokens.get(serviceName);
       if (!token)
         return {
@@ -297,14 +341,23 @@ export class TokenManager {
         Effect.flatMap((data) => parseOAuthToken(data, "token refresh")),
         Effect.flatMap((data) =>
           fromTokenPromise(() =>
-            this.updateTokenFromResponse(serviceName, data, attempt.lastRefreshAttempt, token),
+            this.updateTokenFromResponse(
+              serviceName,
+              data,
+              attempt.lastRefreshAttempt,
+              token,
+              generation,
+            ),
           ).pipe(Effect.as({ success: true, requiresReauth: false })),
         ),
         Effect.catch((failure) =>
           Effect.gen({ self: this }, function* () {
             const definitive = failure instanceof CredentialsFailure;
             if (failure._tag === "FatalStorageFailure") return yield* Effect.fail(failure);
-            if (this.tokens.get(serviceName) !== token)
+            if (
+              this.tokens.get(serviceName) !== token ||
+              (this.accountGenerations.get(serviceName) ?? 0) !== generation
+            )
               return {
                 success: false,
                 requiresReauth: false,
@@ -315,7 +368,10 @@ export class TokenManager {
               yield* fromTokenPromise(() =>
                 this.commitTokens(
                   (tokens) => {
-                    if (tokens.get(serviceName) === token) tokens.delete(serviceName);
+                    this.assertAccount(serviceName, generation);
+                    if (tokens.get(serviceName) !== token)
+                      throw new CredentialsFailure("token refresh");
+                    tokens.delete(serviceName);
                   },
                   "failed",
                   "token refresh",
@@ -324,7 +380,10 @@ export class TokenManager {
             else
               yield* fromTokenPromise(() =>
                 this.commitTokens((tokens) => {
-                  if (tokens.get(serviceName) === token) tokens.set(serviceName, attempt);
+                  this.assertAccount(serviceName, generation);
+                  if (tokens.get(serviceName) !== token)
+                    throw new CredentialsFailure("token refresh");
+                  tokens.set(serviceName, attempt);
                 }),
               );
             return {
@@ -341,6 +400,7 @@ export class TokenManager {
   }
 
   public async clearToken(serviceName: string, remoteOutcome?: RemoteOutcome): Promise<void> {
+    this.invalidateAccount(serviceName);
     await this.commitTokens((tokens) => tokens.delete(serviceName), remoteOutcome, "token refresh");
     this.refreshEffects.delete(serviceName);
     logger.info(`Token cleared for ${serviceName}`);
@@ -352,6 +412,8 @@ export class TokenManager {
   }
 
   public async clearAllTokens(): Promise<void> {
+    for (const serviceName of new Set([...this.accountGenerations.keys(), ...this.tokens.keys()]))
+      this.invalidateAccount(serviceName);
     await this.commitTokens((tokens) => tokens.clear());
     this.refreshEffects.clear();
     logger.info("All tokens cleared");
@@ -467,6 +529,7 @@ export class TokenManager {
     tokenData: v.InferOutput<typeof oauthTokenSchema>,
     lastRefreshAttempt: number,
     expected: TokenMetadata,
+    generation: number,
   ): Promise<void> {
     const existing = this.tokens.get(serviceName);
     if (existing !== expected) throw new CredentialsFailure("token refresh");
@@ -489,6 +552,7 @@ export class TokenManager {
     token.lastRefreshAttempt = lastRefreshAttempt;
     await this.commitTokens(
       (tokens) => {
+        this.assertAccount(serviceName, generation);
         if (tokens.get(serviceName) !== expected) throw new CredentialsFailure("token refresh");
         tokens.set(serviceName, token);
       },

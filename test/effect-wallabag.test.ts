@@ -576,3 +576,258 @@ test("repository sync retains typed missing permission at acquisition", async ()
   });
   expect(fetchMock).not.toHaveBeenCalled();
 });
+
+test("late password authentication cannot publish or use replacement-account credentials", async () => {
+  const tokens = new TokenManager();
+  const started = deferred<void>();
+  const release = deferred<Response>();
+  const headers: string[] = [];
+  const fetchMock = spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    if (String(url).includes("oauth")) {
+      if (String(url).includes("wallabag.example")) {
+        started.resolve();
+        return release.promise;
+      }
+      return json({ ...token, access_token: "B-access" });
+    }
+    headers.push(new Headers(init?.headers).get("Authorization")!);
+    expect(String(url)).toContain("replacement.example");
+    return json(snapshot());
+  });
+  const pending = failure(createWallabagAdapter(settings, tokens));
+  await started.promise;
+  await tokens.clearToken("wallabag");
+  const replacement = await runOperation(
+    createWallabagAdapter(
+      {
+        ...settings,
+        apiConfig: { ...settings.apiConfig, url: "https://replacement.example", username: "B" },
+      },
+      tokens,
+    ),
+  );
+  release.resolve(json({ ...token, access_token: "A-access" }));
+  expect((await pending).code).toBe("CredentialsFailure");
+  expect(tokens.getTokenMetadata("wallabag")?.accessToken).toBe("B-access");
+  expect(storage.api_tokens).toEqual([
+    ["wallabag", expect.objectContaining({ accessToken: "B-access" })],
+  ]);
+  expect(await runOperation(replacement.testConnection)).toBe(true);
+  expect(headers).toEqual(["Bearer B-access"]);
+  expect(fetchMock).toHaveBeenCalledTimes(3);
+});
+
+test("a stale ready adapter cannot send the replacement token to its old server", async () => {
+  const tokens = new TokenManager({ persist: false });
+  await tokens.storeToken("wallabag", oldToken);
+  const stale = await runOperation(createWallabagAdapter(settings, tokens));
+  await tokens.clearAllTokens();
+  const fetchMock = spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    if (String(url).includes("oauth")) return json(token);
+    expect(String(url)).toContain("replacement.example");
+    expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer rotated-access");
+    return json(snapshot());
+  });
+  const current = await runOperation(
+    createWallabagAdapter(
+      {
+        ...settings,
+        apiConfig: { ...settings.apiConfig, url: "https://replacement.example" },
+      },
+      tokens,
+    ),
+  );
+  expect((await failure(stale.testConnection)).code).toBe("CredentialsFailure");
+  expect(await runOperation(current.testConnection)).toBe(true);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+});
+
+for (const succeeds of [true, false]) {
+  test(`token without refresh capability has bounded password recovery (${succeeds})`, async () => {
+    const tokens = new TokenManager();
+    let passwordCalls = 0;
+    let apiCalls = 0;
+    spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (String(url).includes("oauth")) {
+        expect(String(init?.body)).toContain("grant_type=password");
+        passwordCalls++;
+        return json({ access_token: `access-${passwordCalls}`, expires_in: 3600 });
+      }
+      apiCalls++;
+      return succeeds && apiCalls > 1 ? json(item) : json({}, 401);
+    });
+    const api = await runOperation(createWallabagAdapter(settings, tokens));
+    if (succeeds) {
+      expect((await runOperation(api.saveArticle(item))).id).toBe("42");
+      expect(apiCalls).toBe(2);
+      expect(passwordCalls).toBe(2);
+      expect(tokens.getTokenMetadata("wallabag")?.accessToken).toBe("access-2");
+    } else {
+      expect((await failure(api.saveArticle(item))).code).toBe("CredentialsFailure");
+      expect(apiCalls).toBe(3);
+      expect(passwordCalls).toBe(3);
+      expect(tokens.getTokenMetadata("wallabag")).toBeNull();
+      await runOperation(createWallabagAdapter(settings, tokens));
+      expect(passwordCalls).toBe(4);
+    }
+  });
+}
+
+for (const invalid of ["bad\r\ntoken", "bad\ntoken", "bad\u0100token", "token\r\n"]) {
+  test(`OAuth and persisted bearer validation reject unusable header ${JSON.stringify(invalid)}`, async () => {
+    const tokens = new TokenManager({ persist: false });
+    const fetchMock = spyOn(globalThis, "fetch").mockResolvedValue(json({ access_token: invalid }));
+    const oauth = await failure(createWallabagAdapter(settings, tokens));
+    expect(oauth.code).toBe("InvalidResponseFailure");
+    expect(oauth.details).toMatchObject({ responseKind: "token" });
+    expect(tokens.getTokenMetadata("wallabag")).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await tokens.storeToken("wallabag", { ...oldToken, accessToken: invalid });
+    const api = await runOperation(createWallabagAdapter(settings, tokens));
+    fetchMock.mockClear();
+    const persisted = await failure(api.saveArticle(item));
+    expect(persisted.code).toBe("InvalidResponseFailure");
+    expect(persisted.details).toMatchObject({ responseKind: "token" });
+    expect(persisted.details).not.toHaveProperty("remoteOutcome");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+}
+
+test("header preflight failure does not mark a mutation as submitted", async () => {
+  const fetchMock = spyOn(globalThis, "fetch");
+  for (const options of [
+    { authorization: Effect.succeed("Bearer bad\r\ntoken") },
+    { init: { headers: { "bad header": "value" } } },
+  ]) {
+    const result = await failure(request({ mutation: "save", ...options }));
+    expect(result.code).toBe("InvalidResponseFailure");
+    expect(result.details).not.toHaveProperty("remoteOutcome");
+  }
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+
+test("sync decision diagnostics precede a failed first page without account secrets", async () => {
+  const tokens = new TokenManager({ persist: false });
+  await tokens.storeToken("wallabag", oldToken);
+  const { logger } = await import("../src/utils/logger");
+  const log = spyOn(logger, "info");
+  const timestamp = Date.now() - 86400001;
+  spyOn(globalThis, "fetch").mockImplementation(async () => {
+    expect(log).toHaveBeenCalledWith("Wallabag sync mode decision", {
+      mode: "overwrite",
+      reason: "24h_idle",
+      timeSinceLastFullSync: expect.any(Number),
+      isBrowserIdle: true,
+    });
+    throw new TypeError("SECRET");
+  });
+  const api = await runOperation(createWallabagAdapter(settings, tokens));
+  expect(
+    (await failure(api.sync({ lastFullSyncTimestamp: timestamp, isBrowserIdle: true }))).code,
+  ).toBe("NetworkFailure");
+  expect(JSON.stringify(log.mock.calls)).not.toMatch(/SECRET|PASSWORD|wallabag\.example/);
+});
+
+test("account invalidation gates an authentication commit queued behind persistence", async () => {
+  const tokens = new TokenManager();
+  const generation = await tokens.bindAccount("wallabag", "A");
+  const started = deferred<void>();
+  const release = deferred<void>();
+  browser.storage.local.set = async (data) => {
+    started.resolve();
+    await release.promise;
+    Object.assign(storage, data);
+  };
+  const blocker = tokens.storeToken("other", oldToken);
+  await started.promise;
+  const stale = tokens
+    .storeToken("wallabag", oldToken, undefined, undefined, generation)
+    .catch((error: unknown) => error);
+  const clearing = tokens.clearToken("wallabag");
+  release.resolve();
+  await blocker;
+  expect(await stale).toBeInstanceOf(CredentialsFailure);
+  await clearing;
+  expect(tokens.getTokenMetadata("wallabag")).toBeNull();
+});
+
+test("late rejection does not clear a newer token without refresh capability", async () => {
+  const tokens = new TokenManager({ persist: false });
+  await tokens.storeToken("wallabag", { ...oldToken, refreshToken: "" });
+  const started = deferred<void>();
+  const release = deferred<Response>();
+  let calls = 0;
+  const fetchMock = spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+    if (++calls === 1) {
+      started.resolve();
+      return release.promise;
+    }
+    expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer replacement");
+    return json(snapshot());
+  });
+  const api = await runOperation(createWallabagAdapter(settings, tokens));
+  const pending = runOperation(api.testConnection);
+  await started.promise;
+  await tokens.storeToken("wallabag", {
+    ...oldToken,
+    refreshToken: "",
+    accessToken: "replacement",
+  });
+  release.resolve(json({}, 401));
+  // The newer token has not been rejected and does not require a password grant.
+  expect(await pending.catch((error: unknown) => errorResponse(error))).toMatchObject({
+    code: "CredentialsFailure",
+  });
+  expect(tokens.getTokenMetadata("wallabag")?.accessToken).toBe("replacement");
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
+
+test("replacement during acquisition permission cannot reclaim account ownership", async () => {
+  const tokens = new TokenManager({ persist: false });
+  const started = deferred<void>();
+  const release = deferred<boolean>();
+  browser.permissions.contains = async ({ origins }) => {
+    if (origins?.[0]?.includes("wallabag.example")) {
+      started.resolve();
+      return release.promise;
+    }
+    return true;
+  };
+  const fetchMock = spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+    expect(String(url)).toContain("replacement.example");
+    return String(url).includes("oauth") ? json(token) : json(snapshot());
+  });
+  const pending = failure(createWallabagAdapter(settings, tokens));
+  await started.promise;
+  const current = await runOperation(
+    createWallabagAdapter(
+      {
+        ...settings,
+        apiConfig: { ...settings.apiConfig, url: "https://replacement.example" },
+      },
+      tokens,
+    ),
+  );
+  release.resolve(true);
+  expect((await pending).code).toBe("CredentialsFailure");
+  expect(await runOperation(current.testConnection)).toBe(true);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+});
+
+test("missing refresh capability preserves a current token until expiry", async () => {
+  const tokens = new TokenManager({ persist: false });
+  await tokens.storeToken("wallabag", {
+    ...oldToken,
+    refreshToken: "",
+    expiresAt: Date.now() + 60000,
+  });
+  const fetchMock = spyOn(globalThis, "fetch");
+  expect(await tokens.getAccessToken("wallabag")).toBe("active-access");
+  expect(tokens.getTokenMetadata("wallabag")?.accessToken).toBe("active-access");
+  await tokens.storeToken("wallabag", { ...oldToken, refreshToken: "", expiresAt: Date.now() - 1 });
+  expect(await tokens.getAccessToken("wallabag").catch((error: unknown) => error)).toBeInstanceOf(
+    CredentialsFailure,
+  );
+  expect(tokens.getTokenMetadata("wallabag")?.accessToken).toBe("active-access");
+  expect(fetchMock).not.toHaveBeenCalled();
+});

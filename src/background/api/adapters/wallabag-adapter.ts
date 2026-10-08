@@ -1,3 +1,4 @@
+import { logger } from "../../../utils/logger";
 import { Effect, Semaphore } from "effect";
 import * as v from "valibot";
 import { wallabagConfigSchema, wallabagSettingsSchema } from "../../../utils/settings-schemas";
@@ -108,7 +109,15 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
   const config = { ...parsed.output.apiConfig };
   const baseUrl = config.url.replace(/\/$/, "");
   const tokenUrl = `${baseUrl}/oauth/v2/token`;
+  const generation = yield* fromTokenPromise(() =>
+    tokens.bindAccount("wallabag", JSON.stringify(config)),
+  );
+  const owned = Effect.try({
+    try: () => tokens.assertAccount("wallabag", generation),
+    catch: () => new CredentialsFailure("wallabag.account"),
+  });
   yield* checkHostPermission(baseUrl, "wallabag.acquire");
+  yield* owned;
   tokens.setRefreshConfigProvider("wallabag", () => ({
     serviceName: "wallabag",
     refreshUrl: tokenUrl,
@@ -117,6 +126,7 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
     refreshToken: tokens.getTokenMetadata("wallabag")?.refreshToken ?? "",
   }));
   const authenticate = Effect.gen(function* () {
+    yield* owned;
     const data = yield* requestJson({
       operation: "wallabag.authenticate",
       url: tokenUrl,
@@ -149,18 +159,34 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
         },
         "succeeded",
         "authentication",
+        generation,
       ),
     );
   });
+  const onAuthRejected = (authorization: string | undefined) =>
+    Effect.gen(function* () {
+      yield* owned;
+      const token = tokens.getTokenMetadata("wallabag");
+      if (
+        token &&
+        !token.refreshToken &&
+        authorization === `${token.tokenType} ${token.accessToken}`
+      )
+        yield* fromTokenPromise(() => tokens.discardRejectedToken("wallabag", token));
+    });
   const recoverAuth = Effect.gen(function* () {
+    yield* owned;
     const result = yield* fromTokenPromise(() => tokens.refreshToken("wallabag"));
+    yield* owned;
     if (result.success) return;
     if (result.requiresReauth) return yield* authenticate;
     return yield* Effect.fail(result.failure ?? new CredentialsFailure("wallabag.refresh"));
   });
   if (!tokens.getTokenMetadata("wallabag")) yield* authenticate;
   const authorization = Effect.gen(function* () {
+    yield* owned;
     const access = yield* fromTokenPromise(() => tokens.getAccessToken("wallabag"));
+    yield* owned;
     if (!access) return yield* Effect.fail(new CredentialsFailure("wallabag.request"));
     const type = tokens.getTokenMetadata("wallabag")?.tokenType ?? "Bearer";
     if (!/^[a-zA-Z]+$/.test(type))
@@ -185,6 +211,7 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
       url: `${baseUrl}${endpoint}`,
       authorization,
       recoverAuth,
+      onAuthRejected,
       beforeAttempt,
       authRetries: 2,
     });
@@ -240,6 +267,12 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
           : mode === "overwrite"
             ? "24h_idle"
             : "incremental";
+      logger.info("Wallabag sync mode decision", {
+        mode,
+        reason,
+        timeSinceLastFullSync: elapsed,
+        isBrowserIdle: options?.isBrowserIdle,
+      });
       const params = new URLSearchParams({ page: "1", perPage: "30", detail: "metadata" });
       // Wallabag's since filter excludes deletions; only a full snapshot reconciles them.
       if (mode === "update" && options?.lastSyncTimestamp)
