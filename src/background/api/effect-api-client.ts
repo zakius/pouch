@@ -20,7 +20,10 @@ import { reportRemoteOutcome } from "../../utils/fatal-storage";
 export function retryAfterDelay(headers: Headers, fallback: number, now = Date.now()): number {
   const value = headers.get("Retry-After");
   if (value !== null) {
-    if (/^\d+(?:\.\d+)?$/.test(value.trim())) return Number(value) * 1000;
+    if (/^\d+(?:\.\d+)?$/.test(value.trim())) {
+      const delay = Number(value) * 1000;
+      return Number.isFinite(delay) ? delay : fallback;
+    }
     if (!/[a-zA-Z]/.test(value)) return fallback;
     const date = Date.parse(value);
     if (Number.isFinite(date)) return Math.max(0, date - now);

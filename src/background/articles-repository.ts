@@ -117,7 +117,7 @@ export class ArticlesRepository {
     if (!this.apiInitPromise) {
       logger.debug("API not initialized, creating adapter now...");
       this.apiInitPromise = (async () => {
-        if (!(await hasBackendPermissions(this.settings))) {
+        if (!this.usesEffectAdapter && !(await hasBackendPermissions(this.settings))) {
           throw new Error(missingPermissionMessage(this.settings));
         }
         assertStorageHealthy();

@@ -59,7 +59,7 @@ export class BrowserFailure extends OperationError {
         "The bookmark folder is missing. Check the Pouch folder in browser bookmarks.",
       "permission-denied":
         "Browser denied bookmarks access. Grant bookmarks permission in extension settings.",
-      unavailable: "The browser bookmarks API is unavailable. Check extension availability.",
+      unavailable: "The browser API is unavailable. Check extension availability.",
       unknown: "Check browser bookmarks access and try again.",
     };
     super(`Browser ${operation} failed. ${guidance[reason]}`);

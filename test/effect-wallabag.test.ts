@@ -562,3 +562,17 @@ test("malformed persisted required token fails before any authenticated request"
   expect((await failure(api.testConnection)).code).toBe("InvalidResponseFailure");
   expect(fetchMock).not.toHaveBeenCalled();
 });
+
+test("repository sync retains typed missing permission at acquisition", async () => {
+  const tokens = new TokenManager({ persist: false });
+  const repo = new ArticlesRepository(tokens);
+  await repo.initialize(settings);
+  granted = false;
+  const fetchMock = spyOn(globalThis, "fetch");
+  const result = await repo.syncWithAPI().catch((error: unknown) => errorResponse(error));
+  expect(result).toMatchObject({
+    code: "PermissionFailure",
+    details: { permission: "server access" },
+  });
+  expect(fetchMock).not.toHaveBeenCalled();
+});
