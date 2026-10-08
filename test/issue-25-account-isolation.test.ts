@@ -1,5 +1,5 @@
 import { mockReadyAdapter } from "./fixtures/ready-adapter-mock";
-import { beforeEach, afterEach, beforeEach, expect, test, mock, spyOn } from "bun:test";
+import { beforeEach, afterEach, expect, test, mock, spyOn } from "bun:test";
 import type { Article } from "../src/types/common";
 import { BookmarksAdapter } from "../src/background/api/adapters/bookmarks-adapter";
 import {

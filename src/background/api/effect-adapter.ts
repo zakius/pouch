@@ -14,11 +14,13 @@ class OperationError extends Error {
   mutation?: MutationOutcome;
 
   withMutation(mutation?: MutationOutcome): this {
-    if (mutation) {
-      this.mutation = mutation;
-      this.message = `Remote ${mutation.remoteOperation} succeeded, but Pouch could not finish the operation. Do not repeat it. Check extension diagnostics before refreshing local articles with sync.`;
-    }
-    return this;
+    if (!mutation) return this;
+    // Effects can reuse failures; invocation outcomes must not change the supplied error.
+    const failure: this = Object.setPrototypeOf(new Error(), Object.getPrototypeOf(this));
+    Object.defineProperties(failure, Object.getOwnPropertyDescriptors(this));
+    failure.mutation = { ...mutation };
+    failure.message = `Remote ${mutation.remoteOperation} succeeded, but Pouch could not finish the operation. Do not repeat it. Check extension diagnostics before refreshing local articles with sync.`;
+    return failure;
   }
 }
 

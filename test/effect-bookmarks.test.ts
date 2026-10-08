@@ -398,3 +398,95 @@ test("a bookmark conversion defect after create retains confirmed success", asyn
   expect(response.error).toContain("Remote save succeeded");
   expect(response.error).toContain("Do not repeat it");
 });
+
+for (const shared of [
+  new ConfigurationFailure("read configuration"),
+  new PermissionFailure("read permissions", "bookmarks"),
+  new BrowserFailure("read local articles", "permission-denied", { name: "NotAllowedError" }),
+]) {
+  test(`${shared._tag} reuse preserves supplied failure and earlier responses`, async () => {
+    const original = Object.getOwnPropertyDescriptors(shared);
+    const failed = Effect.fail(shared);
+    const save = await runOperation(
+      recordMutationSuccess("save").pipe(Effect.andThen(failed)),
+    ).catch((error: unknown) => error);
+    const savedResponse = JSON.stringify(errorResponse(save));
+    const unrelated = await runOperation(failed).catch((error: unknown) => error);
+    const deleted = await runOperation(
+      recordMutationSuccess("delete").pipe(Effect.andThen(failed)),
+    ).catch((error: unknown) => error);
+    expect(save).toBeInstanceOf(shared.constructor);
+    expect(deleted).toBeInstanceOf(shared.constructor);
+    expect(Object.prototype.toString.call(save)).toBe("[object Error]");
+    expect(Object.getPrototypeOf(save)).toBe(Object.getPrototypeOf(shared));
+    expect(save).not.toBe(shared);
+    expect(deleted).not.toBe(shared);
+    expect(deleted).not.toBe(save);
+    expect(unrelated).toBe(shared);
+    expect(Object.getOwnPropertyDescriptors(shared)).toEqual(original);
+    expect(errorResponse(unrelated).details).not.toHaveProperty("remoteOutcome");
+    expect(JSON.stringify(errorResponse(save))).toBe(savedResponse);
+    for (const [error, operation] of [
+      [save, "save"],
+      [deleted, "delete"],
+    ] as const) {
+      const response = errorResponse(error);
+      expect(response.code).toBe(shared._tag);
+      expect(response.details).toMatchObject({
+        operation: shared.operation,
+        remoteOperation: operation,
+        remoteOutcome: "succeeded",
+      });
+      expect(response.error).toContain(`Remote ${operation} succeeded`);
+      expect(response.error).toContain("Do not repeat it");
+      if (shared instanceof BrowserFailure)
+        expect(response.details).toMatchObject({
+          reason: "permission-denied",
+          cause: { name: "NotAllowedError" },
+        });
+      if (shared instanceof PermissionFailure)
+        expect(response.details).toMatchObject({ permission: "bookmarks" });
+    }
+  });
+}
+
+test("concurrent runners sharing a failure keep independent save and delete outcomes", async () => {
+  const shared = new BrowserFailure("read local articles");
+  const failed = Effect.fail(shared);
+  const original = Object.getOwnPropertyDescriptors(shared);
+  const submitted = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const save = runOperation(
+    Effect.gen(function* () {
+      yield* recordMutationSuccess("save");
+      submitted.resolve();
+      yield* Effect.promise(() => release.promise);
+      return yield* failed;
+    }),
+  ).catch((error: unknown) => error);
+  await submitted.promise;
+  const deleted = await runOperation(
+    recordMutationSuccess("delete").pipe(Effect.andThen(failed)),
+  ).catch((error: unknown) => error);
+  const deleteResponse = JSON.stringify(errorResponse(deleted));
+  const unrelated = await runOperation(failed).catch((error: unknown) => error);
+  release.resolve();
+  const saved = await save;
+  expect(saved).toBeInstanceOf(BrowserFailure);
+  expect(deleted).toBeInstanceOf(BrowserFailure);
+  expect(saved).not.toBe(deleted);
+  expect(saved).not.toBe(shared);
+  expect(deleted).not.toBe(shared);
+  expect(unrelated).toBe(shared);
+  expect(errorResponse(unrelated).details).not.toHaveProperty("remoteOutcome");
+  expect(Object.getOwnPropertyDescriptors(shared)).toEqual(original);
+  expect(errorResponse(saved).details).toMatchObject({
+    remoteOperation: "save",
+    remoteOutcome: "succeeded",
+  });
+  expect(errorResponse(deleted).details).toMatchObject({
+    remoteOperation: "delete",
+    remoteOutcome: "succeeded",
+  });
+  expect(JSON.stringify(errorResponse(deleted))).toBe(deleteResponse);
+});
