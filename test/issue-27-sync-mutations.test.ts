@@ -1,5 +1,11 @@
 import { mockReadyAdapter } from "./fixtures/ready-adapter-mock";
 import { beforeEach, afterEach, expect, test, mock, spyOn } from "bun:test";
+import { Effect } from "effect";
+import {
+  IncompleteSnapshotFailure,
+  OperationInterrupted,
+  runOperation,
+} from "../src/background/api/effect-adapter";
 import type { Article } from "../src/types/common";
 import { BookmarksAdapter } from "../src/background/api/adapters/bookmarks-adapter";
 import { ArticlesRepository, getAccountStorageKeys } from "../src/background/articles-repository";
@@ -9,7 +15,9 @@ const keys = getAccountStorageKeys({ ...DEFAULT_SETTINGS, backend: "bookmarks" }
   ArticlesRepository["initialize"]
 >[0]);
 
-beforeEach(() => { mockReadyAdapter(); });
+beforeEach(() => {
+  mockReadyAdapter();
+});
 
 const originalBrowser = Object.getOwnPropertyDescriptor(globalThis, "browser");
 
@@ -76,13 +84,12 @@ function makeBrowserMock(options?: { failWrites?: Error }) {
 
 function makeRepository(): Promise<ArticlesRepository> {
   const repository = new ArticlesRepository();
-  return repository
-    .initialize({
-      ...DEFAULT_SETTINGS,
-      backend: "bookmarks",
-      apiConfig: {},
-    } as Parameters<ArticlesRepository["initialize"]>[0])
-    .then(() => repository);
+  repository.initialize({
+    ...DEFAULT_SETTINGS,
+    backend: "bookmarks",
+    apiConfig: {},
+  } as Parameters<ArticlesRepository["initialize"]>[0]);
+  return Promise.resolve(repository);
 }
 
 test("save during overwrite sync retains the real server ID after replay", async () => {
@@ -275,6 +282,99 @@ test("sync returns the final stored collection, including articles saved mid-syn
   expect(result.items.map((a) => a.id).sort()).toEqual(storedIds.sort());
 });
 
+test("joined sync callers share the original failure and keep the prior snapshot", async () => {
+  const { storage, writeOrder } = makeBrowserMock();
+  const repository = await makeRepository();
+  storage[keys.articles] = [article("s1", "https://example.com/a")];
+
+  const fetchGate = deferred();
+  const failure = new IncompleteSnapshotFailure("sync");
+  let fetches = 0;
+  const factory = await import("../src/utils/adapter-factory");
+  spyOn(factory, "getReadyAdapter").mockReturnValue(
+    Effect.succeed({
+      sync: () =>
+        Effect.promise(() => fetchGate.promise).pipe(
+          Effect.andThen(
+            ++fetches === 1
+              ? Effect.fail(failure)
+              : Effect.succeed({
+                  articles: [article("s2", "https://example.com/b")],
+                  mode: "overwrite",
+                }),
+          ),
+        ),
+    }) as never,
+  );
+
+  const first = repository.syncWithAPI({ mode: "overwrite" }).catch((error: unknown) => error);
+  const second = repository.syncWithAPI().catch((error: unknown) => error);
+  fetchGate.resolve();
+
+  const [firstError, secondError] = await Promise.all([first, second]);
+  expect(firstError).toBeInstanceOf(IncompleteSnapshotFailure);
+  expect(secondError).toBe(firstError);
+  expect(fetches).toBe(1);
+  expect(writeOrder).toEqual([]);
+  expect(await repository.getAllArticles()).toEqual([article("s1", "https://example.com/a")]);
+  expect(storage[keys.lastSyncTimestamp]).toBeUndefined();
+
+  // The failed run is not cached: the next caller fetches again.
+  expect((await repository.syncWithAPI()).items.map((a) => a.id)).toEqual(["s2"]);
+  expect(fetches).toBe(2);
+});
+
+test("cancelling one sync waiter leaves the shared sync running for the other", async () => {
+  const { storage } = makeBrowserMock();
+  const repository = await makeRepository();
+
+  const fetchGate = deferred();
+  const syncSpy = spyOn(BookmarksAdapter.prototype, "sync").mockReturnValue(
+    fetchGate.promise.then(() => ({
+      articles: [article("s1", "https://example.com/a")],
+      mode: "overwrite" as const,
+    })),
+  );
+  const controller = new AbortController();
+  const cancelled = runOperation(repository.syncWithAPIEffect(), controller.signal).catch(
+    (error: unknown) => error,
+  );
+  const kept = repository.syncWithAPI();
+  controller.abort();
+  expect(await cancelled).toBeInstanceOf(OperationInterrupted);
+
+  fetchGate.resolve();
+  expect((await kept).items.map((a) => a.id)).toEqual(["s1"]);
+  expect(syncSpy).toHaveBeenCalledTimes(1);
+  expect(storage[keys.articles]).toEqual([
+    { ...article("s1", "https://example.com/a"), canonicalUrl: "https://example.com/a" },
+  ]);
+  expect(storage[keys.lastSyncTimestamp]).toBeDefined();
+});
+
+test("cancelling one initialization waiter leaves adapter acquisition shared", async () => {
+  makeBrowserMock();
+  const repository = await makeRepository();
+
+  const initGate = deferred();
+  const initSpy = spyOn(BookmarksAdapter.prototype, "initialize").mockReturnValue(initGate.promise);
+  spyOn(BookmarksAdapter.prototype, "saveArticle").mockResolvedValue(
+    article(5, "https://example.com/kept"),
+  );
+  const controller = new AbortController();
+  const cancelled = runOperation(
+    repository.saveArticleEffect({ url: "https://example.com/cancelled", title: "Cancelled" }),
+    controller.signal,
+  ).catch((error: unknown) => error);
+  const kept = repository.saveArticle({ url: "https://example.com/kept", title: "Kept" });
+  controller.abort();
+  expect(await cancelled).toBeInstanceOf(OperationInterrupted);
+
+  initGate.resolve();
+  expect((await kept).id).toBe(5);
+  expect(initSpy).toHaveBeenCalledTimes(1);
+});
+
 test("failed cache persistence propagates and keeps prior cache intact", async () => {
   const failure = new Error("storage quota exceeded");
   makeBrowserMock({ failWrites: failure });
@@ -287,4 +387,10 @@ test("failed cache persistence propagates and keeps prior cache intact", async (
   await expect(
     repository.saveArticle({ url: "https://example.com/x", title: "X" }),
   ).rejects.toThrow("Pouch stopped: persist articles failed");
+  // The cache is published only after a successful write.
+  expect(Reflect.get(repository, "account").articles).toEqual([]);
+  await expect(repository.mergeArticles([article(1, "https://example.com/y")])).rejects.toThrow(
+    "Pouch stopped",
+  );
+  expect(Reflect.get(repository, "account").articles).toEqual([]);
 });

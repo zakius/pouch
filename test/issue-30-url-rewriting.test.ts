@@ -1,5 +1,6 @@
 import { Effect } from "effect";
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
+import * as factory from "../src/utils/adapter-factory";
 import { DEFAULT_SETTINGS, type Settings } from "../src/utils/settings";
 import { ArticlesRepository, getAccountStorageKeys } from "../src/background/articles-repository";
 import type { Article } from "../src/types/common";
@@ -52,10 +53,13 @@ function dataUrl(content: string): string {
   return `data:text/plain;base64,${btoa(content)}`;
 }
 
-type WithPrivate = ArticlesRepository & {
-  addArticle: (article: Article) => Promise<void>;
-  effectApi: unknown;
-};
+function useAdapter(saveArticle: (input: { url: string; title: string }) => Article) {
+  spyOn(factory, "getReadyAdapter").mockReturnValue(
+    Effect.succeed({
+      saveArticle: (input: { url: string; title: string }) => Effect.succeed(saveArticle(input)),
+    }) as never,
+  );
+}
 
 beforeEach(async () => {
   withStorage();
@@ -65,6 +69,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  mock.restore();
   resetFilterListSources();
   await initializeWithRawFilterLists([{ name: "TestFilters", content: testFilterContent }]);
   if (originalBrowser) Object.defineProperty(globalThis, "browser", originalBrowser);
@@ -157,44 +162,36 @@ test("Duplicate detection follows the comparison setting", async () => {
 
   const exactRepository = new ArticlesRepository();
   await exactRepository.initialize({ ...DEFAULT_SETTINGS, normalizeOnCompare: false });
-  await (exactRepository as WithPrivate).addArticle({
+  useAdapter(() => ({
     id: 2,
     url: "https://youtu.be/abc123",
     title: "Video",
     created_at: "2026-01-02",
-  });
+  }));
+  await exactRepository.saveArticle({ url: "https://youtu.be/abc123", title: "Video" });
   expect(((await exactRepository.getAllArticles()) as Article[]).length).toBe(2);
 
   const { storage: canonicalStorage } = withStorage();
   canonicalStorage[keys.articles] = [existing];
   const canonicalRepository = new ArticlesRepository();
   await canonicalRepository.initialize({ ...DEFAULT_SETTINGS, normalizeOnCompare: true });
-  await (canonicalRepository as WithPrivate).addArticle({
+  useAdapter(() => ({
     id: 3,
     url: "https://youtu.be/abc123",
     title: "Video",
     created_at: "2026-01-02",
-  });
+  }));
+  await canonicalRepository.saveArticle({ url: "https://youtu.be/abc123", title: "Video" });
   const articles = (await canonicalRepository.getAllArticles()) as Article[];
   expect(articles.length).toBe(1);
   expect(articles[0].id).toBe(1);
 });
 
 test("Saving honors normalizeOnSave independently", async () => {
-  const fakeApi = {
-    initialize: async () => {},
-    saveArticle: (input: { url: string; title: string }) =>
-      Effect.succeed({
-        id: 7,
-        url: input.url,
-        title: input.title,
-        created_at: "2026-01-01",
-      }),
-  };
+  useAdapter((input) => ({ id: 7, url: input.url, title: input.title, created_at: "2026-01-01" }));
 
   const rawRepository = new ArticlesRepository();
   await rawRepository.initialize({ ...DEFAULT_SETTINGS, normalizeOnSave: false });
-  (rawRepository as WithPrivate).effectApi = Promise.resolve(fakeApi);
   const rawSaved = await rawRepository.saveArticle({
     url: "https://youtu.be/abc123",
     title: "Video",
@@ -211,7 +208,6 @@ test("Saving honors normalizeOnSave independently", async () => {
     normalizeOnSave: true,
     normalizeOnCompare: false,
   });
-  (normalizedRepository as WithPrivate).effectApi = Promise.resolve(fakeApi);
   const normalizedSaved = await normalizedRepository.saveArticle({
     url: "https://youtu.be/abc123",
     title: "Video",
