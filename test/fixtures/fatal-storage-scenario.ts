@@ -1103,6 +1103,12 @@ switch (scenario) {
       assert.equal(diagnostic.code, "FATAL_LOCAL_STORAGE");
       assert.deepEqual(enabled, []);
       assert.match(titles.at(-1)!, /Pouch stopped/);
+      const resent: any[] = [];
+      (browser.runtime.sendMessage as any) = async (target: string, message: any) => {
+        if (target === QUICK_ACTIONS_ID) resent.push(message);
+      };
+      await pouchListener({ type: "refreshUi" }, { id: QUICK_ACTIONS_ID });
+      assert.equal(resent.at(-1)?.type, "fatalStorage", "a request after shutdown resends the stop");
     }
     break;
   }

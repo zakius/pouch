@@ -32,6 +32,7 @@ const pick = (store: Record<string, unknown>, keys: string | string[] | null) =>
 Object.assign(globalThis, {
   browser: {
     runtime: {
+      getURL: (path: string) => path,
       onMessage: { addListener: (listener: Listener) => listeners.push(listener) },
       onInstalled: event,
       onStartup: event,

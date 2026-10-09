@@ -277,8 +277,10 @@ browser.contextMenus.onClicked.addListener((info: OnClickData, tab?: Tab) =>
     (error) => notifyError(info.menuItemId === "save-page" ? "toggle page" : "save link", error),
   ),
 );
-// Chromium's service worker can't draw an SVG.
-const NOTIFICATION_ICON = IS_CHROMIUM ? "icons/icon-128.png" : "icons/icon.svg";
+// Chromium's service worker can't draw an SVG. A relative path would resolve under background/.
+const NOTIFICATION_ICON = browser.runtime.getURL(
+  IS_CHROMIUM ? "icons/icon-128.png" : "icons/icon.svg",
+);
 const ERROR_NOTIFICATION_ID = "pouch-error";
 onFatalStorage((diagnostic) => {
   void browser.notifications
@@ -387,19 +389,22 @@ const togglePageSave = (tab: Tab) =>
 if (IS_CHROMIUM) {
   browser.runtime.onMessageExternal.addListener((message: QuickActionMessage, sender) => {
     if (sender.id !== QUICK_ACTIONS_ID) return undefined;
-    if (message?.type === "getStorageDiagnostic") return runOperation(readStorageDiagnostic);
+    // After shutdown the diagnostic is answered without the stopped runtime.
+    const diagnostic = getStorageDiagnostic();
+    if (message?.type === "getStorageDiagnostic")
+      return runOperation(readStorageDiagnostic).catch(
+        () => getStorageDiagnostic() ?? { error: "Storage initialization failed" },
+      );
+    if (diagnostic)
+      return browser.runtime
+        .sendMessage(QUICK_ACTIONS_ID, { type: "fatalStorage", error: diagnostic.error })
+        .then(
+          () => undefined,
+          () => undefined,
+        );
     return run(
       "Quick Actions",
       Effect.gen(function* () {
-        const diagnostic = getStorageDiagnostic();
-        if (diagnostic) {
-          yield* Effect.promise(() =>
-            browser.runtime
-              .sendMessage(QUICK_ACTIONS_ID, { type: "fatalStorage", error: diagnostic.error })
-              .catch(() => {}),
-          );
-          return undefined;
-        }
         if (message?.type === "togglePage") {
           const tab = yield* browserCall("read tab", () => browser.tabs.get(message.tabId));
           yield* togglePageSave(tab);

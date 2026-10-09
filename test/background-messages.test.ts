@@ -24,6 +24,7 @@ let rejectBookmarkRead = false;
 Object.assign(globalThis, {
   browser: {
     runtime: {
+      getURL: (path: string) => path,
       onMessage: { addListener: (l: Listener) => listeners.push(l) },
       onInstalled: { addListener: () => {} },
       onStartup: { addListener: () => {} },
