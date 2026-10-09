@@ -265,6 +265,16 @@ test("required token failure stops fetch and retains its recovery category", asy
   expect(result.code).toBe("CredentialsFailure");
   expect(fetchMock).not.toHaveBeenCalled();
 });
+test("Wallabag sends Bearer even when the server issues token_type bearer", async () => {
+  const tokens = new TokenManager({ persist: false });
+  await runOperation(tokens.storeToken("wallabag", { ...oldToken, tokenType: "bearer" }));
+  spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+    expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer active-access");
+    return json(snapshot());
+  });
+  const api = await runOperation(createWallabagAdapter(settings, tokens));
+  expect(await runOperation(api.testConnection)).toBe(true);
+});
 test("ready Wallabag saves, deletes, tests, and paginates full and incremental sync", async () => {
   const tokens = new TokenManager({ persist: false });
   await runOperation(tokens.storeToken("wallabag", oldToken));

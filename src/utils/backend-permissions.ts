@@ -75,15 +75,21 @@ export async function ensureBackendPermissions(settings: Settings): Promise<bool
   }
 }
 
+/** Broad grants the user toggles by hand in the add-on manager; Pouch never requests them. */
+const USER_GRANTED_ORIGINS = new Set(["*://*/*", "<all_urls>"]);
+
 /**
  * Revokes optional origins that are granted but no longer needed by the
  * current backend (e.g. after switching services or changing an instance URL).
+ * Leaves the user's all-sites grant alone.
  */
 export async function pruneBackendPermissions(settings: Settings): Promise<void> {
   try {
     const granted = await browser.permissions.getAll();
     const needed = new Set(getBackendOrigins(settings));
-    const stale = (granted.origins ?? []).filter((origin) => !needed.has(origin));
+    const stale = (granted.origins ?? []).filter(
+      (origin) => !needed.has(origin) && !USER_GRANTED_ORIGINS.has(origin),
+    );
     if (stale.length === 0) return;
     await browser.permissions.remove({ origins: stale });
     logger.info("Revoked unused host permissions:", stale);
