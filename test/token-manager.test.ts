@@ -13,6 +13,7 @@ function setupBrowser() {
   };
   Object.assign(globalThis, {
     browser: {
+      permissions: { contains: async () => true },
       storage: {
         local: {
           get: async (key: string) => ({ [key]: storage[key] }),
@@ -122,6 +123,8 @@ test("concurrent refresh callers share a single request and result", async () =>
 
   const first = manager.refreshToken("wallabag");
   const second = manager.refreshToken("wallabag");
+  for (let i = 0; i < 100 && !resolveFetch; i++)
+    await new Promise((resolve) => setTimeout(resolve, 1));
   resolveFetch?.(tokenResponse());
   const [firstResult, secondResult] = await Promise.all([first, second]);
 

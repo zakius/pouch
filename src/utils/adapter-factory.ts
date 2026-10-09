@@ -1,12 +1,15 @@
 import { createBookmarksAdapter } from "../background/api/adapters/bookmarks-adapter";
-import type { BookmarksSettings } from "./settings-schemas";
+import type { BookmarksSettings, WallabagSettings } from "./settings-schemas";
 import { BookmarksAdapter } from "../background/api/adapters/bookmarks-adapter";
 import { InstapaperAdapter } from "../background/api/adapters/instapaper-adapter";
 import { KarakeepAdapter } from "../background/api/adapters/karakeep-adapter";
 import { LinkaceAdapter } from "../background/api/adapters/linkace-adapter";
 import { LinkwardenAdapter } from "../background/api/adapters/linkwarden-adapter";
 import { RaindropAdapter } from "../background/api/adapters/raindrop-adapter";
-import { WallabagAdapter } from "../background/api/adapters/wallabag-adapter";
+import {
+  WallabagAdapter,
+  createWallabagAdapter,
+} from "../background/api/adapters/wallabag-adapter";
 import type { ReadItLaterAPI } from "../background/api/read-it-later-adapter";
 import type { TokenManager } from "../background/token-manager";
 
@@ -31,6 +34,11 @@ export function getAdapter(backend: keyof typeof adapters, tokens?: TokenManager
   return new AdapterClass(tokens);
 }
 
-export function getReadyAdapter(settings: BookmarksSettings) {
-  return createBookmarksAdapter(settings);
+export function getReadyAdapter(
+  settings: BookmarksSettings | WallabagSettings,
+  tokens?: TokenManager,
+) {
+  return settings.backend === "bookmarks"
+    ? createBookmarksAdapter(settings)
+    : createWallabagAdapter(settings, tokens);
 }

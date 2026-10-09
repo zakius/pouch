@@ -4,11 +4,15 @@ import type { Article } from "../../types/common";
 import {
   FatalStorageError,
   assertStorageHealthy,
+  storageShutdownSignal,
   type StorageDiagnostic,
 } from "../../utils/fatal-storage";
 import type { SavingArticle, SyncOptions, SyncResult, FormConfig } from "./read-it-later-adapter";
 
-type MutationOutcome = { remoteOperation: "save" | "delete"; remoteOutcome: "succeeded" };
+type MutationOutcome = {
+  remoteOperation: "save" | "delete";
+  remoteOutcome: "succeeded" | "unknown";
+};
 
 class OperationError extends Error {
   mutation?: MutationOutcome;
@@ -19,7 +23,10 @@ class OperationError extends Error {
     const failure: this = Object.setPrototypeOf(new Error(), Object.getPrototypeOf(this));
     Object.defineProperties(failure, Object.getOwnPropertyDescriptors(this));
     failure.mutation = { ...mutation };
-    failure.message = `Remote ${mutation.remoteOperation} succeeded, but Pouch could not finish the operation. Do not repeat it. Check extension diagnostics before refreshing local articles with sync.`;
+    failure.message =
+      mutation.remoteOutcome === "succeeded"
+        ? `Remote ${mutation.remoteOperation} succeeded, but Pouch could not finish the operation. Do not repeat it. Check extension diagnostics before refreshing local articles with sync.`
+        : `Remote ${mutation.remoteOperation} outcome is unknown. Do not repeat it. Check the server and extension diagnostics before syncing.`;
     return failure;
   }
 }
@@ -53,27 +60,85 @@ export class BrowserFailure extends OperationError {
         "The bookmark folder is missing. Check the Pouch folder in browser bookmarks.",
       "permission-denied":
         "Browser denied bookmarks access. Grant bookmarks permission in extension settings.",
-      unavailable: "The browser bookmarks API is unavailable. Check extension availability.",
+      unavailable: "The browser API is unavailable. Check extension availability.",
       unknown: "Check browser bookmarks access and try again.",
     };
     super(`Browser ${operation} failed. ${guidance[reason]}`);
   }
 }
+export class CredentialsFailure extends OperationError {
+  readonly _tag = "CredentialsFailure";
+  constructor(readonly operation: string) {
+    super("The server rejected the credentials. Check account settings and authenticate again.");
+  }
+}
+export class NetworkFailure extends OperationError {
+  readonly _tag = "NetworkFailure";
+  constructor(readonly operation: string) {
+    super("The server could not be reached. Check the connection and extension diagnostics.");
+  }
+}
+export class TimeoutFailure extends OperationError {
+  readonly _tag = "TimeoutFailure";
+  constructor(
+    readonly operation: string,
+    readonly timeoutMs: number,
+  ) {
+    super("The server request timed out. Check the connection and extension diagnostics.");
+  }
+}
+export class InvalidResponseFailure extends OperationError {
+  readonly _tag = "InvalidResponseFailure";
+  constructor(
+    readonly operation: string,
+    readonly responseKind: "token" | "response" = "response",
+  ) {
+    super(
+      `The server returned an invalid ${responseKind}. Check server compatibility and extension diagnostics.`,
+    );
+  }
+}
+export class HttpFailure extends OperationError {
+  readonly _tag = "HttpFailure";
+  constructor(
+    readonly operation: string,
+    readonly status: number,
+  ) {
+    super(
+      `The server rejected the request (HTTP ${status}). Check server access and extension diagnostics.`,
+    );
+  }
+}
+export class RateLimitFailure extends OperationError {
+  readonly _tag = "RateLimitFailure";
+  constructor(
+    readonly operation: string,
+    readonly retryAfterMs: number,
+  ) {
+    super("The server rate limit is exhausted (HTTP 429). Wait before starting another operation.");
+  }
+}
+export type TransportError =
+  | PermissionFailure
+  | BrowserFailure
+  | CredentialsFailure
+  | NetworkFailure
+  | TimeoutFailure
+  | InvalidResponseFailure
+  | HttpFailure
+  | RateLimitFailure
+  | FatalStorageFailure;
 export class FatalStorageFailure extends FatalStorageError {
   constructor(diagnostic: StorageDiagnostic) {
     super(diagnostic);
   }
 }
-export type AcquisitionError =
-  | ConfigurationFailure
-  | PermissionFailure
-  | BrowserFailure
-  | FatalStorageFailure;
-export type SaveError = PermissionFailure | BrowserFailure | FatalStorageFailure;
-export type DeleteError = PermissionFailure | BrowserFailure | FatalStorageFailure;
-export type SyncError = PermissionFailure | BrowserFailure | FatalStorageFailure;
-export type ConnectionError = PermissionFailure | BrowserFailure | FatalStorageFailure;
-export type AdapterError = AcquisitionError | SaveError | DeleteError | SyncError | ConnectionError;
+export type AcquisitionError = ConfigurationFailure | TransportError;
+export type SaveError = TransportError;
+export type DeleteError = TransportError;
+export type SyncError = TransportError;
+export type ConnectionError = TransportError;
+export type AdapterError = AcquisitionError;
 
 /** Ready operations capture implementation dependencies; no private services escape in R. */
 export interface EffectAdapter {
@@ -98,7 +163,13 @@ export function isAdapterError(error: unknown): error is AdapterError {
     error instanceof ConfigurationFailure ||
     error instanceof PermissionFailure ||
     error instanceof BrowserFailure ||
-    error instanceof FatalStorageFailure
+    error instanceof FatalStorageFailure ||
+    error instanceof CredentialsFailure ||
+    error instanceof NetworkFailure ||
+    error instanceof TimeoutFailure ||
+    error instanceof InvalidResponseFailure ||
+    error instanceof HttpFailure ||
+    error instanceof RateLimitFailure
   );
 }
 
@@ -128,12 +199,13 @@ const OperationProgress = Context.Service<{ mutation?: MutationOutcome }>(
   "pouch/OperationProgress",
 );
 
-export const recordMutationSuccess = (remoteOperation: MutationOutcome["remoteOperation"]) =>
+export const recordMutationOutcome = (mutation?: MutationOutcome) =>
   Effect.gen(function* () {
     const progress = yield* Effect.serviceOption(OperationProgress);
-    if (Option.isSome(progress))
-      progress.value.mutation = { remoteOperation, remoteOutcome: "succeeded" };
+    if (Option.isSome(progress)) progress.value.mutation = mutation;
   });
+export const recordMutationSuccess = (remoteOperation: MutationOutcome["remoteOperation"]) =>
+  recordMutationOutcome({ remoteOperation, remoteOutcome: "succeeded" });
 
 export class OperationInterrupted extends Error {
   readonly _tag = "OperationInterrupted";
@@ -143,7 +215,7 @@ export class OperationInterrupted extends Error {
   ) {
     super(
       mutation
-        ? `The operation was interrupted. Remote ${mutation.remoteOperation} succeeded. Do not repeat it.`
+        ? `The operation was interrupted. Remote ${mutation.remoteOperation} ${mutation.remoteOutcome === "succeeded" ? "succeeded" : "outcome is unknown"}. Do not repeat it.`
         : "The operation was interrupted. Check its outcome before repeating it.",
     );
   }
@@ -157,7 +229,7 @@ export async function runOperation<A, E>(
   const progress: { mutation?: MutationOutcome } = {};
   const exit = await Effect.runPromiseExit(
     operation.pipe(Effect.provideService(OperationProgress, progress)),
-    { signal },
+    { signal: AbortSignal.any([storageShutdownSignal(), ...(signal ? [signal] : [])]) },
   );
   if (Exit.isSuccess(exit)) return exit.value;
   if (Cause.hasDies(exit.cause)) {
@@ -166,11 +238,18 @@ export async function runOperation<A, E>(
   }
   const failure = Cause.findErrorOption(exit.cause);
   if (Option.isSome(failure) && failure.value instanceof FatalStorageError) throw failure.value;
-  if (Cause.hasInterrupts(exit.cause))
+  if (Cause.hasInterrupts(exit.cause)) {
+    try {
+      assertStorageHealthy(progress.mutation?.remoteOutcome, progress.mutation?.remoteOperation);
+    } catch (error) {
+      if (error instanceof FatalStorageError) throw new FatalStorageFailure(error.diagnostic);
+      throw error;
+    }
     throw new OperationInterrupted(exit.cause, progress.mutation);
+  }
   if (Option.isSome(failure))
     throw failure.value instanceof OperationError
-      ? failure.value.withMutation(progress.mutation)
+      ? failure.value.withMutation(progress.mutation ?? failure.value.mutation)
       : failure.value;
   throw new OperationDefect(exit.cause).withMutation(progress.mutation);
 }
