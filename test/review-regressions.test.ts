@@ -126,7 +126,9 @@ test("failed remote deletion preserves cached articles", async () => {
   });
   const repository = new ArticlesRepository();
   await repository.initialize(DEFAULT_SETTINGS);
-  await expect(runOperation(repository.deleteArticle(1))).rejects.toThrow("Browser delete bookmark failed");
+  await expect(runOperation(repository.deleteArticle(1))).rejects.toThrow(
+    "Browser delete bookmark failed",
+  );
   expect(await runOperation(repository.getAllArticles)).toEqual([article]);
   expect(storage[keys.articles]).toEqual([article]);
   remove.mockResolvedValue(undefined);
@@ -150,4 +152,30 @@ test("a detached fiber that dies is logged, and an interrupted one is not", asyn
     forkDetachLogged("Interrupted work", Effect.interrupt).pipe(Effect.flatMap(Fiber.await)),
   );
   expect(error).toHaveBeenCalledTimes(1);
+});
+
+test("shared work that dies after every caller left is logged", async () => {
+  let releaseIdle!: () => void;
+  const idle = new Promise<void>((resolve) => (releaseIdle = resolve));
+  let logged!: () => void;
+  const died = new Promise<void>((resolve) => (logged = resolve));
+  Object.assign(globalThis, {
+    browser: {
+      storage: { local: { get: async () => ({}) } },
+      bookmarks: { getTree: async () => [{ id: "folder", title: "Pouch", children: [] }] },
+      idle: { queryState: () => idle.then(() => "active") },
+    },
+  });
+  const repository = new ArticlesRepository();
+  repository.initialize({ ...DEFAULT_SETTINGS, backend: "bookmarks", apiConfig: {} });
+  spyOn(logger, "info").mockImplementation((message) => {
+    if (message === "Starting cache sync with API") throw new Error("boom");
+  });
+  const error = spyOn(logger, "error").mockImplementation(() => logged());
+  const caller = Effect.runFork(repository.syncWithAPI());
+  await Effect.runPromise(Fiber.interrupt(caller));
+  releaseIdle();
+  await died;
+  expect(error.mock.calls[0]?.[0]).toBe("Shared background work died:");
+  expect(String(error.mock.calls[0]?.[1])).toContain("boom");
 });

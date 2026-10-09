@@ -68,7 +68,12 @@ Object.assign(globalThis, {
       },
       remove: async () => {},
     },
-    alarms: { clear: async () => {}, create: async () => {}, get: async () => undefined, onAlarm: event },
+    alarms: {
+      clear: async () => {},
+      create: async () => {},
+      get: async () => undefined,
+      onAlarm: event,
+    },
     contextMenus: {
       create: (_details: unknown, callback?: () => void) => callback?.(),
       update: async () => {},
@@ -121,8 +126,14 @@ test("an account change retires the old account before removing its keys", async
   });
   await createStarted.promise;
   // The old account's save completes right after its keys are removed.
+  let activeAtRemove: unknown = "not removed";
   afterRemove = async () => {
     afterRemove = undefined;
+    // The old account's cached article is visible only while the old account is still active.
+    activeAtRemove = await sendMessage({
+      type: "checkArticle",
+      payload: { url: "https://example.com/in-flight" },
+    });
     releaseCreate.resolve();
   };
   const raindrop = { ...DEFAULT_SETTINGS, backend: "raindrop", apiConfig: { apiKey: "key" } };
@@ -130,6 +141,7 @@ test("an account change retires the old account before removing its keys", async
     success: true,
   });
   await save;
+  expect(activeAtRemove).toBeUndefined();
   expect(Object.keys(localStore).filter((key) => key.endsWith(oldKeys.articles.slice(9)))).toEqual(
     [],
   );
@@ -146,6 +158,9 @@ test("a rejected settings write reports the browser's reason", async () => {
     code: "BrowserFailure",
     error:
       "Browser save settings failed. Browser reported: quota_bytes. Fix the reported cause and try again.",
-    details: { reason: "rejected", cause: { name: "Error", message: "Browser reported: quota_bytes" } },
+    details: {
+      reason: "rejected",
+      cause: { name: "Error", message: "Browser reported: quota_bytes" },
+    },
   });
 });
