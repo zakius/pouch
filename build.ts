@@ -353,6 +353,10 @@ async function buildChromium(): Promise<void> {
 }
 
 async function main() {
+	// --bump lets the parallel Chromium CI job reach the same version as --sign.
+	if (process.argv.includes("--sign") || process.argv.includes("--bump")) {
+		await bumpPatchVersion();
+	}
 	if (process.argv.includes("--chromium")) {
 		await buildChromium();
 		return;
@@ -360,12 +364,7 @@ async function main() {
 	const watchMode = process.argv.includes("--watch");
 	const skipSigning = !process.argv.includes("--sign");
 	const prepareOnly = process.argv.includes("--prepare-only") || watchMode;
-	const shouldSign = process.argv.includes("--sign");
 	const shouldLint = process.argv.includes("--lint");
-
-	if (shouldSign) {
-		await bumpPatchVersion();
-	}
 
 	await build(skipSigning, prepareOnly).catch((error) => {
 		console.error("Build failed:", error);

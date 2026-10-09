@@ -13,8 +13,27 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  # Both jobs check out main, so both bump from the same released version.
+  chromium:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: Build the Chromium packages
+        run: bun run build.ts --bump --chromium
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chromium
+          path: dist/packages/*-chromium-*.zip
+          if-no-files-found: error
+
+  firefox:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -31,9 +50,6 @@ jobs:
           AMO_API_KEY: ${{ secrets.AMO_API_KEY }}
           AMO_API_SECRET: ${{ secrets.AMO_API_SECRET }}
         run: bun run release:sign
-
-      - name: Build the Chromium packages
-        run: bun run package:chromium
 
       - name: Read bumped version
         if: always()
@@ -58,13 +74,27 @@ jobs:
           git push origin HEAD:main
           git push origin "v${{ steps.version.outputs.version }}" --force
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firefox
+          path: dist/signed/*.xpi
+          if-no-files-found: error
+
+  publish:
+    needs: [firefox, chromium]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
       - name: Publish GitHub release
-        if: success()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          gh release create "v${{ steps.version.outputs.version }}" \
-            dist/signed/*.xpi \
-            dist/packages/*-chromium-*.zip \
-            --title "v${{ steps.version.outputs.version }}" \
+          gh release create "v${{ needs.firefox.outputs.version }}" \
+            artifacts/*.xpi \
+            artifacts/*-chromium-*.zip \
+            --title "v${{ needs.firefox.outputs.version }}" \
             --generate-notes
