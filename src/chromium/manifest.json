@@ -1,0 +1,59 @@
+{
+  "manifest_version": 3,
+  "name": "Pouch",
+  "description": "Save and manage articles with Pouch",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsCO2bl5K9BfklQbp+7CH5MLJJnz1WAthVRBpe4z7Xqkhx5WKuonhXkxK/xAOVOBMg14my8wpI+JffkQ+CVl+jD1EcSnorNGTwhJ4Ud/k6mFadQ+bkhltOSEIbmFqERyKA82lHGCRl60u4WpTUqeYPAiV1Fyh695TNwXifpHr1IXtPvYrL5XnPYYotxnjUWI7AdH7MM9vNo9S3SynAhqn92GN9O5eeLMuaDC4czUAxQiYabxhuzjdx5DPG5JfbZj32tgruCDkFAjmTVeoy6dDShxvJN4M1pE+pb1UTRvSmJhR8zl8sSTVq+/8cE7BfA82PTpA2hDCiPzdfLNi2u6amwIDAQAB",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": false
+  },
+  "action": {
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    },
+    "default_title": "Pouch — save pages to read later",
+    "default_popup": "popup/popup.html"
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+Shift+P"
+      },
+      "description": "Open the Pouch popup"
+    },
+    "toggle-save-page": {
+      "suggested_key": {
+        "default": "Alt+Shift+S"
+      },
+      "description": "Save or remove the current page"
+    }
+  },
+  "background": {
+    "service_worker": "background/background.js",
+    "type": "module"
+  },
+  "permissions": [
+    "activeTab",
+    "storage",
+    "contextMenus",
+    "notifications",
+    "tabs",
+    "alarms",
+    "bookmarks",
+    "idle"
+  ],
+  "optional_host_permissions": [
+    "*://*/*",
+    "https://www.instapaper.com/*",
+    "https://api.raindrop.io/*"
+  ]
+}

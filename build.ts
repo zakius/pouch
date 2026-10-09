@@ -5,6 +5,7 @@ import {
 	copyFile,
 	cp,
 	mkdir,
+	readFile,
 	readdir,
 	rm,
 	watch,
@@ -273,21 +274,9 @@ async function watchAndBuild(): Promise<void> {
 	}
 }
 
-// Public keys of the Chromium build, which fix its extension IDs (see
-// src/utils/chromium.ts). The private keys are only needed to sign a .crx.
-const CHROMIUM_KEYS = {
-	pouch: "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsCO2bl5K9BfklQbp+7CH5MLJJnz1WAthVRBpe4z7Xqkhx5WKuonhXkxK/xAOVOBMg14my8wpI+JffkQ+CVl+jD1EcSnorNGTwhJ4Ud/k6mFadQ+bkhltOSEIbmFqERyKA82lHGCRl60u4WpTUqeYPAiV1Fyh695TNwXifpHr1IXtPvYrL5XnPYYotxnjUWI7AdH7MM9vNo9S3SynAhqn92GN9O5eeLMuaDC4czUAxQiYabxhuzjdx5DPG5JfbZj32tgruCDkFAjmTVeoy6dDShxvJN4M1pE+pb1UTRvSmJhR8zl8sSTVq+/8cE7BfA82PTpA2hDCiPzdfLNi2u6amwIDAQAB",
-	quickActions: "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAhe6WGTbF4a0Oy/UMt/fDEGvxoMIS0nEeQhOIJSMT+0GOVxXQMyn6xpZUiOONCdGU6UtaQ09+oFKuM1x1B6IdxXXMVG0fFcx1RK9jrDkoFY7Tcil81xhYRJWgm8VoyE9EY7F7K4bQbgsvr8Tv6AiwHi7vcJhyIYryVqIvmsmfN4z7nkRPWYNo2TUqMpS6hHC8/X0exm12/3LmoTPa5fBA7EaKiH4vcJJHCuaQqTvqzVytrVVn1a49QR/P1BREMxHEsm8UkownSoXLqwiTe9AjHTXaUT72zUqTyeaHkCB9QprltMJpkP+4+KtXqaq3Qkrsk3l12nvGZVl4h6fgj8336QIDAQAB",
-};
-const CHROMIUM_ICONS = {
-	"16": "icons/icon-16.png",
-	"32": "icons/icon-32.png",
-	"48": "icons/icon-48.png",
-	"128": "icons/icon-128.png",
-};
-
 // The Chromium build, MV3: Pouch without its page action, and Pouch Quick
-// Actions, an action that asks Pouch to save the page.
+// Actions, an action that asks Pouch to save the page. Each source directory
+// holds the extension's manifest and icons.
 async function buildChromium(): Promise<void> {
 	const root = "dist/chromium";
 	const pouchDir = join(root, "pouch");
@@ -301,54 +290,17 @@ async function buildChromium(): Promise<void> {
 	]);
 	await compileTypeScript(quickDir, false, "chromium", ["src/quick-actions/background.ts"]);
 
-	const { commands } = manifest;
-	const manifests = {
-		[pouchDir]: {
-			manifest_version: 3,
-			name: manifest.name,
-			version: manifest.version,
-			description: manifest.description,
-			key: CHROMIUM_KEYS.pouch,
-			icons: CHROMIUM_ICONS,
-			options_ui: manifest.options_ui,
-			action: {
-				default_icon: CHROMIUM_ICONS,
-				default_title: manifest.browser_action.default_title,
-				default_popup: manifest.browser_action.default_popup,
-			},
-			commands: {
-				_execute_action: commands._execute_browser_action,
-				"toggle-save-page": commands["toggle-save-page"],
-			},
-			background: { service_worker: "background/background.js", type: "module" },
-			permissions: manifest.permissions,
-			optional_host_permissions: manifest.optional_permissions,
-		},
-		[quickDir]: {
-			manifest_version: 3,
-			name: "Pouch Quick Actions",
-			version: manifest.version,
-			description: "Saves the current page to Pouch with one click. Needs Pouch.",
-			key: CHROMIUM_KEYS.quickActions,
-			icons: CHROMIUM_ICONS,
-			background: { service_worker: "background.js", type: "module" },
-			action: {
-				default_icon: { "16": "icons/unsaved-16.png", "32": "icons/unsaved-32.png" },
-				// "Save to Pouch" once Pouch reports a page it can save.
-				default_title: "Pouch Quick Actions",
-			},
-		},
-	};
+	const { version } = manifest;
 	await mkdir("dist/packages", { recursive: true });
-	for (const [dir, dirManifest] of Object.entries(manifests)) {
-		await writeFile(join(dir, "manifest.json"), JSON.stringify(dirManifest, null, 2));
-		await cp("src/chromium/icons", join(dir, "icons"), { recursive: true });
+	for (const [src, dir, name] of [
+		["src/chromium", pouchDir, "pouch"],
+		["src/quick-actions", quickDir, "pouch-quick-actions"],
+	]) {
+		const dirManifest = JSON.parse(await readFile(join(src, "manifest.json"), "utf8"));
+		await writeFile(join(dir, "manifest.json"), JSON.stringify({ ...dirManifest, version }, null, 2));
+		await cp(join(src, "icons"), join(dir, "icons"), { recursive: true });
+		await execAsync(`zip -qr ../../packages/${name}-chromium-${version}.zip .`, { cwd: dir });
 	}
-	const version = manifest.version;
-	await execAsync(`zip -qr ../../packages/pouch-chromium-${version}.zip .`, { cwd: pouchDir });
-	await execAsync(`zip -qr ../../packages/pouch-quick-actions-chromium-${version}.zip .`, {
-		cwd: quickDir,
-	});
 	console.log("Created the Chromium packages in dist/packages/");
 }
 
