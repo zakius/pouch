@@ -83,6 +83,7 @@ for (const scenario of [
   "network",
   "interrupt",
   "late-save",
+  "shared-sync-shutdown",
   "background",
   "worker-restart",
 ]) {

@@ -204,7 +204,7 @@ switch (scenario) {
     failKey = keys.lastSyncTimestamp;
     await rejectsFatal(() => repository.syncWithAPI({ mode: "overwrite" }));
     assert.equal(store[keys.lastSyncTimestamp], undefined);
-    assert.equal(Reflect.get(repository, "lastSyncTimestamp"), null);
+    assert.equal(Reflect.get(repository, "account").timestamps.last, null);
     assert.equal(getStorageDiagnostic()?.operation, "persist sync timestamps");
     break;
   case "tokens":
@@ -318,7 +318,7 @@ switch (scenario) {
     const repo = new ArticlesRepository(tokens);
     await repo.initialize(wallabagSettings);
     await repo.getAllArticles();
-    const before = structuredClone(Reflect.get(repo, "articlesCache"));
+    const before = structuredClone(Reflect.get(repo, "account").articles);
     const bookmark = { type: "bookmark", bookmark_id: 42, url: saved.url, title: saved.title };
     globalThis.fetch = async (url, init) => {
       fetches++;
@@ -349,9 +349,9 @@ switch (scenario) {
       await rejectsFatal(() => repo.deleteArticle(original.id));
     else await rejectsFatal(() => repo.syncWithAPI({ mode: "overwrite" }));
     if (!scenario.endsWith("-sync-timestamp"))
-      assert.deepEqual(Reflect.get(repo, "articlesCache"), before);
+      assert.deepEqual(Reflect.get(repo, "account").articles, before);
     else {
-      assert.equal(Reflect.get(repo, "lastSyncTimestamp"), null);
+      assert.equal(Reflect.get(repo, "account").timestamps.last, null);
       assert.equal(store[accountKeys.lastSyncTimestamp], undefined);
     }
     assert.equal(getStorageDiagnostic()?.remoteOutcome, "succeeded");
@@ -712,6 +712,28 @@ switch (scenario) {
     await failure;
     assert.equal(getStorageDiagnostic()?.remoteOperation, "save");
     assert.match(getStorageDiagnostic()!.error, /Remote save succeeded/);
+    break;
+  }
+  case "shared-sync-shutdown": {
+    const fetching = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    (browser.bookmarks.getChildren as unknown) = async () => {
+      fetching.resolve();
+      await release.promise;
+      return [{ id: "remote-GUID", title: "Remote", url: "https://example.com/remote" }];
+    };
+    const first = rejectsFatal(() => repository.syncWithAPI({ mode: "overwrite" }));
+    const joined = rejectsFatal(() => repository.syncWithAPI());
+    await fetching.promise;
+    rejectSet = true;
+    await rejectsFatal(() => setLocal("other work", {}));
+    // Shutdown interrupts the shared fetch: both callers fail before the remote read returns.
+    await Promise.all([first, joined]);
+    assert.equal(Reflect.get(repository, "account").sync.running, false, "shared sync must stop");
+    release.resolve();
+    assert.equal(writes, 1);
+    assert.deepEqual(store[keys.articles], [original]);
+    assert.equal(store[keys.lastSyncTimestamp], undefined);
     break;
   }
   case "background":
@@ -1245,9 +1267,9 @@ switch (scenario) {
     const queued = new Promise<void>((resolve) => {
       queuedSave = resolve;
     });
-    const enqueue = Reflect.get(repository, "enqueueCommit").bind(repository);
+    const enqueue = Reflect.get(repository, "commit").bind(repository);
     let commits = 0;
-    Reflect.set(repository, "enqueueCommit", (work: any, ...outcome: any[]) => {
+    Reflect.set(repository, "commit", (work: any, ...outcome: any[]) => {
       const result = enqueue(work, ...outcome);
       if (++commits === 2) queuedSave();
       return result;
@@ -1272,7 +1294,7 @@ switch (scenario) {
       const deletionReady = new Promise<void>((resolve) => {
         deletionQueued = resolve;
       });
-      Reflect.set(repository, "enqueueCommit", (work: any, ...outcome: any[]) => {
+      Reflect.set(repository, "commit", (work: any, ...outcome: any[]) => {
         const result = enqueue(work, ...outcome);
         deletionQueued();
         return result;
@@ -1325,7 +1347,7 @@ if (getStorageDiagnostic()) {
   await rejectsFatal(() => tokens.checkAndRefreshTokens());
   assert.deepEqual([writes, removes, remoteSaves, remoteDeletes, fetches], count);
   if (!["timestamps", "background", "worker-restart"].includes(scenario!)) {
-    assert.strictEqual(Reflect.get(repository, "articlesCache"), priorCache);
+    assert.strictEqual(Reflect.get(repository, "account").articles, priorCache);
     assert.deepEqual(priorCache, [original]);
   }
   let received: unknown;

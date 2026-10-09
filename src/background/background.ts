@@ -58,7 +58,9 @@ interface Tab {
   title?: string;
 }
 const REFRESH_INTERVAL = 30;
-let articlesRepository: ArticlesRepository;
+// One instance for the worker: re-initializing it on account changes retires the old account's work.
+const articlesRepository = new ArticlesRepository();
+let repositoryInitialized = false;
 let initializePromise: Promise<void> | null = null;
 let startupPromise: Promise<void> | null = null;
 let urlCanonizerPromise: Promise<void> | null = null;
@@ -90,10 +92,11 @@ async function readStorageDiagnostic() {
 async function getArticlesRepository(): Promise<ArticlesRepository> {
   await startup();
   assertStorageHealthy();
-  if (!articlesRepository) {
+  if (!repositoryInitialized) {
     const settings = await getSettings();
-    articlesRepository = new ArticlesRepository();
-    await articlesRepository.initialize(settings);
+    // saveSettings may have initialized it with newer settings meanwhile.
+    if (!repositoryInitialized) articlesRepository.initialize(settings);
+    repositoryInitialized = true;
   }
   return articlesRepository;
 }
@@ -141,8 +144,8 @@ browser.runtime.onMessage.addListener(
             await removeStaleAccountKeys(settings);
             clearCanonicalUrlCache();
             await logger.initialize();
-            articlesRepository = new ArticlesRepository();
-            await articlesRepository.initialize(settings);
+            articlesRepository.initialize(settings);
+            repositoryInitialized = true;
             void articlesRepository
               .syncWithAPI({ mode: "overwrite" })
               .then((result) => {
@@ -169,7 +172,7 @@ browser.runtime.onMessage.addListener(
               safeSendResponse({ error: "Invalid URL format" });
               return;
             }
-            articlesRepository = await getArticlesRepository();
+            await getArticlesRepository();
             const savedArticle = await articlesRepository.saveArticle({
               url,
               title,
@@ -188,7 +191,7 @@ browser.runtime.onMessage.addListener(
               safeSendResponse(undefined);
               return;
             }
-            articlesRepository = await getArticlesRepository();
+            await getArticlesRepository();
             const foundArticle = await articlesRepository.findSaved(url);
             safeSendResponse(foundArticle);
             return;
@@ -226,7 +229,7 @@ browser.runtime.onMessage.addListener(
               });
             }
 
-            articlesRepository = await getArticlesRepository();
+            await getArticlesRepository();
             logger.debug("Handling getArticles request:", {
               page: message.payload.page,
               perPage: message.payload.perPage,
@@ -252,7 +255,7 @@ browser.runtime.onMessage.addListener(
               });
               return;
             }
-            articlesRepository = await getArticlesRepository();
+            await getArticlesRepository();
             const result = await articlesRepository.deleteArticle(articleId);
             await refreshActiveTabUi();
             safeSendResponse(result);
@@ -262,7 +265,7 @@ browser.runtime.onMessage.addListener(
             try {
               // Draft credentials get their own in-memory TokenManager so they never touch the active account's tokens.
               const testRepo = new ArticlesRepository(new TokenManager({ persist: false }));
-              await testRepo.initialize(message.payload.settings);
+              testRepo.initialize(message.payload.settings);
               const success = await testRepo.testConnection();
               safeSendResponse({
                 success,

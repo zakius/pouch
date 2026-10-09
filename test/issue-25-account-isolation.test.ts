@@ -11,7 +11,9 @@ import { TokenManager, tokenManager } from "../src/background/token-manager";
 import { getAdapter } from "../src/utils/adapter-factory";
 import { DEFAULT_SETTINGS } from "../src/utils/settings";
 
-beforeEach(() => { mockReadyAdapter(); });
+beforeEach(() => {
+  mockReadyAdapter();
+});
 
 const originalBrowser = Object.getOwnPropertyDescriptor(globalThis, "browser");
 
@@ -115,7 +117,10 @@ test("a retired account's late sync never writes into the new account's storage"
   const syncGate = deferred();
   spyOn(BookmarksAdapter.prototype, "sync").mockReturnValue(
     syncGate.promise.then(() => ({
-      articles: [article("old-1", "https://old.example/a"), article(42, "https://shared.example/x")],
+      articles: [
+        article("old-1", "https://old.example/a"),
+        article(42, "https://shared.example/x"),
+      ],
       mode: "overwrite" as const,
     })),
   );
@@ -137,6 +142,49 @@ test("a retired account's late sync never writes into the new account's storage"
   expect(storage[newKeys.lastFullSyncTimestamp]).toBeUndefined();
   const oldArticles = await oldRepo.getAllArticles();
   expect(oldArticles.map((a) => a.id).sort()).toEqual([42, "old-1"].sort());
+});
+
+test("re-initializing retires late saves, deletes, and syncs of the previous account", async () => {
+  const { storage } = makeBrowserMock();
+  const repository = await makeRepository({ account: "a" });
+  const keysA = getAccountStorageKeys(makeSettings({ account: "a" }));
+  const keysB = getAccountStorageKeys(makeSettings({ account: "b" }));
+  storage[keysA.articles] = [article(42, "https://shared.example/x")];
+  storage[keysB.articles] = [article(42, "https://shared.example/x")];
+
+  const remoteGate = deferred();
+  let entered = 0;
+  const allEntered = deferred();
+  const remote = <T>(value: () => T) => {
+    if (++entered === 3) allEntered.resolve();
+    return remoteGate.promise.then(value);
+  };
+  spyOn(BookmarksAdapter.prototype, "saveArticle").mockImplementation(() =>
+    remote(() => article(7, "https://late.example/save")),
+  );
+  spyOn(BookmarksAdapter.prototype, "deleteArticle").mockImplementation(() =>
+    remote(() => undefined),
+  );
+  spyOn(BookmarksAdapter.prototype, "sync").mockImplementation(() =>
+    remote(() => ({
+      articles: [article("old-1", "https://old.example/a")],
+      mode: "overwrite" as const,
+    })),
+  );
+  const save = repository.saveArticle({ url: "https://late.example/save", title: "Late" });
+  const remove = repository.deleteArticle(42);
+  const sync = repository.syncWithAPI({ mode: "overwrite" });
+  await allEntered.promise;
+
+  repository.initialize(makeSettings({ account: "b" }));
+  const before = structuredClone(storage);
+  remoteGate.resolve();
+
+  expect((await save).id).toBe(7);
+  expect(await remove).toEqual({ success: true, id: 42 });
+  await sync;
+  expect(storage).toEqual(before);
+  expect((await repository.getAllArticles()).map((a) => a.id)).toEqual([42]);
 });
 
 test("accounts within one backend keep isolated articles and timestamps", async () => {
