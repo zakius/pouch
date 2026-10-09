@@ -831,3 +831,63 @@ test("missing refresh capability preserves a current token until expiry", async 
   expect(tokens.getTokenMetadata("wallabag")?.accessToken).toBe("active-access");
   expect(fetchMock).not.toHaveBeenCalled();
 });
+
+test("concurrent replacement acquisitions wait for the previous account's token deletion", async () => {
+  const tokens = new TokenManager();
+  await tokens.storeToken("wallabag", { ...oldToken, accessToken: "A-token" });
+  await runOperation(createWallabagAdapter(settings, tokens));
+  const replacement: WallabagSettings = {
+    ...settings,
+    apiConfig: { ...settings.apiConfig, url: "https://B.example", username: "B" },
+  };
+  const started = deferred<void>();
+  const release = deferred<void>();
+  browser.storage.local.set = async (data) => {
+    started.resolve();
+    await release.promise;
+    Object.assign(storage, data);
+  };
+  const headers: string[] = [];
+  spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    expect(String(url)).toContain("B.example");
+    if (String(url).includes("oauth")) return json({ ...token, access_token: "B-token" });
+    headers.push(new Headers(init?.headers).get("Authorization")!);
+    return json(snapshot());
+  });
+  const first = runOperation(createWallabagAdapter(replacement, tokens));
+  await started.promise;
+  let secondReady = false;
+  const second = runOperation(createWallabagAdapter(replacement, tokens)).then((api) => {
+    secondReady = true;
+    return api;
+  });
+  for (let tick = 0; tick < 20; tick++) await Promise.resolve();
+  expect(secondReady).toBe(false);
+  release.resolve();
+  await first;
+  expect(await runOperation((await second).testConnection)).toBe(true);
+  expect(headers).toEqual(["Bearer B-token"]);
+  expect(storage.api_tokens).toEqual([
+    ["wallabag", expect.objectContaining({ accessToken: "B-token" })],
+  ]);
+});
+
+test("invalidation during acquisition token persistence fails the acquisition", async () => {
+  const tokens = new TokenManager();
+  const started = deferred<void>();
+  const release = deferred<void>();
+  browser.storage.local.set = async (data) => {
+    started.resolve();
+    await release.promise;
+    Object.assign(storage, data);
+  };
+  const fetchMock = spyOn(globalThis, "fetch").mockImplementation(async () => json(token));
+  const pending = failure(createWallabagAdapter(settings, tokens));
+  await started.promise;
+  const clearing = tokens.clearToken("wallabag");
+  release.resolve();
+  expect((await pending).code).toBe("CredentialsFailure");
+  await clearing;
+  expect(tokens.getTokenMetadata("wallabag")).toBeNull();
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});

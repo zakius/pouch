@@ -315,6 +315,8 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
     }),
   };
   yield* storageHealthy;
+  // Invalidation during the acquisition's own token persistence must not return a ready adapter.
+  yield* owned;
   return adapter;
 }) satisfies (
   settings: WallabagSettings,

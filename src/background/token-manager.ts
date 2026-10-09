@@ -98,21 +98,38 @@ export class TokenManager {
   private refreshConfigProviders: Map<string, () => TokenRefreshConfig | null> = new Map();
   private refreshEffects = new Map<string, Effect.Effect<TokenRefreshResult, TransportError>>();
   private accountGenerations = new Map<string, number>();
-  private accountIdentities = new Map<string, string>();
+  /** Null identity marks a failed binding whose previous-account token may still be stored. */
+  private accountBindings = new Map<string, { identity: string | null; ready: Promise<number> }>();
 
+  /**
+   * Every acquisition for an identity shares its binding, so no caller sees the new generation
+   * before the previous account's token deletion has committed or failed.
+   */
   public async bindAccount(serviceName: string, identity: string): Promise<number> {
-    const previous = this.accountIdentities.get(serviceName);
-    if (previous !== identity) {
-      this.accountIdentities.set(serviceName, identity);
+    let binding = this.accountBindings.get(serviceName);
+    if (binding?.identity !== identity) {
+      const replacing = binding !== undefined;
       this.invalidateAccount(serviceName);
-    }
-    const generation = this.accountGenerations.get(serviceName) ?? 0;
-    if (previous !== undefined && previous !== identity)
-      await this.commitTokens((tokens) => {
-        this.assertAccount(serviceName, generation);
-        tokens.delete(serviceName);
+      const generation = this.accountGenerations.get(serviceName) ?? 0;
+      const ready = replacing
+        ? this.commitTokens((tokens) => {
+            this.assertAccount(serviceName, generation);
+            tokens.delete(serviceName);
+          }).then(() => generation)
+        : Promise.resolve(generation);
+      const current = { identity, ready };
+      binding = current;
+      this.accountBindings.set(serviceName, current);
+      ready.catch(() => {
+        if (this.accountBindings.get(serviceName) === current)
+          this.accountBindings.set(serviceName, { identity: null, ready });
       });
-    return generation;
+    }
+    await binding.ready;
+    // A same-account clear keeps the binding and only advances the generation.
+    if (this.accountBindings.get(serviceName) !== binding)
+      throw new CredentialsFailure("account ownership");
+    return this.accountGenerations.get(serviceName) ?? 0;
   }
 
   public assertAccount(serviceName: string, generation: number): void {
