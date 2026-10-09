@@ -1,4 +1,5 @@
 import { Effect } from "effect";
+import * as v from "valibot";
 import { storageShutdownSignal } from "../../utils/fatal-storage";
 import { originPatternFromUrl } from "../../utils/backend-permissions";
 import {
@@ -13,6 +14,7 @@ import {
   recordMutationSuccess,
   recordMutationOutcome,
   storageHealthy,
+  type ProviderFailure,
   type TransportError,
 } from "./effect-adapter";
 import { reportRemoteOutcome } from "../../utils/fatal-storage";
@@ -26,6 +28,13 @@ export function isOAuthRejection(data: unknown): boolean {
       String(data.error),
     )
   );
+}
+
+export function validate<S extends v.GenericSchema>(schema: S, data: unknown, operation: string) {
+  const parsed = v.safeParse(schema, data);
+  return parsed.success
+    ? Effect.succeed(parsed.output)
+    : Effect.fail(new InvalidResponseFailure(operation));
 }
 
 export function retryAfterDelay(headers: Headers, fallback: number, now = Date.now()): number {
@@ -74,6 +83,10 @@ export interface EffectRequest {
   readonly mutation?: "save" | "delete";
   readonly beforeAttempt?: Effect.Effect<void, TransportError>;
   readonly responseKind?: "token" | "response";
+  /** Returns the raw body instead of parsing JSON. */
+  readonly format?: "text";
+  /** Maps a provider error envelope in any parsed body to a definitive rejection. */
+  readonly providerFailure?: (data: unknown) => ProviderFailure | undefined;
 }
 
 // Native fetch stays private; timeout covers headers and the consumed body in one attempt.
@@ -82,7 +95,12 @@ export const requestJson = Effect.fn("transport.request")(function* (request: Ef
   const timeoutMs = request.timeoutMs ?? 30000;
   let confirmed = false;
   const unknownOutcome = (
-    failure: NetworkFailure | TimeoutFailure | InvalidResponseFailure | HttpFailure,
+    failure:
+      | NetworkFailure
+      | TimeoutFailure
+      | InvalidResponseFailure
+      | HttpFailure
+      | ProviderFailure,
   ) =>
     mutation && !confirmed
       ? failure.withMutation({ remoteOperation: mutation, remoteOutcome: "unknown" })
@@ -144,6 +162,15 @@ export const requestJson = Effect.fn("transport.request")(function* (request: Ef
           });
           if (isOAuthRejection(data)) return yield* Effect.fail(new CredentialsFailure(operation));
         }
+        if (request.providerFailure) {
+          // Best effort: an unreadable rejection body still fails with its HTTP status.
+          const data = yield* Effect.tryPromise(
+            async (): Promise<unknown> => JSON.parse(await response.text()),
+          ).pipe(Effect.orElseSucceed(() => undefined));
+          const provider = request.providerFailure(data);
+          if (provider)
+            return yield* Effect.fail(response.status >= 500 ? unknownOutcome(provider) : provider);
+        }
         return yield* Effect.fail(
           response.status >= 500
             ? unknownOutcome(new HttpFailure(operation, response.status))
@@ -164,9 +191,15 @@ export const requestJson = Effect.fn("transport.request")(function* (request: Ef
         catch: () => unknownOutcome(new NetworkFailure(operation)),
       });
       const data = yield* Effect.try({
-        try: (): unknown => JSON.parse(text),
+        try: (): unknown => (request.format === "text" ? text : JSON.parse(text)),
         catch: () => unknownOutcome(new InvalidResponseFailure(operation, request.responseKind)),
       });
+      const provider = request.providerFailure?.(data);
+      if (provider) {
+        if (mutation) yield* recordMutationOutcome();
+        yield* storageHealthy;
+        return yield* Effect.fail(provider);
+      }
       if (mutation && typeof data === "object" && data !== null && "error" in data) {
         yield* recordMutationOutcome();
         yield* storageHealthy;

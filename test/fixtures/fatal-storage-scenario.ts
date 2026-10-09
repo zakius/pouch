@@ -278,18 +278,34 @@ switch (scenario) {
   case "wallabag-save-storage":
   case "wallabag-delete-storage":
   case "wallabag-sync-storage":
-  case "wallabag-sync-timestamp": {
-    const wallabagSettings = {
-      ...DEFAULT_SETTINGS,
-      backend: "wallabag" as const,
-      apiConfig: {
-        url: "https://example.com",
-        clientId: "client",
-        clientSecret: "secret",
-        username: "user",
-        password: "password",
-      },
-    };
+  case "wallabag-sync-timestamp":
+  case "instapaper-save-storage":
+  case "instapaper-delete-storage":
+  case "instapaper-sync-storage":
+  case "instapaper-sync-timestamp": {
+    const instapaper = scenario.startsWith("instapaper");
+    const wallabagSettings = instapaper
+      ? {
+          ...DEFAULT_SETTINGS,
+          backend: "instapaper" as const,
+          apiConfig: {
+            consumerKey: "client",
+            consumerSecret: "secret",
+            username: "user",
+            password: "password",
+          },
+        }
+      : {
+          ...DEFAULT_SETTINGS,
+          backend: "wallabag" as const,
+          apiConfig: {
+            url: "https://example.com",
+            clientId: "client",
+            clientSecret: "secret",
+            username: "user",
+            password: "password",
+          },
+        };
     const accountKeys = getAccountStorageKeys(wallabagSettings);
     const saved = {
       id: 42,
@@ -303,28 +319,36 @@ switch (scenario) {
     await repo.initialize(wallabagSettings);
     await repo.getAllArticles();
     const before = structuredClone(Reflect.get(repo, "articlesCache"));
-    globalThis.fetch = async (_url, init) => {
+    const bookmark = { type: "bookmark", bookmark_id: 42, url: saved.url, title: saved.title };
+    globalThis.fetch = async (url, init) => {
       fetches++;
-      if (init?.method === "DELETE") {
+      if (instapaper && String(url).endsWith("/access_token"))
+        return new Response("oauth_token=token&oauth_token_secret=secret");
+      if (init?.method === "DELETE" || String(url).endsWith("/delete")) {
         remoteDeletes++;
-        return new Response(null, { status: 204 });
+        return instapaper ? new Response("[]") : new Response(null, { status: 204 });
       }
-      if (init?.method === "POST") {
+      if (instapaper ? String(url).endsWith("/add") : init?.method === "POST") {
         remoteSaves++;
-        return new Response(JSON.stringify(saved));
+        return new Response(JSON.stringify(instapaper ? [bookmark] : saved));
       }
       remoteReads++;
       return new Response(
-        JSON.stringify({ _embedded: { items: [saved] }, total: 1, limit: 30, pages: 1, page: 1 }),
+        JSON.stringify(
+          instapaper
+            ? { user: { type: "user", user_id: 1, username: "user" }, bookmarks: [bookmark] }
+            : { _embedded: { items: [saved] }, total: 1, limit: 30, pages: 1, page: 1 },
+        ),
       );
     };
-    failKey =
-      scenario === "wallabag-sync-timestamp" ? accountKeys.lastSyncTimestamp : accountKeys.articles;
-    if (scenario === "wallabag-save-storage") await rejectsFatal(() => repo.saveArticle(saved));
-    else if (scenario === "wallabag-delete-storage")
+    failKey = scenario.endsWith("-sync-timestamp")
+      ? accountKeys.lastSyncTimestamp
+      : accountKeys.articles;
+    if (scenario.endsWith("-save-storage")) await rejectsFatal(() => repo.saveArticle(saved));
+    else if (scenario.endsWith("-delete-storage"))
       await rejectsFatal(() => repo.deleteArticle(original.id));
     else await rejectsFatal(() => repo.syncWithAPI({ mode: "overwrite" }));
-    if (scenario !== "wallabag-sync-timestamp")
+    if (!scenario.endsWith("-sync-timestamp"))
       assert.deepEqual(Reflect.get(repo, "articlesCache"), before);
     else {
       assert.equal(Reflect.get(repo, "lastSyncTimestamp"), null);
