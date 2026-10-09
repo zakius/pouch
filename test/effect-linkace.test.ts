@@ -125,7 +125,8 @@ for (const [variant, body] of [
 }
 
 test("delete and connection test use their endpoints with the static token", async () => {
-  const fetchMock = api(() => json({ data: [] }));
+  // LinkAce answers a successful delete with an empty array.
+  const fetchMock = api((_url, init) => json(init?.method === "DELETE" ? [] : { data: [] }));
   const adapter = await acquire();
   await runOperation(adapter.deleteArticle(7));
   expect(await runOperation(adapter.testConnection)).toBe(true);
@@ -425,27 +426,6 @@ test("cancellation aborts an in-flight delete and reports an unknown outcome", a
   expect(signal?.aborted).toBe(true);
 });
 
-test("a nearly exhausted rate limit delays this account's next request until cancelled", async () => {
-  const reset = String(Math.ceil(Date.now() / 1000) + 30);
-  const fetchMock = api(() =>
-    json({ data: link(1) }, 200, { "X-RateLimit-Remaining": "2", "X-RateLimit-Reset": reset }),
-  );
-  const adapter = await acquire();
-  await runOperation(adapter.saveArticle({ url: "https://example.com/1", title: "Link 1" }));
-  const controller = new AbortController();
-  const waiting = failure(adapter.testConnection, controller.signal);
-  // Another account has its own pacing.
-  await runOperation((await acquire()).saveArticle({ url: "https://a", title: "a" }));
-  expect(fetchMock).toHaveBeenCalledTimes(2);
-  controller.abort();
-  expect(await waiting).toEqual({
-    error: "The operation was interrupted. Check its outcome before repeating it.",
-    code: "OPERATION_INTERRUPTED",
-    details: {},
-  });
-  expect(fetchMock).toHaveBeenCalledTimes(2);
-});
-
 test("draft connection test reports an actionable failure and stores no credentials", async () => {
   api(() => json({ message: "Unauthenticated." }, 401));
   const repo = new ArticlesRepository(new TokenManager());
@@ -465,7 +445,7 @@ test("repository save, delete, overwrite and update sync commit LinkAce outcomes
   let listed = [1, 2];
   api((_url, init) => {
     if (init?.method === "POST") return json({ data: link(3) });
-    if (init?.method === "DELETE") return json({});
+    if (init?.method === "DELETE") return json([]);
     return json({ data: listed.map(link) });
   });
   const ids = () => (storage[keys.articles] as { id: number }[]).map((a) => a.id).sort();

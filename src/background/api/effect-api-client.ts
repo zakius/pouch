@@ -92,22 +92,6 @@ export interface EffectRequest {
    * A body it accepts is a confirmed success, even if it carries an `error` key.
    */
   readonly confirms?: (data: unknown) => boolean;
-  /** Per-account pacing; a response reporting a nearly exhausted rate limit delays the next attempt. */
-  readonly rateGate?: RateGate;
-}
-
-export interface RateGate {
-  notBefore: number;
-}
-const lowRateLimitRemaining = 10;
-const maxRateGateDelayMs = 60000;
-
-function holdLowRateLimit(gate: RateGate, headers: Headers, fallback: number, now = Date.now()) {
-  const remaining = headers.get("X-RateLimit-Remaining") ?? headers.get("RateLimit-Remaining");
-  if (remaining === null || !/^\d+$/.test(remaining.trim())) return;
-  if (Number(remaining) >= lowRateLimitRemaining) return;
-  const delay = Math.min(retryAfterDelay(headers, fallback, now), maxRateGateDelayMs);
-  gate.notBefore = Math.max(gate.notBefore, now + delay);
 }
 
 // Native fetch stays private; timeout covers headers and the consumed body in one attempt.
@@ -127,11 +111,6 @@ export const requestJson = Effect.fn("transport.request")(function* (request: Ef
       ? failure.withMutation({ remoteOperation: mutation, remoteOutcome: "unknown" })
       : failure;
   const attempt = Effect.gen(function* () {
-    // The wait precedes the request, so cancelling it leaves no remote outcome to report.
-    if (request.rateGate) {
-      const wait = request.rateGate.notBefore - Date.now();
-      if (wait > 0) yield* Effect.sleep(wait).pipe(Effect.interruptible);
-    }
     yield* checkHostPermission(url, operation).pipe(Effect.interruptible);
     if (request.beforeAttempt) yield* request.beforeAttempt.pipe(Effect.interruptible);
     const authorization = request.authorization
@@ -163,8 +142,6 @@ export const requestJson = Effect.fn("transport.request")(function* (request: Ef
           }),
         catch: () => unknownOutcome(new NetworkFailure(operation)),
       });
-      if (request.rateGate)
-        holdLowRateLimit(request.rateGate, response.headers, request.rateDelayMs ?? 1000);
       if (mutation && !response.ok && response.status < 500) yield* recordMutationOutcome();
       if (!response.ok) yield* storageHealthy;
       if (response.status === 401 || response.status === 403) {

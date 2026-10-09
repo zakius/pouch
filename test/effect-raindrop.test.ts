@@ -452,34 +452,3 @@ for (const operation of ["save", "delete"] as const) {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 }
-
-for (const header of ["X-RateLimit-Remaining", "RateLimit-Remaining"]) {
-  test(`a low ${header} holds the next page until its reset, and the hold is cancellable`, async () => {
-    const seen = deferred<void>();
-    const reset = String(Math.ceil(Date.now() / 1000) + 30);
-    const fetchMock = api(() => {
-      seen.resolve();
-      return json(page(range(1, 50), 100), 200, { [header]: "9", "X-RateLimit-Reset": reset });
-    });
-    const controller = new AbortController();
-    const result = failure((await acquire()).sync(), controller.signal);
-    await seen.promise;
-    // Past the one-second page spacing, so only the rate-limit hold blocks page 1.
-    await new Promise((resolve) => setTimeout(resolve, 1200));
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    controller.abort();
-    expect((await result).code).toBe("OPERATION_INTERRUPTED");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-}
-
-test("a healthy rate limit does not hold the next page", async () => {
-  const fetchMock = api((url) =>
-    json(page(url.searchParams.get("page") === "0" ? range(1, 50) : [51], 51), 200, {
-      "X-RateLimit-Remaining": "10",
-      "X-RateLimit-Reset": String(Math.ceil(Date.now() / 1000) + 30),
-    }),
-  );
-  expect((await runOperation((await acquire()).sync())).articles).toHaveLength(51);
-  expect(fetchMock).toHaveBeenCalledTimes(2);
-});

@@ -80,7 +80,6 @@ export const createLinkaceAdapter = Effect.fn("linkace.acquire")(function* (
     return yield* Effect.fail(new ConfigurationFailure("linkace.acquire"));
   const apiUrl = parsed.output.apiConfig.url.replace(/\/+$/, "");
   const authorization = Effect.succeed(`Bearer ${token}`);
-  const rateGate = { notBefore: 0 };
 
   const request = (
     operation: string,
@@ -107,7 +106,6 @@ export const createLinkaceAdapter = Effect.fn("linkace.acquire")(function* (
       mutation: options.mutation,
       timeoutMs: options.timeoutMs,
       authorization,
-      rateGate,
       providerFailure: providerFailure(operation),
       confirms: confirms && ((data) => v.is(confirms, data)),
     });
@@ -140,22 +138,8 @@ export const createLinkaceAdapter = Effect.fn("linkace.acquire")(function* (
       });
     }),
     /**
-     * LinkAce Sync (DOCUMENTED INCREMENTAL SUPPORT)
-     *
-     * LinkAce API supports incremental sync via created_after parameter
-     * API docs: https://api-docs.linkace.org/
-     *
-     * PARAMETER: created_after
-     * - Format: ISO 8601 timestamp string
-     * - Filters links created after this timestamp
-     *
-     * LIMITATIONS:
-     * - Deletion tracking: UNKNOWN (not documented)
-     * - Update tracking: UNKNOWN (not documented)
-     *
-     * STRATEGY:
-     * - Use incremental sync for speed
-     * - Perform periodic full syncs to catch potential deletions
+     * Update sync sends `created_after`, but LinkAce's link list does not honour it and
+     * returns every link; the repository merges the full listing either way.
      *
      * Without a page total, a short page ends the listing.
      */
@@ -164,7 +148,7 @@ export const createLinkaceAdapter = Effect.fn("linkace.acquire")(function* (
       const query = new URLSearchParams({ per_page: String(perPage) });
       if (options?.lastSyncTimestamp && options.mode === "update") {
         query.set("created_after", options.lastSyncTimestamp);
-        logger.debug("Using LinkAce incremental sync with created_after parameter", {
+        logger.debug("Sending LinkAce created_after (not honoured by the list endpoint)", {
           lastSyncTimestamp: options.lastSyncTimestamp,
         });
       }

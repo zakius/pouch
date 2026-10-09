@@ -82,7 +82,6 @@ export const createRaindropAdapter = Effect.fn("raindrop.acquire")(function* (
   if (!apiKey || /[\r\n]/.test(apiKey))
     return yield* Effect.fail(new ConfigurationFailure("raindrop.acquire"));
   const authorization = Effect.succeed(`Bearer ${apiKey}`);
-  const rateGate = { notBefore: 0 };
 
   const request = (
     operation: string,
@@ -103,7 +102,6 @@ export const createRaindropAdapter = Effect.fn("raindrop.acquire")(function* (
       mutation: options.mutation,
       timeoutMs: options.timeoutMs,
       authorization,
-      rateGate,
       providerFailure: providerFailure(operation),
       confirms: confirms && ((data) => v.is(confirms, data)),
     });
