@@ -106,9 +106,15 @@ export class ArticlesRepository {
   }
 
   private get usesEffectAdapter(): boolean {
-    return ["bookmarks", "wallabag", "instapaper", "raindrop", "linkace", "karakeep"].includes(
-      this.settings.backend,
-    );
+    return [
+      "bookmarks",
+      "wallabag",
+      "instapaper",
+      "raindrop",
+      "linkace",
+      "karakeep",
+      "linkwarden",
+    ].includes(this.settings.backend);
   }
 
   private getApi(): Promise<ReadItLaterAPI> {
@@ -172,7 +178,8 @@ export class ArticlesRepository {
       this.settings.backend !== "instapaper" &&
       this.settings.backend !== "raindrop" &&
       this.settings.backend !== "linkace" &&
-      this.settings.backend !== "karakeep"
+      this.settings.backend !== "karakeep" &&
+      this.settings.backend !== "linkwarden"
     )
       throw new Error("Ready backend required");
     this.effectApi ??= runOperation(getReadyAdapter(this.settings, this.tokens)).catch(

@@ -4,6 +4,7 @@ import type {
   InstapaperSettings,
   KarakeepSettings,
   LinkaceSettings,
+  LinkwardenSettings,
   RaindropSettings,
   WallabagSettings,
 } from "./settings-schemas";
@@ -17,7 +18,10 @@ import {
   createKarakeepAdapter,
 } from "../background/api/adapters/karakeep-adapter";
 import { LinkaceAdapter, createLinkaceAdapter } from "../background/api/adapters/linkace-adapter";
-import { LinkwardenAdapter } from "../background/api/adapters/linkwarden-adapter";
+import {
+  LinkwardenAdapter,
+  createLinkwardenAdapter,
+} from "../background/api/adapters/linkwarden-adapter";
 import {
   RaindropAdapter,
   createRaindropAdapter,
@@ -57,7 +61,8 @@ export function getReadyAdapter(
     | InstapaperSettings
     | RaindropSettings
     | LinkaceSettings
-    | KarakeepSettings,
+    | KarakeepSettings
+    | LinkwardenSettings,
   tokens?: TokenManager,
 ) {
   switch (settings.backend) {
@@ -73,5 +78,7 @@ export function getReadyAdapter(
       return createLinkaceAdapter(settings);
     case "karakeep":
       return createKarakeepAdapter(settings);
+    case "linkwarden":
+      return createLinkwardenAdapter(settings);
   }
 }

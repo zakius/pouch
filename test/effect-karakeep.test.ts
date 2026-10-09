@@ -431,6 +431,23 @@ test("a repeated cursor fails as an incomplete snapshot instead of looping", asy
   expect(fetchMock).toHaveBeenCalledTimes(2);
 });
 
+test("a cursor cycle fails as an incomplete snapshot instead of paging forever", async () => {
+  const next: Record<string, string> = { "": "A", A: "B", B: "A" };
+  const fetchMock = api((url) =>
+    json(page([1], next[url.searchParams.get("cursor") ?? ""] ?? null)),
+  );
+  const result = await failure(await run("sync"));
+  expect(result).toMatchObject({
+    code: "IncompleteSnapshotFailure",
+    details: { operation: "karakeep.sync" },
+  });
+  expect(fetchMock.mock.calls.map((call) => urlOf(call).searchParams.get("cursor"))).toEqual([
+    null,
+    "A",
+    "B",
+  ]);
+});
+
 test("cancellation during the page wait stops pagination without another request", async () => {
   const seen = deferred<void>();
   const fetchMock = api(() => {
