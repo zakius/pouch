@@ -20,6 +20,7 @@ const fetchCalls: string[] = [];
 Object.assign(globalThis, {
   browser: {
     runtime: {
+      getURL: (path: string) => path,
       onMessage: { addListener: (l: Listener) => listeners.push(l) },
       onMessageExternal: { addListener: () => {} },
       sendMessage: async () => {},

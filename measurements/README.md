@@ -49,7 +49,7 @@ error effect(floatingEffect): This Effect value is neither yielded nor used in a
 
 The proof fixture no longer exists. Clean product diagnostics checked 34 files and reported zero errors, warnings, and messages. The proof used the same project configuration and CLI command as the quality checks.
 
-The temporary Promise bridges in `effect-adapter.ts`, `BookmarksAdapter`, and repository sync/commit coordination have removal tracked by #81, after #80 migrates shared coordination. Ready bookmark save/delete and connection testing already compose native Effects. The browser boundary classifies Promise rejections. Synchronous implementation exceptions, Effect defects, and interruption remain separate at the runner. Fatal writes retain the #72 shutdown latch and known remote outcome.
+#81 removed the temporary Promise bridges. Every background listener runs one Effect through `runOperation`, which keeps operational failures, fatal storage, defects, and interruption separate. Fatal writes retain the #72 shutdown latch and known remote outcome.
 
 # Bookmarks pilot (#73)
 
@@ -106,3 +106,22 @@ Validation: 265 tests pass with 760 assertions across 17 files. The suite retain
 Typecheck, type-aware lint, source and modified-test formatting, and strict Effect diagnostics pass. Diagnostics check 35 product files with zero errors, warnings, or messages. A temporary floating Effect fails diagnostics with effect(floatingEffect) and exit 1. The developer deleted that fixture. Firefox validation reports zero errors/notices and the existing Android minimum-version warning.
 
 T3 preview opens HeadlessChrome 154.0.8037.92, but the page exposes neither browser nor chrome.runtime. The available tools provide no extension installation or Firefox control. Live extension install/startup, worker wake, permission gestures, and browser lifecycle remain unverified. Tests cover credentials isolation, request cancellation, fatal shutdown, and alarm behavior under mocks. They do not establish native browser compatibility. The permission request still runs directly from the user gesture.
+
+## Final integration (#81)
+
+[effect-81-final.json](./effect-81-final.json) records `main` (`4a43fd5`, before the migration), the #74 pilot (`ada3f4c`), and this branch (`096b407`). It uses the procedure above with one change: the startup mock now provides `runtime.getURL`, which the background needs for its notification icon. Other sessions kept the 1-minute load near 28 on 32 cores for over 40 minutes. The three checkouts were therefore measured interleaved in two rounds under the same load, 20 samples per target each. Compare the times relative to each other. Their absolute values are higher than the earlier low-load records.
+
+| Build | Firefox JS / background / ZIP (bytes) | Chromium JS / background / ZIP (bytes) | Mocked startup median, Firefox / Chromium |
+|---|---|---|---|
+| `main` | 150,590 / 75,898 / 49,827 | 150,701 / 75,935 / 58,920 | 9.9 / 9.3 ms |
+| #74 pilot | 292,781 / 148,659 / 96,656 | 292,892 / 148,696 / 105,715 | 22.4 / 17.8 ms |
+| #81 final | 185,260 / 140,589 / 65,260 | 185,371 / 140,626 / 74,405 | 23.7 / 20.8 ms |
+
+- All seven adapters fit in a smaller background than the pilot's two adapters plus the legacy HTTP client: 140.6 KB against 148.7 KB.
+- The options page reads its forms from `settings-schemas.ts` and bundles no Effect code. It drops from 121.7 KB in the pilot to 21.1 KB, below the 54.1 KB on `main`.
+- Total JavaScript is 23% above `main` and 37% below the pilot.
+- Under the same load, mocked startup is about 1 ms (Firefox) and 3 ms (Chromium) slower than the pilot, and about 2.2 times `main`.
+
+An earlier pair of runs at load 2.9 is not recorded here, because it overlapped this branch's test suite. It measured `main` at 4.7 / 4.3 ms and this branch at 11.0 / 9.7 ms. The recorded low-load pilot was 9.9 / 7.8 ms.
+
+**Decision: accept.** The packaged extension is smaller than the pilot and only 23% larger than `main`. The added startup is a few milliseconds of module evaluation and the Effect runtime, under a mocked host. In real Chromium 150, the worker restarted and answered `getArticles` within the smoke run. No step waited on startup. The size and typed-recovery gains outweigh this cost. This judgment does not cover real worker-wake latency, which nobody measured.
