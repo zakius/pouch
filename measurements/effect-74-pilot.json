@@ -1,0 +1,46 @@
+{
+  "commit": "ada3f4cbe794239e955f959826ac171d4817c5f3",
+  "environment": {
+    "platform": "Linux-7.2.4-pikaos-x86_64-with-glibc2.44",
+    "bun": "1.4.3"
+  },
+  "host": "Bun with mocked browser APIs; cold process import to first getArticles response, not extension/browser startup",
+  "samples": {
+    "firefox": {
+      "jsBytes": 292781,
+      "backgroundBytes": 148659,
+      "packageBytes": 96656,
+      "startupMs": [
+        17.228991,
+        9.983211,
+        9.917806,
+        9.580053,
+        9.892938,
+        10.04578,
+        9.866999,
+        9.895754,
+        9.661529,
+        10.306516
+      ],
+      "medianMs": 9.906780000000001
+    },
+    "chromium": {
+      "jsBytes": 292892,
+      "backgroundBytes": 148696,
+      "packageBytes": 105715,
+      "startupMs": [
+        14.289888000000001,
+        7.901358000000001,
+        7.78651,
+        7.883655,
+        7.789356000000001,
+        7.94979,
+        7.851163000000001,
+        7.7880519999999995,
+        7.725794,
+        7.692721
+      ],
+      "medianMs": 7.820259500000001
+    }
+  }
+}

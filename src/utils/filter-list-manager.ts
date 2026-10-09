@@ -1,3 +1,9 @@
+import {
+  assertStorageHealthy,
+  setLocal,
+  removeLocal,
+  storageShutdownSignal,
+} from "./fatal-storage";
 /**
  * Filter List Manager
  *
@@ -62,6 +68,7 @@ export function resetFilterListSources(): void {
 }
 
 export async function loadFilterListContent(url: string): Promise<FilterListContent> {
+  assertStorageHealthy();
   try {
     if (url.startsWith("data:")) {
       const base64Match = url.match(/^data:text\/plain;base64,(.+)$/);
@@ -104,7 +111,7 @@ export async function loadFilterListContent(url: string): Promise<FilterListCont
     // request is CORS-simple (plain GET, no custom headers), so the background
     // page fetch works without any host permission. ETag is not
     // CORS-exposed, so it reads back as null; cache expiry is the 24h TTL.
-    const response = await fetch(url);
+    const response = await fetch(url, { signal: storageShutdownSignal() });
     if (!response.ok) {
       throw new Error(`Failed to fetch filter list: ${response.status}`);
     }
@@ -154,7 +161,7 @@ export async function saveCachedFilterLists(
 ): Promise<void> {
   try {
     const cacheExpiry = Date.now() + CACHE_DURATION_MS;
-    await browser.storage.local.set({
+    await setLocal("persist filter cache", {
       [CACHE_KEY]: rules,
       [`${CACHE_KEY}_version`]: CACHE_VERSION,
       [CACHE_EXPIRY_KEY]: cacheExpiry,
@@ -162,13 +169,14 @@ export async function saveCachedFilterLists(
     });
     logger.info(`Cached ${rules.length} URL cleaning rules (expires in 24h)`);
   } catch (error) {
+    assertStorageHealthy();
     logger.warn("Failed to cache rules:", error);
   }
 }
 
 export async function clearFilterListCache(): Promise<void> {
   try {
-    await browser.storage.local.remove([
+    await removeLocal("clear filter cache", [
       CACHE_KEY,
       `${CACHE_KEY}_version`,
       CACHE_EXPIRY_KEY,
@@ -176,6 +184,7 @@ export async function clearFilterListCache(): Promise<void> {
     ]);
     logger.info("Cleared filter list cache");
   } catch (error) {
+    assertStorageHealthy();
     logger.warn("Failed to clear cache:", error);
   }
 }
@@ -190,6 +199,7 @@ export async function loadFilterLists(): Promise<{
   const versions: Record<string, string> = {};
 
   for (const source of filterListSources) {
+    assertStorageHealthy();
     try {
       const content = await loadFilterListContent(source.url);
       if (content.content) {
@@ -224,6 +234,7 @@ export function initializeFilterListManager(): void {
 }
 
 export async function refreshFilterLists(): Promise<void> {
+  assertStorageHealthy();
   logger.info("Refreshing filter lists...");
   await clearFilterListCache();
   clearCanonicalUrlCache();
@@ -231,10 +242,12 @@ export async function refreshFilterLists(): Promise<void> {
 }
 
 export async function initializeUrlCleanerWithRemoteLists(): Promise<void> {
+  assertStorageHealthy();
   initializeFilterListManager();
 
   const cachedRules = await loadCachedFilterLists();
   if (cachedRules && cachedRules.length > 0) {
+    assertStorageHealthy();
     initializeWithFilterRules(cachedRules);
     logger.info(`Initialized URL cleaner with ${cachedRules.length} cached filter rules`);
     return;
@@ -247,5 +260,6 @@ export async function initializeUrlCleanerWithRemoteLists(): Promise<void> {
     await saveCachedFilterLists(rules, versions);
   }
 
+  assertStorageHealthy();
   initializeWithFilterRules(rules);
 }

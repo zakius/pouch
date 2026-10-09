@@ -1,22 +1,92 @@
+import { Cause, Effect, Exit, Fiber, Semaphore } from "effect";
+import {
+  localRead,
+  storageHealthy,
+  storageHealthyAfter,
+  storagePromise,
+  type AdapterError,
+  type BrowserFailure,
+  type EffectAdapter,
+  type FatalStorageFailure,
+} from "./api/effect-adapter";
+import {
+  reportRemoteOutcome,
+  setLocal,
+  removeLocal,
+  storageShutdownSignal,
+  type RemoteOutcome,
+} from "../utils/fatal-storage";
 import type { Article } from "../types/common";
-import { getAdapter } from "../utils/adapter-factory";
-import { hasBackendPermissions, missingPermissionMessage } from "../utils/backend-permissions";
+import { getReadyAdapter } from "../utils/adapter-factory";
 import { logger } from "../utils/logger";
 import type { Settings } from "../utils/settings";
 import { canonicalizeUrl } from "../utils/url-helpers";
-import type {
-  ReadItLaterAPI,
-  SyncMode,
-  SyncOptions,
-  SyncResult,
-} from "./api/read-it-later-adapter";
+import type { SyncOptions, SyncResult } from "./api/read-it-later-adapter";
 import type { TokenManager } from "./token-manager";
 
-type PendingOperation = {
-  type: "save" | "delete";
-  article?: Article;
-  articleId?: number | string;
-  timestamp: number;
+type Mutation = { type: "save"; article: Article } | { type: "delete"; id: number | string };
+type Remote = [outcome: RemoteOutcome, operation: string];
+type Synced = { items: Article[]; total: number; syncResult: SyncResult };
+type LocalError = BrowserFailure | FatalStorageFailure;
+
+const canonical = (url: string) => storagePromise(() => canonicalizeUrl(url));
+
+/**
+ * Runs work once for concurrent callers in a detached fiber. Interrupting one caller leaves the
+ * work running for the others, and every caller sees its original success or failure. Fatal
+ * storage shutdown still interrupts it.
+ */
+class Shared<A, E> {
+  private fiber: Fiber.Fiber<A, E> | undefined;
+  constructor(private readonly keepSuccess: boolean) {}
+
+  get running(): boolean {
+    return this.fiber !== undefined;
+  }
+
+  join(work: () => Effect.Effect<A, E>): Effect.Effect<A, E> {
+    return Effect.suspend(() => {
+      if (this.fiber) return Fiber.join(this.fiber);
+      return Effect.forkDetach(Effect.suspend(work)).pipe(
+        Effect.flatMap((fiber) => {
+          // The fork can yield to another caller first; a fiber that hasn't started costs nothing.
+          if (this.fiber) {
+            fiber.interruptUnsafe();
+            return Fiber.join(this.fiber);
+          }
+          this.fiber = fiber;
+          const shutdown = storageShutdownSignal();
+          const stop = () => fiber.interruptUnsafe();
+          shutdown.addEventListener("abort", stop, { once: true });
+          if (shutdown.aborted) stop();
+          // Runs at once if the fiber already exited.
+          fiber.addObserver((exit) => {
+            shutdown.removeEventListener("abort", stop);
+            // Callers may all have left; Effect does not report a detached fiber that dies.
+            if (Exit.isFailure(exit) && Cause.hasDies(exit.cause))
+              logger.error("Shared background work died:", Cause.pretty(exit.cause));
+            if (this.fiber === fiber && !(this.keepSuccess && Exit.isSuccess(exit)))
+              this.fiber = undefined;
+          });
+          return Fiber.join(fiber);
+        }),
+      );
+    });
+  }
+}
+
+/** One account's state. A different account identity retires it, so its late work never commits. */
+type Account = {
+  /** Same-identity settings changes apply in place, so in-flight work still commits. */
+  settings: Settings;
+  readonly keys: AccountStorageKeys;
+  retired: boolean;
+  readonly adapter: Shared<EffectAdapter, AdapterError>;
+  readonly sync: Shared<Synced, AdapterError>;
+  articles?: Article[];
+  timestamps?: { last: string | null; full: number | null };
+  /** Mutations committed while a sync fetches; its commit replays them onto the snapshot. */
+  pending: Mutation[];
 };
 
 export interface AccountStorageKeys {
@@ -45,126 +115,274 @@ export function getAccountStorageKeys(settings: Settings): AccountStorageKeys {
 }
 
 /** Removes cached articles and sync timestamps left behind by other (or pre-per-account) accounts. */
-export async function removeStaleAccountKeys(settings: Settings): Promise<void> {
+export const removeStaleAccountKeys = Effect.fn("repository.removeStale")(function* (
+  settings: Settings,
+) {
   const current = new Set(Object.values(getAccountStorageKeys(settings)));
   const prefixes = ["articles", "lastSyncTimestamp", "lastFullSyncTimestamp"];
-  const stale = Object.keys(await browser.storage.local.get(null)).filter(
+  const stale = Object.keys(yield* localRead("read stale account data", null)).filter(
     (key) => !current.has(key) && prefixes.some((p) => key === p || key.startsWith(`${p}:`)),
   );
-  if (stale.length > 0) {
-    await browser.storage.local.remove(stale);
-  }
-}
+  if (stale.length > 0)
+    yield* storagePromise(() => removeLocal("remove stale account data", stale));
+});
 
 export class ArticlesRepository {
-  private api: ReadItLaterAPI | null = null;
-  private apiInitPromise: Promise<ReadItLaterAPI> | null = null;
-  private settings!: Settings;
-  private lastFullSyncTimestamp: number | null = null;
-  private lastSyncTimestamp: string | null = null;
-  private syncInProgress: Promise<void> | null = null;
-  private pendingOperations: PendingOperation[] = [];
-  private articlesCache: Article[] | null = null;
-  private commitQueue: Promise<unknown> = Promise.resolve();
-  private storageKeys: AccountStorageKeys = {
-    articles: "articles",
-    lastSyncTimestamp: "lastSyncTimestamp",
-    lastFullSyncTimestamp: "lastFullSyncTimestamp",
-  };
+  private account: Account | undefined;
+  /** Short local commits run one at a time across accounts; network work never holds it. */
+  private readonly commits = Semaphore.makeUnsafe(1);
 
   /** `tokens` defaults to the shared, persisted TokenManager; pass a separate one to isolate credentials. */
   constructor(private readonly tokens?: TokenManager) {}
 
-  async initialize(settings: Settings): Promise<void> {
+  initialize(settings: Settings): void {
     logger.info("Initializing ArticlesRepository with settings:", settings);
-    this.settings = settings;
-    this.api = null;
-    this.apiInitPromise = null;
-    this.storageKeys = getAccountStorageKeys(settings);
-    await this.loadSyncTimestamps();
-  }
-
-  private getApi(): Promise<ReadItLaterAPI> {
-    if (this.api) {
-      return Promise.resolve(this.api);
+    if (
+      this.account &&
+      getAccountIdentity(this.account.settings) === getAccountIdentity(settings)
+    ) {
+      this.account.settings = settings;
+      return;
     }
-    if (!this.apiInitPromise) {
-      logger.debug("API not initialized, creating adapter now...");
-      this.apiInitPromise = (async () => {
-        if (!(await hasBackendPermissions(this.settings))) {
-          throw new Error(missingPermissionMessage(this.settings));
-        }
-        const api = getAdapter(this.settings.backend, this.tokens);
-        await api.initialize(this.settings);
-        logger.info("On-demand API initialization completed");
-        this.api = api;
-        return api;
-      })().catch((error: unknown) => {
-        this.apiInitPromise = null;
-        logger.error("Failed to initialize API:", error);
-        throw new Error(
-          `Failed to initialize ${this.settings.backend} API: ${error instanceof Error ? error.message : "Unknown error"}`,
-        );
-      });
-    }
-    return this.apiInitPromise;
+    if (this.account) this.account.retired = true;
+    this.account = {
+      settings,
+      keys: getAccountStorageKeys(settings),
+      retired: false,
+      adapter: new Shared(true),
+      sync: new Shared(false),
+      pending: [],
+    };
   }
 
-  async testConnection(): Promise<boolean> {
-    const api = await this.getApi();
-    return api.testConnection();
+  /**
+   * Removes other accounts' keys after in-flight commits finish, so a retired account's commit
+   * that already passed its retired check cannot write its keys back.
+   */
+  removeStaleKeys(settings: Settings): Effect.Effect<void, LocalError> {
+    return Semaphore.withPermit(this.commits, removeStaleAccountKeys(settings));
   }
 
-  async getArticle(id: number | string): Promise<Article | undefined> {
-    const articles = await this.getAllArticles();
-    // Ids are compared as strings: the storage may hold entries written by
-    // versions that used the other type, and bookmark ids are strings in both
-    // APIs (GUIDs on Firefox, decimal strings on Chromium).
-    return articles.find((a) => String(a.id) === String(id));
-  }
-
-  async getAllArticles(): Promise<Article[]> {
-    if (!this.articlesCache) {
-      const result = await browser.storage.local.get([this.storageKeys.articles]);
-      const articles: Article[] = result?.[this.storageKeys.articles] || [];
-      this.articlesCache = articles;
-      return articles;
-    }
-    return this.articlesCache;
-  }
-
-  private async storeArticles(articles: Article[]): Promise<void> {
-    this.articlesCache = articles;
-    await browser.storage.local.set({ [this.storageKeys.articles]: articles });
-  }
-
-  private enqueueCommit<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.commitQueue.then(operation);
-    this.commitQueue = result.then(
-      () => undefined,
-      () => undefined,
+  private active(): Effect.Effect<Account> {
+    return Effect.suspend(() =>
+      this.account
+        ? Effect.succeed(this.account)
+        : Effect.die("ArticlesRepository is not initialized"),
     );
-    return result;
   }
 
-  private async sameUrl(a: string, b: string): Promise<boolean> {
-    if (!this.settings.normalizeOnCompare) {
-      return a === b;
-    }
-    return (await canonicalizeUrl(a)) === (await canonicalizeUrl(b));
+  private adapter(account: Account): Effect.Effect<EffectAdapter, AdapterError> {
+    return account.adapter.join(() => getReadyAdapter(account.settings, this.tokens));
   }
 
-  async findSaved(url: string): Promise<Article | undefined> {
-    const articles = await this.getAllArticles();
+  readonly saveArticle = Effect.fn("repository.save")(function* (
+    this: ArticlesRepository,
+    article: Pick<Article, "url" | "title">,
+  ) {
+    const account = yield* this.active();
+    const api = yield* this.adapter(account);
+    const canonicalUrl = yield* canonical(article.url);
+    // Browser mutations cannot be cancelled after submission; commit and bookkeeping must finish together.
+    return yield* Effect.gen({ self: this }, function* () {
+      const savedArticle = yield* api.saveArticle({
+        url: account.settings.normalizeOnSave ? canonicalUrl : article.url,
+        title: article.title,
+      });
+      reportRemoteOutcome("save", "succeeded");
+      const saved = { ...savedArticle, canonicalUrl };
+      yield* this.commit(account, ["succeeded", "save"], { type: "save", article: saved });
+      return saved;
+    }).pipe(Effect.uninterruptible);
+  });
+  readonly deleteArticle = Effect.fn("repository.delete")(function* (
+    this: ArticlesRepository,
+    id: number | string,
+  ) {
+    const account = yield* this.active();
+    const api = yield* this.adapter(account);
+    return yield* Effect.gen({ self: this }, function* () {
+      yield* api.deleteArticle(id);
+      reportRemoteOutcome("delete", "succeeded");
+      yield* this.commit(account, ["succeeded", "delete"], { type: "delete", id });
+      return { success: true, id };
+    }).pipe(Effect.uninterruptible);
+  });
+  /** Concurrent callers share one fetch and its committed result or failure. */
+  readonly syncWithAPI = Effect.fn("repository.sync")(function* (
+    this: ArticlesRepository,
+    options?: SyncOptions,
+  ) {
+    const account = yield* this.active();
+    return yield* account.sync.join(() => this.syncAccount(account, options));
+  });
+  readonly testConnection = Effect.gen({ self: this }, function* () {
+    const api = yield* this.adapter(yield* this.active());
+    yield* storageHealthy;
+    return yield* api.testConnection;
+  });
 
-    for (const article of articles) {
-      if (await this.sameUrl(article.url, url)) {
-        return article;
+  readonly getAllArticles: Effect.Effect<Article[], LocalError> = Effect.gen(
+    { self: this },
+    function* () {
+      return yield* this.articles(yield* this.active());
+    },
+  );
+
+  private articles(account: Account): Effect.Effect<Article[], LocalError> {
+    return Effect.gen(function* () {
+      yield* storageHealthy;
+      if (account.articles) return account.articles;
+      const result = yield* localRead("read local articles", [account.keys.articles]);
+      // A commit may have published while this read was pending; it is newer.
+      account.articles ??= (result[account.keys.articles] as Article[] | undefined) || [];
+      return account.articles;
+    });
+  }
+
+  /**
+   * Serializes one local change: reads the committed articles, persists the change, then
+   * publishes it. A failed write latches fatal storage, which fails queued and later commits.
+   */
+  private commit(
+    account: Account,
+    remote: Remote | undefined,
+    change: Mutation | ((articles: Article[]) => Effect.Effect<Article[], LocalError>),
+    after?: Effect.Effect<void, FatalStorageFailure>,
+  ): Effect.Effect<void, LocalError> {
+    const [outcome, operation] = remote ?? [undefined, undefined];
+    const work = Effect.gen({ self: this }, function* () {
+      // A retired account's late work must not reach storage the next account may share.
+      if (account.retired) return;
+      yield* storageHealthyAfter(outcome, operation);
+      const articles = yield* this.articles(account);
+      const next =
+        typeof change === "function"
+          ? yield* change(articles)
+          : yield* this.apply(account, articles, change);
+      if (next !== articles) {
+        yield* storagePromise(() =>
+          setLocal("persist articles", { [account.keys.articles]: next }, outcome, operation),
+        );
+        yield* storageHealthyAfter(outcome, operation);
+        account.articles = next;
       }
-    }
-
-    return undefined;
+      if (typeof change !== "function" && account.sync.running) account.pending.push(change);
+      if (after) yield* after;
+    });
+    return Semaphore.withPermit(this.commits, work).pipe(Effect.uninterruptible);
   }
+
+  private apply(
+    account: Account,
+    articles: Article[],
+    mutation: Mutation,
+  ): Effect.Effect<Article[], FatalStorageFailure> {
+    return Effect.gen({ self: this }, function* () {
+      if (mutation.type === "delete") {
+        // Ids are compared as strings: storage may hold entries written by versions that used the
+        // other type, and bookmark ids are strings (GUIDs on Firefox, decimal strings on Chromium).
+        const target = String(mutation.id);
+        return articles.filter((a) => String(a.id) !== target);
+      }
+      for (const a of articles) {
+        if (yield* this.sameUrl(account, a.url, mutation.article.url)) {
+          logger.debug("Article already exists in cache, skipping add:", mutation.article.url);
+          return articles;
+        }
+      }
+      return [mutation.article, ...articles];
+    });
+  }
+
+  private syncAccount(
+    account: Account,
+    options?: SyncOptions,
+  ): Effect.Effect<Synced, AdapterError> {
+    return Effect.gen({ self: this }, function* () {
+      account.pending = [];
+      const api = yield* this.adapter(account);
+      const timestamps = yield* this.timestamps(account);
+      const syncOptions: SyncOptions = {
+        ...options,
+        lastSyncTimestamp: timestamps.last ?? undefined,
+        lastFullSyncTimestamp: timestamps.full ?? undefined,
+        isBrowserIdle: options?.isBrowserIdle ?? (yield* Effect.promise(() => isBrowserIdle())),
+      };
+      logger.info("Starting cache sync with API", {
+        providedMode: options?.mode,
+        lastSync: timestamps.last,
+        lastFullSync: timestamps.full ? new Date(timestamps.full).toISOString() : null,
+        isBrowserIdle: syncOptions.isBrowserIdle,
+      });
+
+      const fetchStartedAt = new Date().toISOString();
+      yield* storageHealthy;
+      const syncResult = yield* api.sync(syncOptions);
+      yield* storageHealthy;
+      logger.debug(
+        `Synced ${syncResult.articles.length} articles from API using ${syncResult.mode} mode`,
+        { metadata: syncResult.metadata },
+      );
+      const fetched = yield* Effect.forEach(syncResult.articles, (article) =>
+        canonical(article.url).pipe(
+          Effect.map((canonicalUrl) =>
+            account.settings.normalizeOnSave
+              ? { ...article, canonicalUrl, url: canonicalUrl }
+              : { ...article, canonicalUrl },
+          ),
+        ),
+      );
+
+      yield* this.commit(
+        account,
+        ["succeeded", "sync"],
+        (articles) =>
+          Effect.gen({ self: this }, function* () {
+            let next =
+              syncResult.mode === "overwrite"
+                ? fetched
+                : merge(account.settings, articles, fetched);
+            // Mutations committed after the fetch started may be missing from the snapshot.
+            if (account.pending.length > 0)
+              logger.info(`Re-applying ${account.pending.length} pending operations after sync`);
+            for (const mutation of account.pending)
+              next = yield* this.apply(account, next, mutation);
+            account.pending = [];
+            return next;
+          }),
+        this.storeTimestamps(account, {
+          full: syncResult.mode === "overwrite" ? Date.parse(fetchStartedAt) : timestamps.full,
+          last: fetchStartedAt,
+        }),
+      );
+      const items = yield* this.articles(account);
+      return { items, total: items.length, syncResult };
+    }).pipe(
+      Effect.tapError((error) =>
+        Effect.sync(() => logger.error("Error syncing cache with API:", error)),
+      ),
+    );
+  }
+
+  private sameUrl(
+    account: Account,
+    a: string,
+    b: string,
+  ): Effect.Effect<boolean, FatalStorageFailure> {
+    if (!account.settings.normalizeOnCompare) return Effect.succeed(a === b);
+    return Effect.zipWith(canonical(a), canonical(b), (x, y) => x === y);
+  }
+
+  readonly findSaved = Effect.fn("repository.findSaved")(function* (
+    this: ArticlesRepository,
+    url: string,
+  ) {
+    const account = yield* this.active();
+    for (const article of yield* this.articles(account)) {
+      if (yield* this.sameUrl(account, article.url, url)) return article;
+    }
+    return undefined;
+  });
 
   private filterBySearch(articles: Article[], search?: string): Article[] {
     if (!search) {
@@ -179,12 +397,13 @@ export class ArticlesRepository {
     });
   }
 
-  async getRecentArticles(
+  readonly getRecentArticles = Effect.fn("repository.recent")(function* (
+    this: ArticlesRepository,
     page = 1,
     perPage = 30,
     search?: string,
-  ): Promise<{ items: Article[]; page: number; pages: number; total: number }> {
-    const articles = this.filterBySearch(await this.getAllArticles(), search).sort((a, b) =>
+  ) {
+    const articles = this.filterBySearch(yield* this.getAllArticles, search).sort((a, b) =>
       b.created_at > a.created_at ? 1 : -1,
     );
     const articlesNumber = articles.length;
@@ -199,361 +418,81 @@ export class ArticlesRepository {
       pages,
       total: articlesNumber,
     };
-  }
+  });
 
-  async saveArticle(article: Pick<Article, "url" | "title">): Promise<Article> {
-    const api = await this.getApi();
-    logger.info("Saving article:", article);
-
-    const canonicalUrl = await canonicalizeUrl(article.url);
-
-    const urlToSave = this.settings.normalizeOnSave ? canonicalUrl : article.url;
-
-    try {
-      const savedArticle = await api.saveArticle({
-        url: urlToSave,
-        title: article.title,
-      });
-
-      const articleWithCanonicalUrl = {
-        ...savedArticle,
-        canonicalUrl: canonicalUrl,
-      };
-
-      logger.debug("Saved article, now adding to cache", articleWithCanonicalUrl);
-      await this.addArticle(articleWithCanonicalUrl);
-
-      // Track this operation if sync is in progress
-      if (this.syncInProgress) {
-        this.pendingOperations.push({
-          type: "save",
-          article: articleWithCanonicalUrl,
-          timestamp: Date.now(),
-        });
-      }
-
-      return articleWithCanonicalUrl;
-    } catch (error) {
-      logger.error("Error saving article through cache:", error);
-
-      throw error;
-    }
-  }
-
-  async deleteArticle(id: number | string): Promise<{ success: boolean; id: string | number }> {
-    const api = await this.getApi();
-    logger.debug("Deleting article through cache:", id);
-    if (!id) {
-      logger.error("Cannot delete article: No ID provided");
-      throw new Error("Article ID is required");
-    }
-    try {
-      await api.deleteArticle(id);
-      await this.removeArticle(id);
-      logger.debug("Deleted article from API", id);
-
-      // Track this operation if sync is in progress
-      if (this.syncInProgress) {
-        this.pendingOperations.push({
-          type: "delete",
-          articleId: id,
-          timestamp: Date.now(),
-        });
-      }
-
-      return { success: true, id };
-    } catch (error) {
-      logger.error("Error deleting article through cache:", error);
-      throw error;
-    }
-  }
-
-  async syncWithAPI(
-    options?: SyncOptions,
-  ): Promise<{ items: Article[]; total: number; syncResult: SyncResult }> {
-    if (this.syncInProgress) {
-      logger.debug("Sync already in progress, waiting for completion");
-      await this.syncInProgress;
-      const currentArticles = await this.getAllArticles();
-      return {
-        items: currentArticles,
-        total: currentArticles.length,
-        syncResult: {
-          articles: currentArticles,
-          mode: "overwrite",
-          metadata: {
-            totalFetched: 0,
-            totalProcessed: 0,
-            lastSyncTimestamp: new Date().toISOString(),
-          },
-        },
-      };
-    }
-
-    // Clear pending operations at start of sync
-    this.pendingOperations = [];
-
-    const syncPromise = (async (): Promise<{
-      items: Article[];
-      total: number;
-      syncResult: SyncResult;
-    }> => {
-      try {
-        const api = await this.getApi();
-
-        // Prepare sync options with history data
-        const syncOptions: SyncOptions = {
-          ...options,
-          lastSyncTimestamp: this.lastSyncTimestamp ?? undefined,
-          lastFullSyncTimestamp: this.lastFullSyncTimestamp ?? undefined,
-          isBrowserIdle: options?.isBrowserIdle ?? (await this.isBrowserIdle()),
-        };
-
-        logger.info("Starting cache sync with API", {
-          providedMode: options?.mode,
-          lastSync: this.lastSyncTimestamp,
-          lastFullSync: this.lastFullSyncTimestamp
-            ? new Date(this.lastFullSyncTimestamp).toISOString()
-            : null,
-          isBrowserIdle: syncOptions.isBrowserIdle,
-        });
-
-        const fetchStartedAt = new Date().toISOString();
-        const syncResult = await api.sync(syncOptions);
-        logger.debug(
-          `Synced ${syncResult.articles.length} articles from API using ${syncResult.mode} mode`,
-          {
-            metadata: syncResult.metadata,
-          },
-        );
-
-        const articlesWithCanonicalUrls = await Promise.all(
-          syncResult.articles.map(async (article) => {
-            const canonicalUrl = await canonicalizeUrl(article.url);
-            return {
-              ...article,
-              canonicalUrl: canonicalUrl,
-            };
-          }),
-        );
-
-        const processedArticles = this.settings.normalizeOnSave
-          ? articlesWithCanonicalUrls.map((article) => ({
-              ...article,
-              url: article.canonicalUrl,
-            }))
-          : articlesWithCanonicalUrls;
-
-        // Handle different sync modes
-        if (syncResult.mode === "overwrite") {
-          // Replace all articles with the new ones
-          await this.updateArticles(processedArticles);
-        } else if (syncResult.mode === "update") {
-          // Merge new articles with existing ones
-          await this.mergeArticles(processedArticles);
-        }
-
-        // Update sync timestamps
-        await this.updateSyncTimestamp(syncResult.mode, fetchStartedAt);
-
-        // An API failure mid-sync would drop mutations made after the fetch, so
-        // queued saves and deletes are re-applied against the synced state.
-        if (this.pendingOperations.length > 0) {
-          logger.info(`Re-applying ${this.pendingOperations.length} pending operations after sync`);
-          await this.reapplyPendingOperations();
-          this.pendingOperations = [];
-        }
-
-        const currentArticles = await this.getAllArticles();
-        return {
-          items: currentArticles,
-          total: currentArticles.length,
-          syncResult,
-        };
-      } catch (error) {
-        logger.error("Error syncing cache with API:", error);
-        throw error instanceof Error ? error : new Error(String(error));
-      } finally {
-        this.syncInProgress = null;
-      }
-    })();
-
-    this.syncInProgress = syncPromise.then(
-      () => undefined,
-      () => undefined,
-    );
-    return syncPromise;
-  }
-
-  private async reapplyPendingOperations(): Promise<void> {
-    for (const op of this.pendingOperations) {
-      try {
-        if (op.type === "save" && op.article) {
-          logger.debug("Re-applying save operation for:", op.article);
-          await this.addArticle(op.article);
-        } else if (op.type === "delete" && op.articleId !== undefined) {
-          logger.debug("Re-applying delete operation for:", op.articleId);
-          await this.removeArticle(op.articleId);
-        }
-      } catch (error) {
-        logger.error("Error re-applying pending operation:", op, error);
-      }
-    }
-  }
-
-  private addArticle(article: Article): Promise<void> {
-    logger.debug("Adding article to cache:", article);
-
-    return this.enqueueCommit(async () => {
-      const existingArticles = await this.getAllArticles();
-
-      const canonicalUrl = article.canonicalUrl || article.url;
-      let isDuplicate = false;
-      for (const a of existingArticles) {
-        if (await this.sameUrl(a.url, article.url)) {
-          isDuplicate = true;
-          break;
-        }
-      }
-
-      if (isDuplicate) {
-        logger.debug("Article already exists in cache, skipping add:", canonicalUrl);
-        return;
-      }
-
-      await this.storeArticles([article, ...existingArticles]);
-      logger.debug("Article added to cache:", article);
-    });
-  }
-
-  private removeArticle(id: number | string): Promise<void> {
-    logger.debug("Removing article from cache:", id);
-    if (id === undefined || id === null || id === "") {
-      logger.error("Cannot remove article from cache: No ID provided");
-      return Promise.resolve();
-    }
-    return this.enqueueCommit(async () => {
-      const articles = await this.getAllArticles();
-      // String comparison, so entries stored with the other id type (see
-      // getArticle) still match.
-      const target = String(id);
-      await this.storeArticles(articles.filter((a) => String(a.id) !== target));
-    });
-  }
-
-  updateArticles(newArticles: Article[]): Promise<void> {
-    logger.debug("Updating articles in cache:", newArticles.length);
-    return this.enqueueCommit(() => this.storeArticles(newArticles));
-  }
-
-  mergeArticles(newArticles: Article[]): Promise<void> {
-    logger.debug("Merging articles in cache:", newArticles.length);
-    return this.enqueueCommit(async () => {
-      const existingArticles = await this.getAllArticles();
-      const existingMap = new Map(existingArticles.map((article) => [article.id, article]));
-      const compareKeyOf = (article: Article): string =>
-        this.settings.normalizeOnCompare ? article.canonicalUrl || article.url : article.url;
-      const existingCanonicalMap = new Map(
-        existingArticles.map((article) => [compareKeyOf(article), article]),
-      );
-
-      for (const newArticle of newArticles) {
-        const compareKey = compareKeyOf(newArticle);
-        const existingByCanonical = existingCanonicalMap.get(compareKey);
-
-        if (existingByCanonical && existingByCanonical.id !== newArticle.id) {
-          const existingById = existingMap.get(existingByCanonical.id);
-          if (existingById && existingById.id === existingByCanonical.id) {
-            continue;
-          }
-        }
-
-        existingMap.set(newArticle.id, newArticle);
-        existingCanonicalMap.set(compareKey, newArticle);
-      }
-
-      const mergedArticles = Array.from(existingMap.values());
-      await this.storeArticles(mergedArticles);
-      logger.debug("Merged articles count:", mergedArticles.length);
-    });
-  }
-
-  async clear(): Promise<void> {
-    this.articlesCache = null;
-    await browser.storage.local.remove(this.storageKeys.articles);
-  }
-
-  private async loadSyncTimestamps(): Promise<void> {
-    try {
-      const result = await browser.storage.local.get([
-        this.storageKeys.lastFullSyncTimestamp,
-        this.storageKeys.lastSyncTimestamp,
+  private timestamps(
+    account: Account,
+  ): Effect.Effect<NonNullable<Account["timestamps"]>, LocalError> {
+    return Effect.gen(function* () {
+      if (account.timestamps) return account.timestamps;
+      const { keys } = account;
+      const result = yield* localRead("read sync metadata", [
+        keys.lastFullSyncTimestamp,
+        keys.lastSyncTimestamp,
       ]);
-      this.lastFullSyncTimestamp = result[this.storageKeys.lastFullSyncTimestamp] || null;
-      this.lastSyncTimestamp = result[this.storageKeys.lastSyncTimestamp] || null;
-      logger.debug("Loaded sync timestamps:", {
-        lastSync: this.lastSyncTimestamp,
-        lastFullSync: this.lastFullSyncTimestamp
-          ? new Date(this.lastFullSyncTimestamp).toISOString()
-          : null,
-      });
-    } catch (error) {
-      logger.error("Failed to load sync timestamps:", error);
-      this.lastFullSyncTimestamp = null;
-      this.lastSyncTimestamp = null;
-    }
+      account.timestamps ??= {
+        full: (result[keys.lastFullSyncTimestamp] as number | undefined) || null,
+        last: (result[keys.lastSyncTimestamp] as string | undefined) || null,
+      };
+      return account.timestamps;
+    });
   }
 
-  private async saveSyncTimestamps(): Promise<void> {
-    try {
-      await browser.storage.local.set({
-        [this.storageKeys.lastFullSyncTimestamp]: this.lastFullSyncTimestamp,
-        [this.storageKeys.lastSyncTimestamp]: this.lastSyncTimestamp,
-      });
-    } catch (error) {
-      logger.error("Failed to save sync timestamps:", error);
+  private storeTimestamps(
+    account: Account,
+    timestamps: NonNullable<Account["timestamps"]>,
+  ): Effect.Effect<void, FatalStorageFailure> {
+    return storagePromise(() =>
+      setLocal(
+        "persist sync timestamps",
+        {
+          [account.keys.lastFullSyncTimestamp]: timestamps.full,
+          [account.keys.lastSyncTimestamp]: timestamps.last,
+        },
+        "succeeded",
+        "sync",
+      ),
+    ).pipe(
+      Effect.andThen(storageHealthy),
+      Effect.tap(() => Effect.sync(() => (account.timestamps = timestamps))),
+    );
+  }
+}
+
+function merge(settings: Settings, existingArticles: Article[], newArticles: Article[]): Article[] {
+  const existingMap = new Map(existingArticles.map((article) => [article.id, article]));
+  const compareKeyOf = (article: Article): string =>
+    settings.normalizeOnCompare ? article.canonicalUrl || article.url : article.url;
+  const existingCanonicalMap = new Map(
+    existingArticles.map((article) => [compareKeyOf(article), article]),
+  );
+
+  for (const newArticle of newArticles) {
+    const compareKey = compareKeyOf(newArticle);
+    const existingByCanonical = existingCanonicalMap.get(compareKey);
+
+    if (existingByCanonical && existingByCanonical.id !== newArticle.id) {
+      const existingById = existingMap.get(existingByCanonical.id);
+      if (existingById && existingById.id === existingByCanonical.id) {
+        continue;
+      }
     }
+
+    existingMap.set(newArticle.id, newArticle);
+    existingCanonicalMap.set(compareKey, newArticle);
   }
 
-  private async isBrowserIdle(): Promise<boolean> {
-    try {
-      const state = await browser.idle.queryState(300);
-      logger.debug("Browser idle state:", { state, isIdle: state === "idle" });
-      return state === "idle";
-    } catch (error) {
-      logger.debug("Could not check browser idle state:", error);
-      // If idle API is not available, assume not idle
-      return false;
-    }
-  }
+  return Array.from(existingMap.values());
+}
 
-  private async updateSyncTimestamp(mode: SyncMode, fetchStartedAt: string): Promise<void> {
-    const now = fetchStartedAt;
-
-    // Always update lastSyncTimestamp for any sync
-    const oldLastSync = this.lastSyncTimestamp;
-    this.lastSyncTimestamp = now;
-
-    // Update lastFullSyncTimestamp only for overwrite syncs
-    if (mode === "overwrite") {
-      const oldFullSync = this.lastFullSyncTimestamp;
-      this.lastFullSyncTimestamp = Date.parse(fetchStartedAt);
-      await this.saveSyncTimestamps();
-      logger.debug("Updated sync timestamps:", {
-        oldLastSync,
-        newLastSync: this.lastSyncTimestamp,
-        oldFullSync: oldFullSync ? new Date(oldFullSync).toISOString() : null,
-        newFullSync: new Date(this.lastFullSyncTimestamp).toISOString(),
-        mode,
-      });
-    } else {
-      // For update syncs, just save the lastSyncTimestamp
-      await this.saveSyncTimestamps();
-      logger.debug("Updated sync timestamp:", {
-        oldLastSync,
-        newLastSync: this.lastSyncTimestamp,
-        mode,
-      });
-    }
+async function isBrowserIdle(): Promise<boolean> {
+  try {
+    const state = await browser.idle.queryState(300);
+    logger.debug("Browser idle state:", { state, isIdle: state === "idle" });
+    return state === "idle";
+  } catch (error) {
+    logger.debug("Could not check browser idle state:", error);
+    // If idle API is not available, assume not idle
+    return false;
   }
 }

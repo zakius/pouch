@@ -1,0 +1,288 @@
+{
+  "procedure": "measurements/README.md procedure; main, #74 pilot and this branch interleaved in two rounds (main, pilot, final, main, pilot, final), same host and scripts",
+  "loadAverage1m": "27.8 on 32 cores (other sessions); relative comparison only",
+  "runs": {
+    "main": [
+      {
+        "commit": "4a43fd524d38315ea63fa30debcd55f044772cab",
+        "environment": {
+          "platform": "Linux-7.2.4-pikaos-x86_64-with-glibc2.44",
+          "bun": "1.4.3"
+        },
+        "host": "Bun with mocked browser APIs; cold process import to first getArticles response, not extension/browser startup",
+        "samples": {
+          "firefox": {
+            "jsBytes": 150590,
+            "backgroundBytes": 75898,
+            "packageBytes": 49827,
+            "startupMs": [
+              10.746775,
+              9.613859999999999,
+              10.422438,
+              9.253684999999999,
+              10.571281,
+              9.413248,
+              9.795536000000002,
+              8.754906,
+              9.533287,
+              9.76662
+            ],
+            "medianMs": 9.69024
+          },
+          "chromium": {
+            "jsBytes": 150701,
+            "backgroundBytes": 75935,
+            "packageBytes": 58920,
+            "startupMs": [
+              9.313899,
+              8.251468,
+              9.043174000000002,
+              9.645990999999999,
+              9.231381999999998,
+              9.891808000000001,
+              9.351830999999999,
+              8.277658,
+              8.36805,
+              9.794884
+            ],
+            "medianMs": 9.272640499999998
+          }
+        }
+      },
+      {
+        "commit": "4a43fd524d38315ea63fa30debcd55f044772cab",
+        "environment": {
+          "platform": "Linux-7.2.4-pikaos-x86_64-with-glibc2.44",
+          "bun": "1.4.3"
+        },
+        "host": "Bun with mocked browser APIs; cold process import to first getArticles response, not extension/browser startup",
+        "samples": {
+          "firefox": {
+            "jsBytes": 150590,
+            "backgroundBytes": 75898,
+            "packageBytes": 49827,
+            "startupMs": [
+              9.743637000000001,
+              9.315280999999999,
+              9.914,
+              10.802731999999999,
+              9.752423,
+              10.501287999999999,
+              10.702872,
+              11.092272000000001,
+              9.928317999999999,
+              10.135741999999997
+            ],
+            "medianMs": 10.032029999999999
+          },
+          "chromium": {
+            "jsBytes": 150701,
+            "backgroundBytes": 75935,
+            "packageBytes": 58920,
+            "startupMs": [
+              10.327017000000001,
+              12.349043,
+              10.174506000000001,
+              9.109991,
+              10.341965,
+              8.547891,
+              9.474003000000002,
+              9.826714999999998,
+              8.333855,
+              9.047052
+            ],
+            "medianMs": 9.650359
+          }
+        }
+      }
+    ],
+    "pilot": [
+      {
+        "commit": "ada3f4cbe794239e955f959826ac171d4817c5f3",
+        "environment": {
+          "platform": "Linux-7.2.4-pikaos-x86_64-with-glibc2.44",
+          "bun": "1.4.3"
+        },
+        "host": "Bun with mocked browser APIs; cold process import to first getArticles response, not extension/browser startup",
+        "samples": {
+          "firefox": {
+            "jsBytes": 292781,
+            "backgroundBytes": 148659,
+            "packageBytes": 96656,
+            "startupMs": [
+              25.001914,
+              21.717506000000004,
+              24.524496,
+              22.652634,
+              24.154731999999996,
+              20.479300000000002,
+              22.659197,
+              23.610197,
+              24.305147999999996,
+              25.564314
+            ],
+            "medianMs": 23.882464499999998
+          },
+          "chromium": {
+            "jsBytes": 292892,
+            "backgroundBytes": 148696,
+            "packageBytes": 105715,
+            "startupMs": [
+              21.17815,
+              19.897423000000003,
+              20.390330999999996,
+              17.213276999999998,
+              18.136142999999997,
+              15.419865,
+              16.004768,
+              19.057846000000005,
+              17.502146,
+              18.187741
+            ],
+            "medianMs": 18.161941999999996
+          }
+        }
+      },
+      {
+        "commit": "ada3f4cbe794239e955f959826ac171d4817c5f3",
+        "environment": {
+          "platform": "Linux-7.2.4-pikaos-x86_64-with-glibc2.44",
+          "bun": "1.4.3"
+        },
+        "host": "Bun with mocked browser APIs; cold process import to first getArticles response, not extension/browser startup",
+        "samples": {
+          "firefox": {
+            "jsBytes": 292781,
+            "backgroundBytes": 148659,
+            "packageBytes": 96656,
+            "startupMs": [
+              21.757813,
+              22.537575999999994,
+              22.195054,
+              24.281824,
+              21.356990000000003,
+              21.734649,
+              21.711284,
+              20.392425000000003,
+              20.666607,
+              22.260989
+            ],
+            "medianMs": 21.746231
+          },
+          "chromium": {
+            "jsBytes": 292892,
+            "backgroundBytes": 148696,
+            "packageBytes": 105715,
+            "startupMs": [
+              16.359752999999998,
+              18.584565,
+              17.843035,
+              17.770837000000004,
+              17.801837,
+              16.688358,
+              17.761349000000003,
+              17.707096,
+              16.461397,
+              18.615364
+            ],
+            "medianMs": 17.766093000000005
+          }
+        }
+      }
+    ],
+    "final": [
+      {
+        "commit": "096b4078c72f979ad8b485a353214d434af4c09d",
+        "environment": {
+          "platform": "Linux-7.2.4-pikaos-x86_64-with-glibc2.44",
+          "bun": "1.4.3"
+        },
+        "host": "Bun with mocked browser APIs; cold process import to first getArticles response, not extension/browser startup",
+        "samples": {
+          "firefox": {
+            "jsBytes": 185260,
+            "backgroundBytes": 140589,
+            "packageBytes": 65260,
+            "startupMs": [
+              28.191372,
+              21.797067,
+              24.713346,
+              20.376935999999997,
+              23.965571999999995,
+              23.836026,
+              28.075049999999997,
+              25.688809999999997,
+              23.539351,
+              25.791525999999998
+            ],
+            "medianMs": 24.339458999999998
+          },
+          "chromium": {
+            "jsBytes": 185371,
+            "backgroundBytes": 140626,
+            "packageBytes": 74405,
+            "startupMs": [
+              43.869148,
+              20.512574,
+              20.645957,
+              20.189069000000003,
+              20.294358000000003,
+              21.873883,
+              25.076536000000004,
+              23.971244,
+              19.499266000000002,
+              21.418677
+            ],
+            "medianMs": 21.032317
+          }
+        }
+      },
+      {
+        "commit": "096b4078c72f979ad8b485a353214d434af4c09d",
+        "environment": {
+          "platform": "Linux-7.2.4-pikaos-x86_64-with-glibc2.44",
+          "bun": "1.4.3"
+        },
+        "host": "Bun with mocked browser APIs; cold process import to first getArticles response, not extension/browser startup",
+        "samples": {
+          "firefox": {
+            "jsBytes": 185260,
+            "backgroundBytes": 140589,
+            "packageBytes": 65260,
+            "startupMs": [
+              21.649826999999995,
+              24.348801,
+              21.967290999999996,
+              24.754965,
+              20.156495999999997,
+              23.097049999999996,
+              20.399518000000004,
+              20.044393,
+              23.153538,
+              24.701662999999996
+            ],
+            "medianMs": 22.532170499999996
+          },
+          "chromium": {
+            "jsBytes": 185371,
+            "backgroundBytes": 140626,
+            "packageBytes": 74405,
+            "startupMs": [
+              20.966727,
+              19.513223000000004,
+              19.293684,
+              22.631594,
+              23.435213999999995,
+              21.938837,
+              21.426010999999995,
+              20.699639,
+              20.052689,
+              19.200317000000002
+            ],
+            "medianMs": 20.833183
+          }
+        }
+      }
+    ]
+  }
+}

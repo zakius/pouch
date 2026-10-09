@@ -1,6 +1,10 @@
+import {
+  initializeStorageDiagnostics,
+  isStorageStopped,
+  showStorageDiagnostic,
+} from "../utils/storage-diagnostics-ui";
 import "../utils/chromium";
 import * as v from "valibot";
-import { availableBackends, getAdapter } from "../utils/adapter-factory";
 import {
   ensureBackendPermissions,
   missingPermissionMessage,
@@ -9,6 +13,9 @@ import {
 import { LogLevel } from "../utils/log-levels";
 import { logger } from "../utils/logger";
 import { getSettings, type Settings, settingsSchema } from "../utils/settings";
+import { backendForms } from "../utils/settings-schemas";
+
+const availableBackends = Object.keys(backendForms) as Settings["backend"][];
 
 type DomElementsNullable = {
   backendSelect: HTMLSelectElement | null;
@@ -50,12 +57,14 @@ const configDrafts: Record<string, Record<string, string>> = {};
 async function initialize(): Promise<void> {
   try {
     assertDom(dom);
+    await initializeStorageDiagnostics((message) => showStatus(message, "error"));
+    if (isStorageStopped()) return;
     const settings = await getSettings();
+    if (isStorageStopped()) return;
     for (const backend of availableBackends) {
-      const adapter = getAdapter(backend);
       const option = document.createElement("option");
       option.value = backend;
-      option.textContent = adapter.displayName;
+      option.textContent = backendForms[backend].displayName;
       dom.backendSelect.appendChild(option);
     }
     configCache[settings.backend] = settings.apiConfig;
@@ -76,10 +85,12 @@ async function initialize(): Promise<void> {
     document.body.addEventListener("click", handleBodyClick);
   } catch (error) {
     logger.error("Error initializing options:", error);
+    if (isStorageStopped()) return;
     showStatus(`Error initializing options: ${(error as Error).message}`, "error");
   }
 }
 async function loadBackend(backend: Settings["backend"]): Promise<void> {
+  if (isStorageStopped()) return;
   assertDom(dom);
   const previousForm = dom.configContainer.querySelector("form");
   if (previousForm instanceof HTMLFormElement) {
@@ -96,8 +107,7 @@ async function loadBackend(backend: Settings["backend"]): Promise<void> {
       configDrafts[previousBackend] = draft;
     }
   }
-  const factory = getAdapter(backend);
-  const formConfig = factory.formConfig;
+  const { formConfig } = backendForms[backend];
   dom.configContainer.innerHTML = "";
   const form = document.createElement("form");
   form.id = `${backend}-config`;
@@ -146,6 +156,7 @@ function handleBodyClick(event: MouseEvent): void {
 }
 
 async function handleSaveSettings(): Promise<void> {
+  if (isStorageStopped()) return;
   assertDom(dom);
   const settings = getSettingsFromForm();
   if (!settings) {
@@ -162,6 +173,7 @@ async function handleSaveSettings(): Promise<void> {
       type: "saveSettings",
       payload: { settings },
     });
+    if (showStorageDiagnostic(response) || isStorageStopped()) return;
     if (response?.success) {
       await pruneBackendPermissions(settings);
       showStatus("Settings saved successfully", "success");
@@ -170,12 +182,14 @@ async function handleSaveSettings(): Promise<void> {
     }
   } catch (error: unknown) {
     logger.warn("Failed to notify background script about settings update:", error);
+    if (isStorageStopped()) return;
     showStatus(`Error saving settings: ${(error as Error).message}`, "error");
   } finally {
-    dom.saveButton.disabled = false;
+    dom.saveButton.disabled = isStorageStopped();
   }
 }
 async function handleTestConnection(): Promise<void> {
+  if (isStorageStopped()) return;
   assertDom(dom);
   const settings = getSettingsFromForm();
   if (!settings) {
@@ -192,6 +206,7 @@ async function handleTestConnection(): Promise<void> {
       type: "testConnection",
       payload: { settings },
     });
+    if (showStorageDiagnostic(response) || isStorageStopped()) return;
     if (response.success) {
       showStatus("Connection successful! Remember to save your settings.", "success");
     } else {
@@ -199,9 +214,10 @@ async function handleTestConnection(): Promise<void> {
     }
   } catch (error) {
     logger.error("Error testing connection:", error);
+    if (isStorageStopped()) return;
     showStatus(`Error testing connection: ${(error as Error).message}`, "error");
   } finally {
-    dom.testConnectionButton.disabled = false;
+    dom.testConnectionButton.disabled = isStorageStopped();
   }
 }
 function getSettingsFromForm(): Settings | null {
@@ -210,9 +226,8 @@ function getSettingsFromForm(): Settings | null {
     const input = document.getElementById(id) as HTMLInputElement | null;
     return input?.value || "";
   };
-  const factory = getAdapter(dom.backendSelect.value as Settings["backend"]);
   const apiConfig: Record<string, string> = {};
-  for (const field of factory.formConfig) {
+  for (const field of backendForms[dom.backendSelect.value as Settings["backend"]].formConfig) {
     apiConfig[field.name as string] = getInputValue(field.name as string);
   }
   const rawSettings = {
@@ -243,15 +258,19 @@ function getSettingsFromForm(): Settings | null {
 }
 type StatusType = "info" | "success" | "error";
 function showStatus(message: string, type: StatusType = "info"): void {
+  if (isStorageStopped() && !message.startsWith("Pouch stopped:")) return;
   assertDom(dom);
   dom.statusDiv.textContent = message;
   dom.statusDiv.className = `status ${type}`;
   setTimeout(() => {
     dom.statusDiv.classList.add("show");
   }, 10);
+  if (isStorageStopped()) return;
   setTimeout(() => {
+    if (isStorageStopped()) return;
     dom.statusDiv.classList.remove("show");
     setTimeout(() => {
+      if (isStorageStopped()) return;
       dom.statusDiv.textContent = "";
     }, 300);
   }, 3000);

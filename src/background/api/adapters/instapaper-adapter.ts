@@ -1,19 +1,28 @@
+import { Effect } from "effect";
 import * as v from "valibot";
 import { instapaperConfigSchema, instapaperSettingsSchema } from "../../../utils/settings-schemas";
 export { instapaperConfigSchema, instapaperSettingsSchema };
 import type { Article } from "../../../types/common";
-import { logger } from "../../../utils/logger";
-import { type TokenManager, type TokenRefreshConfig, tokenManager } from "../../token-manager";
-import type {
-  ReadItLaterAPI,
-  SavingArticle,
-  SyncOptions,
-  SyncResult,
-} from "../read-it-later-adapter";
-import type { TokenizedAdapter } from "../tokenized-adapter";
+import { TokenManager, tokenManager } from "../../token-manager";
+import { requestJson, validate } from "../effect-api-client";
+import {
+  BrowserFailure,
+  ConfigurationFailure,
+  CredentialsFailure,
+  IncompleteSnapshotFailure,
+  InvalidResponseFailure,
+  ProviderFailure,
+  RateLimitFailure,
+  storageHealthy,
+  type AcquisitionError,
+  type EffectAdapter,
+} from "../effect-adapter";
+import type { SavingArticle, SyncOptions } from "../read-it-later-adapter";
 
 export type InstapaperSettings = v.InferInput<typeof instapaperSettingsSchema>;
 export type InstapaperConfig = v.InferInput<typeof instapaperConfigSchema>;
+
+const apiUrl = "https://www.instapaper.com";
 
 const instapaperTagSchema = v.object({
   id: v.number(),
@@ -42,29 +51,21 @@ const instapaperUserSchema = v.object({
 
 const instapaperErrorSchema = v.object({
   type: v.literal("error"),
-  error_code: v.number(),
-  message: v.string(),
+  error_code: v.pipe(v.number(), v.safeInteger()),
 });
 
 const instapaperMetaSchema = v.object({
   type: v.literal("meta"),
 });
 
-const instapaperResponseItemSchema = v.union([
-  instapaperBookmarkSchema,
-  instapaperUserSchema,
-  instapaperErrorSchema,
-  instapaperMetaSchema,
-]);
-
-const instapaperSaveResponseSchema = v.array(instapaperResponseItemSchema);
-
-/** RFC 3986 percent-encoding required by OAuth 1.0a (RFC 5849 §3.6); encodeURIComponent leaves !'()* bare. */
-const percentEncode = (s: string) =>
-  encodeURIComponent(s).replace(
-    /[!'()*]/g,
-    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
-  );
+const instapaperSaveResponseSchema = v.array(
+  v.union([
+    instapaperBookmarkSchema,
+    instapaperUserSchema,
+    instapaperErrorSchema,
+    instapaperMetaSchema,
+  ]),
+);
 
 const instapaperSyncResponseSchema = v.object({
   user: instapaperUserSchema,
@@ -73,325 +74,262 @@ const instapaperSyncResponseSchema = v.object({
   delete_ids: v.optional(v.array(v.number())),
 });
 
-interface InstapaperBookmark {
-  type: "bookmark";
-  bookmark_id: number;
-  url: string;
-  title: string;
-  description?: string | null;
-  tags?: { id: number; name: string }[];
-  time?: number;
-  image_url?: string | null;
-  progress?: number;
-  progress_timestamp?: number;
-  private_source?: string | null;
+type InstapaperBookmark = v.InferOutput<typeof instapaperBookmarkSchema>;
+
+/** RFC 3986 percent-encoding required by OAuth 1.0a (RFC 5849 §3.6); encodeURIComponent leaves !'()* bare. */
+const percentEncode = (s: string) =>
+  encodeURIComponent(s).replace(
+    /[!'()*]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+
+interface OAuthCredentials {
+  key: string;
+  secret: string;
 }
 
-interface InstapaperError {
-  type: "error";
-  error_code: number;
-  message: string;
+/**
+ * OAuth 1.0a HMAC-SHA1 Authorization header for a POST to `url`. Without a token (xAuth) the
+ * oauth_token parameter is omitted and the signing key ends in an empty token secret.
+ *
+ * Instapaper requires: HMAC-SHA1 only, HTTPS, POST for every request, parameters in the
+ * form body, and OAuth parameters in the Authorization header.
+ *
+ * API: https://www.instapaper.com/api
+ */
+export async function oauthHeader(
+  url: string,
+  params: Record<string, string>,
+  consumer: OAuthCredentials,
+  token?: OAuthCredentials,
+): Promise<string> {
+  const oauthParams: Record<string, string> = {
+    oauth_consumer_key: consumer.key,
+    oauth_nonce: Math.random().toString(36).substring(2),
+    oauth_signature_method: "HMAC-SHA1",
+    oauth_timestamp: Math.floor(Date.now() / 1000).toString(),
+    ...(token ? { oauth_token: token.key } : {}),
+    oauth_version: "1.0",
+  };
+  const allParams: Record<string, string> = { ...params, ...oauthParams };
+  const paramString = Object.keys(allParams)
+    .sort()
+    .map((key) => `${percentEncode(key)}=${percentEncode(allParams[key])}`)
+    .join("&");
+  const signatureBaseString = `POST&${percentEncode(url)}&${percentEncode(paramString)}`;
+  const signingKey = `${percentEncode(consumer.secret)}&${percentEncode(token?.secret ?? "")}`;
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(signingKey),
+    { name: "HMAC", hash: "SHA-1" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(signatureBaseString),
+  );
+  oauthParams.oauth_signature = btoa(String.fromCharCode(...new Uint8Array(signature)));
+  return `OAuth ${Object.keys(oauthParams)
+    .sort()
+    .map((key) => `${percentEncode(key)}="${percentEncode(oauthParams[key])}"`)
+    .join(", ")}`;
 }
 
-export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings>, TokenizedAdapter {
-  constructor(public readonly tokens: TokenManager = tokenManager) {}
-
-  public readonly displayName = "Instapaper";
-  private apiUrl = "https://www.instapaper.com";
-  private config!: InstapaperConfig;
-  private accessToken: string | null = null;
-  private accessTokenSecret: string | null = null;
-  formConfig = [
-    { name: "consumerKey", label: "OAuth Consumer Key" },
-    { name: "consumerSecret", label: "OAuth Consumer Secret" },
-    { name: "username", label: "Instapaper Username" },
-    { name: "password", label: "Instapaper Password" },
-  ];
-
-  getServiceName(): string {
-    return "instapaper";
+const providerFailure = (operation: string) => (data: unknown) => {
+  for (const item of Array.isArray(data) ? data : [data]) {
+    const parsed = v.safeParse(instapaperErrorSchema, item);
+    // 1040: rate limit exceeded; nothing was applied. Instapaper sends no retry delay.
+    if (parsed.success && parsed.output.error_code === 1040)
+      return new RateLimitFailure(operation, 1000);
+    if (parsed.success) return new ProviderFailure(operation, parsed.output.error_code);
   }
+  return undefined;
+};
 
-  getTokenRefreshConfig(): TokenRefreshConfig {
-    throw new Error("Instapaper uses OAuth 1.0a, no refresh configuration available");
-  }
+const toArticle = (item: InstapaperBookmark): Article => ({
+  id: item.bookmark_id,
+  title: item.title,
+  url: item.url,
+  created_at: item.time ? new Date(item.time * 1000).toISOString() : new Date().toISOString(),
+});
 
-  createTokenMetadata(_tokenData: Record<string, unknown>) {
-    const now = Date.now();
-    return {
-      accessToken: this.accessToken || "",
-      refreshToken: "", // No refresh token for OAuth 1.0a
+export const createInstapaperAdapter = Effect.fn("instapaper.acquire")(function* (
+  settings: InstapaperSettings,
+  tokens: TokenManager = tokenManager,
+) {
+  const parsed = v.safeParse(instapaperSettingsSchema, settings);
+  if (
+    !parsed.success ||
+    !parsed.output.apiConfig.consumerKey ||
+    !parsed.output.apiConfig.consumerSecret ||
+    !parsed.output.apiConfig.username
+  )
+    return yield* Effect.fail(new ConfigurationFailure("instapaper.acquire"));
+  const config = { ...parsed.output.apiConfig };
+  const consumer = { key: config.consumerKey, secret: config.consumerSecret };
+  const generation = yield* tokens.bindAccount("instapaper", JSON.stringify(config));
+  const owned = Effect.try({
+    try: () => tokens.assertAccount("instapaper", generation),
+    catch: () => new CredentialsFailure("instapaper.account"),
+  });
+  // Signing runs per attempt, so every request gets a fresh nonce and timestamp.
+  const signedRequest = (
+    operation: string,
+    endpoint: string,
+    params: Record<string, string>,
+    options: {
+      token?: OAuthCredentials;
+      mutation?: "save" | "delete";
+      timeoutMs?: number;
+      format?: "text";
+    } = {},
+  ) => {
+    const url = `${apiUrl}${endpoint}`;
+    return requestJson({
+      operation,
+      url,
+      mutation: options.mutation,
+      timeoutMs: options.timeoutMs,
+      format: options.format,
+      providerFailure: providerFailure(operation),
+      authorization: owned.pipe(
+        Effect.andThen(
+          Effect.tryPromise({
+            try: () => oauthHeader(url, params, consumer, options.token),
+            catch: () => new BrowserFailure(operation, "crypto"),
+          }),
+        ),
+      ),
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams(params),
+      },
+    });
+  };
+
+  // xAuth exchanges the username and password for an access token without a redirect flow.
+  const body = yield* signedRequest(
+    "instapaper.authenticate",
+    "/api/1/oauth/access_token",
+    {
+      x_auth_username: config.username,
+      x_auth_password: config.password ?? "",
+      x_auth_mode: "client_auth",
+    },
+    { format: "text" },
+  );
+  const tokenParams = new URLSearchParams(typeof body === "string" ? body : "");
+  const key = tokenParams.get("oauth_token");
+  const secret = tokenParams.get("oauth_token_secret");
+  if (!key || !secret)
+    return yield* Effect.fail(new InvalidResponseFailure("instapaper.authenticate", "token"));
+  const token = { key, secret };
+  const now = Date.now();
+  // OAuth 1.0a tokens do not expire; one year prompts periodic re-authentication. The secret stays in memory.
+  yield* tokens.storeToken(
+    "instapaper",
+    {
+      accessToken: key,
+      refreshToken: "",
       tokenType: "OAuth",
-      // Instapaper OAuth 1.0a tokens don't technically expire, but we set 1 year
-      // to trigger periodic re-authentication as a security best practice
       expiresAt: now + 365 * 24 * 60 * 60 * 1000,
       issuedAt: now,
-      scope: undefined,
       refreshCount: 0,
-    };
-  }
+    },
+    "succeeded",
+    "authentication",
+    generation,
+  );
 
-  getBaseUrl(): string {
-    return this.apiUrl;
-  }
-
-  getAuthEndpoint(): string {
-    return `${this.apiUrl}/api/1/oauth/access_token`;
-  }
-
-  async reAuthenticate(): Promise<void> {
-    logger.info(`Performing full re-authentication for ${this.getServiceName()}`);
-    await this.authenticate();
-  }
-  async initialize(settings: InstapaperSettings): Promise<void> {
-    this.config = settings.apiConfig;
-    await this.authenticate();
-  }
-
-  /**
-   * Instapaper xAuth Authentication
-   *
-   * Instapaper uses xAuth (OAuth 1.0a extension) which exchanges username/password
-   * directly for an access token without user redirect flow.
-   *
-   * This is the ONLY way to obtain Instapaper access tokens according to their API.
-   *
-   * API: https://www.instapaper.com/api
-   */
-  private async authenticate(): Promise<void> {
-    const url = this.getAuthEndpoint();
-    const xAuthParams = {
-      x_auth_username: this.config.username,
-      x_auth_password: this.config.password || "",
-      x_auth_mode: "client_auth",
-    };
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: await this._oauthHeader(url, xAuthParams, "", ""),
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams(xAuthParams),
-    });
-    if (!response.ok) {
-      throw new Error("Failed to authenticate with Instapaper");
-    }
-    const tokenData = await response.text();
-    const params = new URLSearchParams(tokenData);
-    this.accessToken = params.get("oauth_token");
-    this.accessTokenSecret = params.get("oauth_token_secret");
-    if (!this.accessToken || !this.accessTokenSecret) {
-      throw new Error("Failed to obtain Instapaper access token");
-    }
-
-    const tokenMetadata = this.createTokenMetadata({});
-    await this.tokens.storeToken(this.getServiceName(), tokenMetadata);
-  }
-  async testConnection(): Promise<boolean> {
-    try {
-      await this._makeSignedRequest("/api/1/bookmarks/list", { limit: 1 });
-      return true;
-    } catch (error) {
-      logger.error("Instapaper connection test failed:", error);
-      return false;
-    }
-  }
-
-  public async cleanup(): Promise<void> {
-    await this.tokens.clearToken(this.getServiceName());
-  }
-
-  public getTokenHealth(): {
-    isValid: boolean;
-    expiresAt?: string;
-    refreshCount?: number;
-  } {
-    const health = this.tokens.getTokenHealth();
-    return health[this.getServiceName()] || { isValid: false };
-  }
-  async saveArticle(article: SavingArticle): Promise<Article> {
-    const params = { url: article.url, title: article.title };
-    const data = await this._makeSignedRequest("/api/1/bookmarks/add", params);
-    const validatedData = v.parse(instapaperSaveResponseSchema, data);
-
-    // Filter to find bookmark and error
-    const savedBookmark = (validatedData as (InstapaperBookmark | InstapaperError)[]).find(
-      (item) => item.type === "bookmark",
-    ) as InstapaperBookmark | undefined;
-
-    const error = (validatedData as (InstapaperBookmark | InstapaperError)[]).find(
-      (item) => item.type === "error",
-    ) as InstapaperError | undefined;
-
-    if (error) {
-      throw new Error(`Failed to save article: ${error.message} (Error ${error.error_code})`);
-    }
-
-    if (!savedBookmark) {
-      throw new Error("Failed to save article to Instapaper: No bookmark returned");
-    }
-
-    return this.mapArticle(savedBookmark);
-  }
-  async deleteArticle(id: number): Promise<void> {
-    await this._makeSignedRequest("/api/1/bookmarks/delete", {
-      bookmark_id: id,
-    });
-  }
-  /**
-   * Instapaper Sync (FULL SNAPSHOT)
-   *
-   * bookmarks/list returns at most `limit` bookmarks and has no cursor. Paging
-   * works through "have": every request after the first sends the IDs seen so
-   * far (comma-separated), and the API leaves those out of the response. The
-   * loop stops at the first page shorter than `limit`.
-   *
-   * delete_ids is ignored: each sync is a full snapshot, so removed bookmarks
-   * simply drop out. A full page containing only already-seen bookmarks means
-   * the API ignored "have" and retrieval cannot advance, so sync fails
-   * explicitly and the caller keeps its previous cache.
-   *
-   * API: https://www.instapaper.com/api
-   */
-  async sync(options?: SyncOptions): Promise<SyncResult> {
-    const limit = 500;
-    const articlesById = new Map<number, Article>();
-    let pageBookmarks: InstapaperBookmark[] = [];
-
-    const mode = options?.mode || "overwrite";
-
-    do {
-      const params: Record<string, unknown> = { limit };
-      if (articlesById.size > 0) params.have = [...articlesById.keys()].join(",");
-      const data = await this._makeSignedRequest("/api/1/bookmarks/list", params);
-      const validatedData = v.parse(instapaperSyncResponseSchema, data);
-      pageBookmarks = validatedData.bookmarks;
-
-      const newBookmarks = pageBookmarks.filter((item) => !articlesById.has(item.bookmark_id));
-      if (pageBookmarks.length === limit && newBookmarks.length === 0) {
-        throw new Error(
-          "Instapaper sync cannot retrieve a complete snapshot: the API returned a full page of already-seen bookmarks",
-        );
-      }
-
-      for (const item of newBookmarks) {
-        articlesById.set(item.bookmark_id, this.mapArticle(item));
-      }
-
-      // Rate limiting: Instapaper doesn't publish rate limits,
-      // but 1 second between requests is conservative
-      if (pageBookmarks.length === limit) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-      }
-    } while (pageBookmarks.length === limit);
-
-    const allArticles = [...articlesById.values()];
-
-    return {
-      articles: allArticles,
-      mode,
-      metadata: {
-        totalFetched: allArticles.length,
-        totalProcessed: allArticles.length,
-        lastSyncTimestamp: new Date().toISOString(),
-        apiVersion: "1.0",
-      },
-    };
-  }
-  private mapArticle(item: InstapaperBookmark): Article {
-    return {
-      id: item.bookmark_id,
-      title: item.title,
-      url: item.url,
-      created_at: item.time ? new Date(item.time * 1000).toISOString() : new Date().toISOString(),
-    };
-  }
-  /**
-   * OAuth 1.0a Signature Generation for Instapaper
-   *
-   * Instapaper requires OAuth 1.0a signatures for all API requests.
-   *
-   * Process:
-   * 1. Collect all parameters (request params + OAuth params)
-   * 2. Sort parameters alphabetically and URL-encode them
-   * 3. Create signature base string: METHOD&url&encoded_params
-   * 4. Generate HMAC-SHA1 signature using: consumerSecret&accessTokenSecret
-   * 5. Add signature to OAuth Authorization header
-   *
-   * Requirements:
-   * - Only HMAC-SHA1 signature method supported
-   * - HTTPS required on all endpoints
-   * - All requests via POST method
-   * - Parameters in POST body, not query string
-   * - OAuth params in Authorization header, not body/query
-   *
-   * API: https://www.instapaper.com/api
-   */
-  private async _makeSignedRequest(
+  const request = (
+    operation: string,
     endpoint: string,
-    params: Record<string, unknown>,
-  ): Promise<unknown> {
-    if (!this.config || !this.accessToken || !this.accessTokenSecret) {
-      throw new Error("Instapaper adapter not initialized");
-    }
-    const baseUrl = `${this.apiUrl}${endpoint}`;
-    const response = await fetch(baseUrl, {
-      method: "POST",
-      headers: {
-        Authorization: await this._oauthHeader(
-          baseUrl,
-          params,
-          this.accessToken,
-          this.accessTokenSecret,
-        ),
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams(params as Record<string, string>),
-    });
-    if (!response.ok) {
-      throw new Error(`Instapaper API Error: ${response.status} ${await response.text()}`);
-    }
-    return response.json();
-  }
+    params: Record<string, string>,
+    options: { mutation?: "save" | "delete"; timeoutMs?: number } = {},
+  ) => signedRequest(operation, endpoint, params, { ...options, token });
 
-  /** OAuth 1.0a HMAC-SHA1 Authorization header for a POST to `url`. An empty token is omitted (xAuth). */
-  private async _oauthHeader(
-    url: string,
-    params: Record<string, unknown>,
-    token: string,
-    tokenSecret: string,
-  ): Promise<string> {
-    const oauthParams: Record<string, string> = {
-      oauth_consumer_key: this.config.consumerKey,
-      oauth_nonce: Math.random().toString(36).substring(2),
-      oauth_signature_method: "HMAC-SHA1",
-      oauth_timestamp: Math.floor(Date.now() / 1000).toString(),
-      ...(token ? { oauth_token: token } : {}),
-      oauth_version: "1.0",
-    };
-    const allParams: Record<string, unknown> = { ...params, ...oauthParams };
-    const paramString = Object.keys(allParams)
-      .sort()
-      .map((key) => `${percentEncode(key)}=${percentEncode(String(allParams[key]))}`)
-      .join("&");
-    const signatureBaseString = `POST&${percentEncode(url)}&${percentEncode(paramString)}`;
-    const signingKey = `${percentEncode(this.config.consumerSecret)}&${percentEncode(tokenSecret)}`;
-    const key = await crypto.subtle.importKey(
-      "raw",
-      new TextEncoder().encode(signingKey),
-      { name: "HMAC", hash: "SHA-1" },
-      false,
-      ["sign"],
-    );
-    const signature = await crypto.subtle.sign(
-      "HMAC",
-      key,
-      new TextEncoder().encode(signatureBaseString),
-    );
-    oauthParams.oauth_signature = btoa(String.fromCharCode(...new Uint8Array(signature)));
-    return `OAuth ${Object.keys(oauthParams)
-      .sort()
-      .map((key) => `${percentEncode(key)}="${percentEncode(oauthParams[key])}"`)
-      .join(", ")}`;
-  }
-}
+  const adapter: EffectAdapter = {
+    saveArticle: Effect.fn("instapaper.save")(function* (article: SavingArticle) {
+      const data = yield* request(
+        "instapaper.save",
+        "/api/1/bookmarks/add",
+        { url: article.url, title: article.title },
+        { mutation: "save" },
+      );
+      const items = yield* validate(instapaperSaveResponseSchema, data, "instapaper.save");
+      const saved = items.find((item): item is InstapaperBookmark => item.type === "bookmark");
+      if (!saved) return yield* Effect.fail(new InvalidResponseFailure("instapaper.save"));
+      return toArticle(saved);
+    }),
+    deleteArticle: Effect.fn("instapaper.delete")(function* (id: number | string) {
+      yield* request(
+        "instapaper.delete",
+        "/api/1/bookmarks/delete",
+        { bookmark_id: String(id) },
+        { mutation: "delete" },
+      );
+    }),
+    /**
+     * Instapaper Sync (FULL SNAPSHOT)
+     *
+     * bookmarks/list returns at most `limit` bookmarks and has no cursor. Paging
+     * works through "have": every request after the first sends the IDs seen so
+     * far (comma-separated), and the API leaves those out of the response. The
+     * loop stops at the first page shorter than `limit`.
+     *
+     * delete_ids is ignored: each sync is a full snapshot, so removed bookmarks
+     * simply drop out. A full page containing only already-seen bookmarks means
+     * the API ignored "have" and retrieval cannot advance, so sync fails with
+     * IncompleteSnapshotFailure and the caller keeps its previous cache.
+     */
+    sync: Effect.fn("instapaper.sync")(function* (options?: SyncOptions) {
+      const limit = 500;
+      const articlesById = new Map<number, Article>();
+      for (;;) {
+        const params: Record<string, string> = { limit: String(limit) };
+        if (articlesById.size > 0) params.have = [...articlesById.keys()].join(",");
+        const data = yield* request("instapaper.sync", "/api/1/bookmarks/list", params);
+        const page = yield* validate(instapaperSyncResponseSchema, data, "instapaper.sync");
+        const fresh = page.bookmarks.filter((item) => !articlesById.has(item.bookmark_id));
+        if (page.bookmarks.length >= limit && fresh.length === 0)
+          return yield* Effect.fail(new IncompleteSnapshotFailure("instapaper.sync"));
+        for (const item of fresh) articlesById.set(item.bookmark_id, toArticle(item));
+        if (page.bookmarks.length < limit) break;
+        // Instapaper publishes no rate limit; one second between pages is conservative.
+        yield* Effect.sleep(1000);
+      }
+      const articles = [...articlesById.values()];
+      return {
+        articles,
+        mode: options?.mode ?? "overwrite",
+        metadata: {
+          totalFetched: articles.length,
+          totalProcessed: articles.length,
+          lastSyncTimestamp: new Date().toISOString(),
+          apiVersion: "1.0",
+        },
+      };
+    }),
+    testConnection: Effect.gen(function* () {
+      const data = yield* request(
+        "instapaper.testConnection",
+        "/api/1/bookmarks/list",
+        { limit: "1" },
+        { timeoutMs: 10000 },
+      );
+      yield* validate(instapaperSyncResponseSchema, data, "instapaper.testConnection");
+      yield* storageHealthy;
+      return true as const;
+    }),
+  };
+  yield* storageHealthy;
+  // Invalidation during the acquisition's own token persistence must not return a ready adapter.
+  yield* owned;
+  return adapter;
+}) satisfies (
+  settings: InstapaperSettings,
+  tokens?: TokenManager,
+) => Effect.Effect<EffectAdapter, AcquisitionError>;

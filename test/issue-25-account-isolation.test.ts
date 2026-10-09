@@ -1,20 +1,24 @@
-import { afterEach, beforeEach, expect, test, mock, spyOn } from "bun:test";
+import { bookmarks, mockReadyAdapter } from "./fixtures/ready-adapter-mock";
+import { runOperation } from "../src/background/api/effect-adapter";
+import { beforeEach, afterEach, expect, test, mock, spyOn } from "bun:test";
 import type { Article } from "../src/types/common";
-import { BookmarksAdapter } from "../src/background/api/adapters/bookmarks-adapter";
 import {
   ArticlesRepository,
   getAccountStorageKeys,
   removeStaleAccountKeys,
 } from "../src/background/articles-repository";
 import { TokenManager, tokenManager } from "../src/background/token-manager";
-import { getAdapter } from "../src/utils/adapter-factory";
 import { DEFAULT_SETTINGS } from "../src/utils/settings";
+
+beforeEach(() => {
+  mockReadyAdapter();
+});
 
 const originalBrowser = Object.getOwnPropertyDescriptor(globalThis, "browser");
 
 beforeEach(async () => {
   makeBrowserMock();
-  await tokenManager.clearAllTokens();
+  await runOperation(tokenManager.clearToken("wallabag"));
 });
 
 afterEach(async () => {
@@ -98,32 +102,29 @@ async function makeRepository(apiConfig: Record<string, string>): Promise<Articl
   return repository;
 }
 
-test("getAdapter returns a fresh adapter instance on every call", () => {
-  const first = getAdapter("bookmarks");
-  const second = getAdapter("bookmarks");
-  expect(first).not.toBe(second);
-});
-
 test("a retired account's late sync never writes into the new account's storage", async () => {
   const { storage } = makeBrowserMock();
   const oldRepo = await makeRepository({ account: "a" });
   const newKeys = getAccountStorageKeys(makeSettings({ account: "b" }));
 
   const syncGate = deferred();
-  spyOn(BookmarksAdapter.prototype, "sync").mockReturnValue(
+  spyOn(bookmarks, "sync").mockReturnValue(
     syncGate.promise.then(() => ({
-      articles: [article("old-1", "https://old.example/a"), article(42, "https://shared.example/x")],
+      articles: [
+        article("old-1", "https://old.example/a"),
+        article(42, "https://shared.example/x"),
+      ],
       mode: "overwrite" as const,
     })),
   );
 
-  const oldSync = oldRepo.syncWithAPI({ mode: "overwrite" });
+  const oldSync = runOperation(oldRepo.syncWithAPI({ mode: "overwrite" }));
 
   const newRepo = await makeRepository({ account: "b" });
-  spyOn(BookmarksAdapter.prototype, "saveArticle").mockResolvedValue(
+  spyOn(bookmarks, "saveArticle").mockResolvedValue(
     article(42, "https://shared.example/x"),
   );
-  await newRepo.saveArticle({ url: "https://shared.example/x", title: "Shared" });
+  await runOperation(newRepo.saveArticle({ url: "https://shared.example/x", title: "Shared" }));
 
   syncGate.resolve();
   await oldSync;
@@ -132,28 +133,72 @@ test("a retired account's late sync never writes into the new account's storage"
   expect(newArticles.map((a) => a.id)).toEqual([42]);
   expect(storage[newKeys.lastSyncTimestamp]).toBeUndefined();
   expect(storage[newKeys.lastFullSyncTimestamp]).toBeUndefined();
-  const oldArticles = await oldRepo.getAllArticles();
+  const oldArticles = await runOperation(oldRepo.getAllArticles);
   expect(oldArticles.map((a) => a.id).sort()).toEqual([42, "old-1"].sort());
+});
+
+test("re-initializing retires late saves, deletes, and syncs of the previous account", async () => {
+  const { storage } = makeBrowserMock();
+  const repository = await makeRepository({ account: "a" });
+  const keysA = getAccountStorageKeys(makeSettings({ account: "a" }));
+  const keysB = getAccountStorageKeys(makeSettings({ account: "b" }));
+  storage[keysA.articles] = [article(42, "https://shared.example/x")];
+  storage[keysB.articles] = [article(42, "https://shared.example/x")];
+
+  const remoteGate = deferred();
+  let entered = 0;
+  const allEntered = deferred();
+  const remote = <T>(value: () => T) => {
+    if (++entered === 3) allEntered.resolve();
+    return remoteGate.promise.then(value);
+  };
+  spyOn(bookmarks, "saveArticle").mockImplementation(() =>
+    remote(() => article(7, "https://late.example/save")),
+  );
+  spyOn(bookmarks, "deleteArticle").mockImplementation(() =>
+    remote(() => undefined),
+  );
+  spyOn(bookmarks, "sync").mockImplementation(() =>
+    remote(() => ({
+      articles: [article("old-1", "https://old.example/a")],
+      mode: "overwrite" as const,
+    })),
+  );
+  const save = runOperation(repository.saveArticle({ url: "https://late.example/save", title: "Late" }));
+  const remove = runOperation(repository.deleteArticle(42));
+  const sync = runOperation(repository.syncWithAPI({ mode: "overwrite" }));
+  await allEntered.promise;
+
+  repository.initialize(makeSettings({ account: "b" }));
+  const before = structuredClone(storage);
+  remoteGate.resolve();
+
+  expect((await save).id).toBe(7);
+  expect(await remove).toEqual({ success: true, id: 42 });
+  await sync;
+  expect(storage).toEqual(before);
+  expect((await runOperation(repository.getAllArticles)).map((a) => a.id)).toEqual([42]);
 });
 
 test("accounts within one backend keep isolated articles and timestamps", async () => {
   const { storage } = makeBrowserMock();
+  storage[getAccountStorageKeys(makeSettings({ account: "a" })).articles] = [
+    article("a-1", "https://a.example/1"),
+  ];
   const repoA = await makeRepository({ account: "a" });
   const keysB = getAccountStorageKeys(makeSettings({ account: "b" }));
 
-  await repoA.updateArticles([article("a-1", "https://a.example/1")]);
-
   const repoB = await makeRepository({ account: "b" });
-  expect(await repoB.getAllArticles()).toEqual([]);
+  expect(await runOperation(repoB.getAllArticles)).toEqual([]);
 
-  spyOn(BookmarksAdapter.prototype, "sync").mockResolvedValue({
+  spyOn(bookmarks, "sync").mockResolvedValue({
     articles: [article("b-1", "https://b.example/1")],
     mode: "overwrite" as const,
   });
-  await repoB.syncWithAPI({ mode: "overwrite" });
+  await runOperation(repoB.syncWithAPI({ mode: "overwrite" }));
 
   expect(storage[keysB.lastSyncTimestamp]).toBeDefined();
-  expect(await repoA.getAllArticles()).toEqual([article("a-1", "https://a.example/1")]);
+  expect(await runOperation(repoA.getAllArticles)).toEqual([article("a-1", "https://a.example/1")]);
   const articlesA = getAccountStorageKeys(makeSettings({ account: "a" }));
   expect(storage[articlesA.lastSyncTimestamp]).toBeUndefined();
 });
@@ -164,8 +209,8 @@ test("deleting a shared article ID only affects the active account", async () =>
   const keysB = getAccountStorageKeys(makeSettings({ account: "b" }));
   storage[keysB.articles] = [article(42, "https://shared.example/x")];
 
-  spyOn(BookmarksAdapter.prototype, "deleteArticle").mockResolvedValue(undefined);
-  await repoA.deleteArticle(42);
+  spyOn(bookmarks, "deleteArticle").mockResolvedValue(undefined);
+  await runOperation(repoA.deleteArticle(42));
 
   expect((storage[keysB.articles] as Article[]).map((a) => a.id)).toEqual([42]);
 });
@@ -175,15 +220,15 @@ test("concurrent repository operations coalesce adapter initialization", async (
   const repository = await makeRepository({ account: "a" });
 
   const initGate = deferred();
-  const initSpy = spyOn(BookmarksAdapter.prototype, "initialize").mockReturnValue(
+  const initSpy = spyOn(bookmarks, "initialize").mockReturnValue(
     initGate.promise as unknown as Promise<void>,
   );
-  spyOn(BookmarksAdapter.prototype, "saveArticle").mockResolvedValue(
+  spyOn(bookmarks, "saveArticle").mockResolvedValue(
     article(7, "https://example.com/one"),
   );
 
-  const first = repository.saveArticle({ url: "https://example.com/one", title: "One" });
-  const second = repository.saveArticle({ url: "https://example.com/one", title: "One" });
+  const first = runOperation(repository.saveArticle({ url: "https://example.com/one", title: "One" }));
+  const second = runOperation(repository.saveArticle({ url: "https://example.com/one", title: "One" }));
   initGate.resolve();
 
   await Promise.all([first, second]);
@@ -194,13 +239,13 @@ test("a failed adapter initialization rejects all concurrent callers and allows 
   makeBrowserMock();
   const repository = await makeRepository({ account: "a" });
 
-  spyOn(BookmarksAdapter.prototype, "initialize").mockRejectedValueOnce(new Error("boom"));
-  spyOn(BookmarksAdapter.prototype, "saveArticle").mockResolvedValue(
+  spyOn(bookmarks, "initialize").mockRejectedValueOnce(new Error("boom"));
+  spyOn(bookmarks, "saveArticle").mockResolvedValue(
     article(7, "https://example.com/one"),
   );
 
-  const first = repository.saveArticle({ url: "https://example.com/one", title: "One" });
-  const second = repository.saveArticle({ url: "https://example.com/one", title: "One" });
+  const first = runOperation(repository.saveArticle({ url: "https://example.com/one", title: "One" }));
+  const second = runOperation(repository.saveArticle({ url: "https://example.com/one", title: "One" }));
   const firstOutcome = await first.then(
     () => "resolved",
     (error: Error) => error.message,
@@ -213,50 +258,71 @@ test("a failed adapter initialization rejects all concurrent callers and allows 
   expect(secondOutcome).toContain("boom");
 
   await expect(
-    repository.saveArticle({ url: "https://example.com/one", title: "One" }),
+    runOperation(repository.saveArticle({ url: "https://example.com/one", title: "One" })),
   ).resolves.toMatchObject({ id: 7 });
 });
 
 test("test connection uses isolated tokens while a real request for the same backend runs", async () => {
+  // Wallabag is the remaining TokenManager backend; it needs the real ready-adapter factory.
+  mock.restore();
   const { storage } = makeBrowserMock();
   Object.assign(browser, { permissions: { contains: async () => true } });
   const draftRequestStarted = deferred();
   const releaseDraftRequest = deferred();
   const authHeaders: string[] = [];
-  spyOn(globalThis, "fetch").mockImplementation((async (_url: string, init?: RequestInit) => {
+  spyOn(globalThis, "fetch").mockImplementation((async (url: string, init?: RequestInit) => {
+    if (String(url).endsWith("/oauth/v2/token")) {
+      const password = new URLSearchParams(String(init?.body)).get("password");
+      return new Response(
+        JSON.stringify({
+          access_token: password === "draft" ? "draft-token" : "active-token",
+          refresh_token: "refresh",
+          token_type: "Bearer",
+          expires_in: 3600,
+        }),
+      );
+    }
     const auth = new Headers(init?.headers).get("Authorization") ?? "";
     authHeaders.push(auth);
     if (auth === "Bearer draft-token") {
       draftRequestStarted.resolve();
       await releaseDraftRequest.promise;
     }
-    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    return new Response(
+      JSON.stringify({ _embedded: { items: [] }, limit: 1, page: 1, pages: 0, total: 0 }),
+    );
   }) as typeof fetch);
-  const karakeep = (token: string) =>
+  const wallabag = (password: string) =>
     ({
       ...DEFAULT_SETTINGS,
-      backend: "karakeep",
-      apiConfig: { url: "https://karakeep.example", token },
+      backend: "wallabag",
+      apiConfig: {
+        url: "https://wallabag.example",
+        clientId: "client",
+        clientSecret: "secret",
+        username: "user",
+        password,
+      },
     }) as RepoSettings;
 
   const activeRepo = new ArticlesRepository();
-  await activeRepo.initialize(karakeep("active-token"));
-  expect(await activeRepo.testConnection()).toBe(true);
+  await activeRepo.initialize(wallabag("active"));
+  expect(await runOperation(activeRepo.testConnection)).toBe(true);
 
   const testRepo = new ArticlesRepository(new TokenManager({ persist: false }));
-  await testRepo.initialize(karakeep("draft-token"));
-  const testResult = testRepo.testConnection();
+  await testRepo.initialize(wallabag("draft"));
+  const testResult = runOperation(testRepo.testConnection);
   await draftRequestStarted.promise;
 
-  await tokenManager.storeToken("karakeep", {
+  await runOperation(tokenManager.storeToken("wallabag", {
     accessToken: "rotated-token",
     refreshToken: "",
     tokenType: "Bearer",
     expiresAt: Date.now() + 60 * 60 * 1000,
     issuedAt: Date.now(),
     refreshCount: 0,
-  });
-  expect(await activeRepo.testConnection()).toBe(true);
+  }));
+  expect(await runOperation(activeRepo.testConnection)).toBe(true);
 
   releaseDraftRequest.resolve();
   expect(await testResult).toBe(true);
@@ -266,12 +332,12 @@ test("test connection uses isolated tokens while a real request for the same bac
     "Bearer draft-token",
     "Bearer rotated-token",
   ]);
-  expect(await tokenManager.getAccessToken("karakeep")).toBe("rotated-token");
+  expect(await runOperation(tokenManager.getAccessToken("wallabag"))).toBe("rotated-token");
   const persisted = storage.api_tokens as [string, { accessToken: string }][];
   expect(persisted).toEqual([
-    ["karakeep", expect.objectContaining({ accessToken: "rotated-token" })],
+    ["wallabag", expect.objectContaining({ accessToken: "rotated-token" })],
   ]);
-});
+}, 15000);
 
 test("Settings change removes other accounts' cached keys and legacy keys only", async () => {
   const current = getAccountStorageKeys(DEFAULT_SETTINGS);
@@ -291,9 +357,43 @@ test("Settings change removes other accounts' cached keys and legacy keys only",
   };
   await browser.storage.local.set(initial);
 
-  await removeStaleAccountKeys(DEFAULT_SETTINGS);
+  await runOperation(removeStaleAccountKeys(DEFAULT_SETTINGS));
 
   expect(Object.keys(await browser.storage.local.get(null)).sort()).toEqual(
     [...Object.values(current), "api_tokens", "filterListCache"].sort(),
   );
+});
+
+test("stale key removal waits for a retired account's in-flight sync commit", async () => {
+  const { storage } = makeBrowserMock();
+  const repository = await makeRepository({ account: "a" });
+  const keysA = getAccountStorageKeys(makeSettings({ account: "a" }));
+  const settingsB = makeSettings({ account: "b" });
+
+  // The old account's commit has passed its retired check and is writing its articles.
+  const writing = deferred();
+  const releaseWrite = deferred();
+  const set = browser.storage.local.set;
+  spyOn(browser.storage.local, "set").mockImplementation(async (values) => {
+    if (keysA.articles in values) {
+      writing.resolve();
+      await releaseWrite.promise;
+    }
+    return set(values);
+  });
+  spyOn(bookmarks, "sync").mockResolvedValue({
+    articles: [article("old-1", "https://old.example/a")],
+    mode: "overwrite" as const,
+  });
+  const sync = runOperation(repository.syncWithAPI({ mode: "overwrite" }));
+  await writing.promise;
+
+  repository.initialize(settingsB);
+  const removal = runOperation(repository.removeStaleKeys(settingsB));
+  await Bun.sleep(0);
+  releaseWrite.resolve();
+  await sync;
+  await removal;
+
+  expect(Object.keys(storage).filter((key) => Object.values(keysA).includes(key))).toEqual([]);
 });

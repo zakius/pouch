@@ -1,200 +1,159 @@
+import { Effect } from "effect";
 import * as v from "valibot";
 import { karakeepConfigSchema, karakeepSettingsSchema } from "../../../utils/settings-schemas";
 export { karakeepConfigSchema, karakeepSettingsSchema };
 import type { Article } from "../../../types/common";
-import { logger } from "../../../utils/logger";
-import { type TokenManager, type TokenRefreshConfig, tokenManager } from "../../token-manager";
-import { type ApiClient, createApiClient } from "../api-client";
-import type {
-  ReadItLaterAPI,
-  SavingArticle,
-  SyncOptions,
-  SyncResult,
-} from "../read-it-later-adapter";
-import type { TokenizedAdapter } from "../tokenized-adapter";
+import { requestJson, validate } from "../effect-api-client";
+import {
+  ConfigurationFailure,
+  IncompleteSnapshotFailure,
+  ProviderFailure,
+  storageHealthy,
+  type AcquisitionError,
+  type EffectAdapter,
+} from "../effect-adapter";
+import type { SavingArticle, SyncOptions } from "../read-it-later-adapter";
 
 export type KarakeepSettings = v.InferInput<typeof karakeepSettingsSchema>;
 export type KarakeepConfig = v.InferInput<typeof karakeepConfigSchema>;
 
-const karakeepItemSchema = v.object({
-  id: v.number(),
-  title: v.string(),
-  url: v.string(),
+/** Karakeep's OpenAPI `Bookmark`: link bookmarks carry `url`, text and asset bookmarks may carry `sourceUrl`. */
+const karakeepBookmarkSchema = v.object({
+  id: v.string(),
   createdAt: v.string(),
-  cover: v.optional(v.nullable(v.string())),
-  description: v.optional(v.nullable(v.string())),
-  summary: v.optional(v.nullable(v.string())),
-  content: v.optional(v.nullable(v.string())),
-  status: v.optional(v.nullable(v.string())),
-  tags: v.optional(
-    v.array(
-      v.object({
-        id: v.number(),
-        name: v.string(),
-      }),
-    ),
-  ),
-  highlights: v.optional(v.array(v.unknown())),
-  assets: v.optional(v.array(v.unknown())),
+  title: v.optional(v.nullable(v.string())),
+  content: v.object({
+    type: v.string(),
+    url: v.optional(v.string()),
+    sourceUrl: v.optional(v.nullable(v.string())),
+    title: v.optional(v.nullable(v.string())),
+  }),
+});
+const karakeepPageSchema = v.object({
+  bookmarks: v.array(karakeepBookmarkSchema),
+  nextCursor: v.nullable(v.string()),
+});
+/** The documented `{code, message}` error and the request validator's `{success: false}` body. */
+const karakeepErrorSchema = v.union([
+  v.object({ code: v.string(), message: v.string() }),
+  v.object({ success: v.literal(false) }),
+]);
+
+type KarakeepBookmark = v.InferOutput<typeof karakeepBookmarkSchema>;
+
+/** Error bodies may echo request data, so only the rejection itself is kept. */
+const providerFailure = (operation: string) => (data: unknown) =>
+  v.is(karakeepErrorSchema, data) ? new ProviderFailure(operation) : undefined;
+
+const toArticle = (item: KarakeepBookmark, url: string): Article => ({
+  id: item.id,
+  title: item.title ?? item.content.title ?? url,
+  url,
+  created_at: item.createdAt,
 });
 
-const karakeepErrorSchema = v.object({
-  error: v.string(),
-  message: v.optional(v.string()),
-  status: v.optional(v.number()),
-});
+/** The static API token never enters TokenManager, so it cannot reach refresh or token removal. */
+export const createKarakeepAdapter = Effect.fn("karakeep.acquire")(function* (
+  settings: KarakeepSettings,
+) {
+  const parsed = v.safeParse(karakeepSettingsSchema, settings);
+  const token = parsed.success ? parsed.output.apiConfig.token.trim() : "";
+  // A missing token must not degrade into an unauthenticated request.
+  if (!parsed.success || !token || /[\r\n]/.test(token))
+    return yield* Effect.fail(new ConfigurationFailure("karakeep.acquire"));
+  // The configured URL is the API base, for example https://host/api/v1.
+  const apiUrl = parsed.output.apiConfig.url.replace(/\/+$/, "");
+  const authorization = Effect.succeed(`Bearer ${token}`);
 
-// Type guard for Karakeep error responses
-function isKarakeepError(
-  data: unknown,
-): data is { error: string; message?: string; status?: number } {
-  return typeof data === "object" && data !== null && "error" in data;
-}
-
-const karakeepSaveResponseSchema = v.union([karakeepItemSchema, karakeepErrorSchema]);
-
-const karakeepSyncResponseSchema = v.union([v.array(karakeepItemSchema), karakeepErrorSchema]);
-
-interface KarakeepItem {
-  id: number;
-  title: string;
-  url: string;
-  createdAt: string;
-  cover?: string | null;
-  description?: string | null;
-  summary?: string | null;
-  content?: string | null;
-  status?: string | null;
-  tags?: { id: number; name: string }[];
-  highlights?: unknown[];
-  assets?: unknown[];
-}
-
-export class KarakeepAdapter implements ReadItLaterAPI<KarakeepSettings>, TokenizedAdapter {
-  constructor(public readonly tokens: TokenManager = tokenManager) {}
-
-  public readonly displayName = "Karakeep";
-  private apiUrl: string = "";
-  private token: string = "";
-  private apiClient!: ApiClient;
-  formConfig = [
-    { name: "url", label: "API URL" },
-    { name: "token", label: "API Token" },
-  ];
-
-  getServiceName(): string {
-    return "karakeep";
-  }
-
-  getTokenRefreshConfig(): TokenRefreshConfig | null {
-    // Karakeep uses static API tokens that don't expire/refresh
-    return null;
-  }
-
-  createTokenMetadata(_tokenData: Record<string, unknown>) {
-    const now = Date.now();
-    return {
-      accessToken: this.token,
-      refreshToken: "", // No refresh token for static API keys
-      tokenType: "Bearer",
-      expiresAt: now + 365 * 24 * 60 * 60 * 1000, // 1 year from now (effectively never expires)
-      issuedAt: now,
-      scope: undefined,
-      refreshCount: 0,
-    };
-  }
-
-  getBaseUrl(): string {
-    return this.apiUrl;
-  }
-
-  getAuthEndpoint(): string {
-    return "";
-  }
-
-  async initialize(settings: KarakeepSettings): Promise<void> {
-    this.apiUrl = settings.apiConfig.url;
-    this.token = settings.apiConfig.token;
-
-    const tokenMetadata = this.createTokenMetadata({});
-    await this.tokens.storeToken(this.getServiceName(), tokenMetadata);
-
-    this.apiClient = createApiClient(this, {
-      baseUrl: this.apiUrl,
-      rateLimit: {
-        delayMs: 1000,
-        maxRetries: 3,
-        lowLimitThreshold: 10,
-      },
+  const request = (
+    operation: string,
+    endpoint: string,
+    options: {
+      init?: RequestInit;
+      mutation?: "save" | "delete";
+      timeoutMs?: number;
+      confirms?: v.GenericSchema;
+    } = {},
+  ) => {
+    const { confirms } = options;
+    return requestJson({
+      operation,
+      url: `${apiUrl}${endpoint}`,
+      init: options.init,
+      mutation: options.mutation,
+      timeoutMs: options.timeoutMs,
+      authorization,
+      providerFailure: providerFailure(operation),
+      confirms: confirms && ((data) => v.is(confirms, data)),
     });
-  }
-  async testConnection(): Promise<boolean> {
-    try {
-      return await this.apiClient.testConnection("/bookmarks");
-    } catch (error) {
-      logger.error("Karakeep connection test failed:", error);
-      return false;
-    }
-  }
-  async saveArticle(article: SavingArticle): Promise<Article> {
-    const response = await this.apiClient.post("/bookmarks", {
-      url: article.url,
-      title: article.title,
-    });
-    const validatedData = v.parse(karakeepSaveResponseSchema, response.data);
+  };
 
-    if (isKarakeepError(validatedData)) {
-      throw new Error(`Failed to save article: ${validatedData.message || validatedData.error}`);
-    }
-
-    return this.mapArticle(validatedData);
-  }
-  async deleteArticle(id: number): Promise<void> {
-    await this.apiClient.delete(`/bookmarks/${id}`);
-  }
-  async sync(_options?: SyncOptions): Promise<SyncResult> {
-    // Karakeep's GET /bookmarks has no created-since or modified-since filter
-    // (https://docs.karakeep.app/api/get-all-bookmarks/), so every sync fetches
-    // all bookmarks and returns overwrite mode regardless of the requested mode.
-    const response = await this.apiClient.get("/bookmarks");
-    const validatedData = v.parse(karakeepSyncResponseSchema, response.data);
-
-    if (isKarakeepError(validatedData)) {
-      throw new Error(`Failed to sync articles: ${validatedData.message || validatedData.error}`);
-    }
-
-    const articles = (validatedData as KarakeepItem[]).map((item) => this.mapArticle(item));
-
-    return {
-      articles,
-      mode: "overwrite",
-      metadata: {
-        totalFetched: articles.length,
-        totalProcessed: articles.length,
-        lastSyncTimestamp: new Date().toISOString(),
-        apiVersion: "1.0",
-      },
-    };
-  }
-
-  public async cleanup(): Promise<void> {
-    await this.apiClient.clearToken();
-  }
-
-  public getTokenHealth(): {
-    isValid: boolean;
-    expiresAt?: string;
-    refreshCount?: number;
-  } {
-    return this.apiClient.getTokenHealth();
-  }
-
-  private mapArticle(item: KarakeepItem): Article {
-    return {
-      id: item.id,
-      title: item.title,
-      url: item.url,
-      created_at: item.createdAt,
-    };
-  }
-}
+  const adapter: EffectAdapter = {
+    saveArticle: Effect.fn("karakeep.save")(function* (article: SavingArticle) {
+      // 201 creates the bookmark; 200 returns the existing bookmark for the same URL.
+      const data = yield* request("karakeep.save", "/bookmarks", {
+        mutation: "save",
+        confirms: karakeepBookmarkSchema,
+        init: {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: "link", url: article.url, title: article.title }),
+        },
+      });
+      const saved = yield* validate(karakeepBookmarkSchema, data, "karakeep.save");
+      return toArticle(saved, saved.content.url ?? article.url);
+    }),
+    deleteArticle: Effect.fn("karakeep.delete")(function* (id: number | string) {
+      yield* request("karakeep.delete", `/bookmarks/${encodeURIComponent(String(id))}`, {
+        mutation: "delete",
+        init: { method: "DELETE" },
+      });
+    }),
+    /**
+     * Karakeep's GET /bookmarks has no created-since or modified-since filter, so every sync
+     * walks the whole cursor-paginated listing and returns overwrite mode regardless of the
+     * requested mode. Bookmarks without a URL (plain notes) are not articles.
+     */
+    sync: Effect.fn("karakeep.sync")(function* (_options?: SyncOptions) {
+      const query = new URLSearchParams({ limit: "100" });
+      const seen = new Set<string>();
+      const articles: Article[] = [];
+      for (let page = 0; ; page++) {
+        // Keeps the one-request-per-second pacing of the shared client this replaces.
+        if (page > 0) yield* Effect.sleep(1000);
+        const data = yield* request("karakeep.sync", `/bookmarks?${query.toString()}`);
+        const result = yield* validate(karakeepPageSchema, data, "karakeep.sync");
+        for (const item of result.bookmarks) {
+          const url = item.content.url ?? item.content.sourceUrl;
+          if (url) articles.push(toArticle(item, url));
+        }
+        if (result.nextCursor === null) break;
+        // A revisited cursor would never end; overwriting from a partial listing would drop articles.
+        if (seen.has(result.nextCursor))
+          return yield* Effect.fail(new IncompleteSnapshotFailure("karakeep.sync"));
+        seen.add(result.nextCursor);
+        query.set("cursor", result.nextCursor);
+      }
+      return {
+        articles,
+        mode: "overwrite" as const,
+        metadata: {
+          totalFetched: articles.length,
+          totalProcessed: articles.length,
+          lastSyncTimestamp: new Date().toISOString(),
+          apiVersion: "1.0",
+        },
+      };
+    }),
+    testConnection: Effect.gen(function* () {
+      const data = yield* request("karakeep.testConnection", "/bookmarks?limit=1", {
+        timeoutMs: 10000,
+      });
+      yield* validate(karakeepPageSchema, data, "karakeep.testConnection");
+      yield* storageHealthy;
+      return true as const;
+    }),
+  };
+  yield* storageHealthy;
+  return adapter;
+}) satisfies (settings: KarakeepSettings) => Effect.Effect<EffectAdapter, AcquisitionError>;

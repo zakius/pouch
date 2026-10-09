@@ -40,7 +40,13 @@ const pick = (store: Record<string, unknown>, keys: string | string[] | null) =>
 
 Object.assign(globalThis, {
   browser: {
-    runtime: { onMessage: event, onInstalled: event, onStartup: event, onMessageExternal: event },
+    runtime: {
+      onMessage: event,
+      onInstalled: event,
+      onStartup: event,
+      onMessageExternal: event,
+      getURL: (path: string) => path,
+    },
     storage: {
       sync: { get: async (keys: string | string[]) => pick(settings, keys), set: async () => {} },
       local: {

@@ -19,10 +19,12 @@ const syncStore: Record<string, unknown> = {
 };
 const localStore: Record<string, unknown> = {};
 const fetchCalls: string[] = [];
+let rejectBookmarkRead = false;
 
 Object.assign(globalThis, {
   browser: {
     runtime: {
+      getURL: (path: string) => path,
       onMessage: { addListener: (l: Listener) => listeners.push(l) },
       onInstalled: { addListener: () => {} },
       onStartup: { addListener: () => {} },
@@ -54,7 +56,10 @@ Object.assign(globalThis, {
     },
     bookmarks: {
       getTree: async () => [{ id: "1", title: "Pouch", children: [] }],
-      getChildren: async () => [],
+      getChildren: async () => {
+        if (rejectBookmarkRead) throw new Error("permission denied https://private.example/token");
+        return [];
+      },
       create: async () => ({ id: "x", title: "t", url: "u" }),
       remove: async () => {},
     },
@@ -65,13 +70,20 @@ Object.assign(globalThis, {
       onAlarm: { addListener: () => {} },
     },
     contextMenus: {
-      create: () => ({}),
+      create: (_details: unknown, callback?: () => void) => {
+        callback?.();
+        return "menu";
+      },
       onClicked: { addListener: () => {} },
       removeAll: async () => {},
     },
     idle: { queryState: async () => "active" },
     action: { setBadgeText: async () => {}, setTitle: async () => {} },
-    pageAction: { onClicked: { addListener: () => {} }, show: async () => {}, hide: async () => {} },
+    pageAction: {
+      onClicked: { addListener: () => {} },
+      show: async () => {},
+      hide: async () => {},
+    },
     commands: { onCommand: { addListener: () => {} } },
     notifications: { create: async () => {}, onClicked: { addListener: () => {} } },
     permissions: {
@@ -89,9 +101,12 @@ Object.assign(globalThis, {
   },
   fetch: (async (input: unknown) => {
     fetchCalls.push(String(input));
-    return new Response(JSON.stringify({ access_token: "tok", refresh_token: "ref", expires_in: 3600 }), {
-      status: 200,
-    });
+    return new Response(
+      JSON.stringify({ access_token: "tok", refresh_token: "ref", expires_in: 3600 }),
+      {
+        status: 200,
+      },
+    );
   }) as typeof fetch,
 });
 
@@ -139,4 +154,20 @@ test("saveSettings and testConnection respond", async () => {
   console.log("testConnection response:", JSON.stringify(testResult), "fetches:", fetchCalls);
   expect(saveResult).not.toBe("TIMEOUT");
   expect(testResult).not.toBe("TIMEOUT");
+});
+
+
+test("runtime bookmark connection failures expose safe details and malformed requests are rejected", async () => {
+  await import("../src/background/background.ts");
+  const settings = { backend: "bookmarks", apiConfig: {}, logLevel: 3, normalizeOnSave: false, normalizeOnCompare: false };
+  rejectBookmarkRead = true;
+  const response = await sendMessage({ type: "testConnection", payload: { settings } });
+  expect(response).toMatchObject({ success: false, code: "BrowserFailure", details: { operation: "test bookmarks connection" } });
+  expect(JSON.stringify(response)).not.toContain("private.example");
+  expect(response).toHaveProperty("error");
+  for (const message of [null, { type: "saveArticle" }, { type: "saveArticle", payload: { url: 42 } }]) {
+    expect(await sendMessage(message)).toMatchObject({ code: "INVALID_REQUEST", details: {} });
+  }
+  rejectBookmarkRead = false;
+  expect(await sendMessage({ type: "testConnection", payload: { settings } })).toEqual({ success: true });
 });
