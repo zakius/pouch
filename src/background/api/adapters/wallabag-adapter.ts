@@ -147,11 +147,7 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
     Effect.gen(function* () {
       yield* owned;
       const token = tokens.getTokenMetadata("wallabag");
-      if (
-        token &&
-        !token.refreshToken &&
-        authorization === `Bearer ${token.accessToken}`
-      )
+      if (token && !token.refreshToken && authorization === `Bearer ${token.accessToken}`)
         yield* tokens.discardRejectedToken("wallabag", token);
     });
   const recoverAuth = Effect.gen(function* () {
