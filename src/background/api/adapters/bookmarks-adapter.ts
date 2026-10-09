@@ -3,24 +3,17 @@ import { reportRemoteOutcome } from "../../../utils/fatal-storage";
 import * as v from "valibot";
 import { IS_CHROMIUM } from "../../../utils/chromium";
 import { bookmarksSettingsSchema, type BookmarksSettings } from "../../../utils/settings-schemas";
-import { DEFAULT_SETTINGS } from "../../../utils/settings";
 import type { Article } from "../../../types/common";
 import {
   BrowserFailure,
   ConfigurationFailure,
   PermissionFailure,
-  runOperation,
   recordMutationSuccess,
   storageHealthy,
   type AcquisitionError,
   type EffectAdapter,
 } from "../effect-adapter";
-import type {
-  ReadItLaterAPI,
-  SavingArticle,
-  SyncOptions,
-  SyncResult,
-} from "../read-it-later-adapter";
+import type { SavingArticle, SyncOptions } from "../read-it-later-adapter";
 export { bookmarksSettingsSchema };
 export type { BookmarksSettings };
 
@@ -121,8 +114,6 @@ export const createBookmarksAdapter = Effect.fn("bookmarks.acquire")(function* (
   yield* storageHealthy;
 
   const adapter: EffectAdapter = {
-    displayName: "Browser Bookmarks",
-    formConfig: [],
     saveArticle: Effect.fn("bookmarks.save")(function* (article: SavingArticle) {
       yield* storageHealthy;
       yield* permissionHealthy.pipe(Effect.interruptible);
@@ -174,42 +165,3 @@ export const createBookmarksAdapter = Effect.fn("bookmarks.acquire")(function* (
   };
   return adapter;
 }) satisfies (settings: BookmarksSettings) => Effect.Effect<EffectAdapter, AcquisitionError>;
-
-/** Temporary legacy adapter entry point. Remove in #81 after callers accept ready Effect adapters. */
-export class BookmarksAdapter implements ReadItLaterAPI<BookmarksSettings> {
-  readonly displayName = "Browser Bookmarks";
-  readonly formConfig = [];
-  private ready: Promise<EffectAdapter> | undefined;
-
-  private acquire(
-    settings: unknown = { ...DEFAULT_SETTINGS, backend: "bookmarks", apiConfig: {} },
-  ): Promise<EffectAdapter> {
-    this.ready ??= runOperation(
-      Effect.suspend(() => {
-        const result = v.safeParse(bookmarksSettingsSchema, settings);
-        return result.success
-          ? createBookmarksAdapter(result.output)
-          : Effect.fail(new ConfigurationFailure("bookmarks.acquire"));
-      }),
-    ).catch((error: unknown) => {
-      this.ready = undefined;
-      throw error;
-    });
-    return this.ready;
-  }
-  async initialize(settings?: unknown): Promise<void> {
-    await this.acquire(settings);
-  }
-  async testConnection(): Promise<boolean> {
-    return runOperation((await this.acquire()).testConnection);
-  }
-  async saveArticle(article: SavingArticle): Promise<Article> {
-    return runOperation((await this.acquire()).saveArticle(article));
-  }
-  async deleteArticle(id: number | string): Promise<void> {
-    return runOperation((await this.acquire()).deleteArticle(id));
-  }
-  async sync(options?: SyncOptions): Promise<SyncResult> {
-    return runOperation((await this.acquire()).sync(options));
-  }
-}

@@ -8,23 +8,16 @@ import { requestJson, validate } from "../effect-api-client";
 import {
   ConfigurationFailure,
   ProviderFailure,
-  runOperation,
   storageHealthy,
   type AcquisitionError,
   type EffectAdapter,
 } from "../effect-adapter";
-import type {
-  ReadItLaterAPI,
-  SavingArticle,
-  SyncOptions,
-  SyncResult,
-} from "../read-it-later-adapter";
+import type { SavingArticle, SyncOptions } from "../read-it-later-adapter";
 
 export type RaindropSettings = v.InferInput<typeof raindropSettingsSchema>;
 export type RaindropConfig = v.InferInput<typeof raindropConfigSchema>;
 
 const apiUrl = "https://api.raindrop.io/rest/v1";
-const formConfig = [{ name: "apiKey", label: "API Key (Test Token)" }];
 
 const raindropItemSchema = v.object({
   _id: v.number(),
@@ -108,8 +101,6 @@ export const createRaindropAdapter = Effect.fn("raindrop.acquire")(function* (
   };
 
   const adapter: EffectAdapter = {
-    displayName: "Raindrop.io",
-    formConfig,
     saveArticle: Effect.fn("raindrop.save")(function* (article: SavingArticle) {
       const data = yield* request("raindrop.save", "/raindrop", {
         mutation: "save",
@@ -198,29 +189,3 @@ export const createRaindropAdapter = Effect.fn("raindrop.acquire")(function* (
   yield* storageHealthy;
   return adapter;
 }) satisfies (settings: RaindropSettings) => Effect.Effect<EffectAdapter, AcquisitionError>;
-
-/** Legacy entry point removed with the remaining Promise callers in #81. */
-export class RaindropAdapter implements ReadItLaterAPI<RaindropSettings> {
-  readonly displayName = "Raindrop.io";
-  readonly formConfig = formConfig;
-  private ready: EffectAdapter | undefined;
-  async initialize(settings: RaindropSettings): Promise<void> {
-    this.ready = await runOperation(createRaindropAdapter(settings));
-  }
-  private api(): EffectAdapter {
-    if (!this.ready) throw new ConfigurationFailure("raindrop.acquire");
-    return this.ready;
-  }
-  testConnection(): Promise<boolean> {
-    return runOperation(this.api().testConnection);
-  }
-  saveArticle(article: SavingArticle): Promise<Article> {
-    return runOperation(this.api().saveArticle(article));
-  }
-  deleteArticle(id: number | string): Promise<void> {
-    return runOperation(this.api().deleteArticle(id));
-  }
-  sync(options?: SyncOptions): Promise<SyncResult> {
-    return runOperation(this.api().sync(options));
-  }
-}

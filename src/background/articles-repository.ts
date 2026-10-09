@@ -1,14 +1,15 @@
-import { Effect, Exit, Fiber, Semaphore } from "effect";
+import { Cause, Effect, Exit, Fiber, Semaphore } from "effect";
 import {
-  fromLegacyPromise,
-  runOperation,
+  localRead,
   storageHealthy,
-  BrowserFailure,
+  storageHealthyAfter,
+  storagePromise,
   type AdapterError,
+  type BrowserFailure,
   type EffectAdapter,
+  type FatalStorageFailure,
 } from "./api/effect-adapter";
 import {
-  assertStorageHealthy,
   reportRemoteOutcome,
   setLocal,
   removeLocal,
@@ -26,6 +27,9 @@ import type { TokenManager } from "./token-manager";
 type Mutation = { type: "save"; article: Article } | { type: "delete"; id: number | string };
 type Remote = [outcome: RemoteOutcome, operation: string];
 type Synced = { items: Article[]; total: number; syncResult: SyncResult };
+type LocalError = BrowserFailure | FatalStorageFailure;
+
+const canonical = (url: string) => storagePromise(() => canonicalizeUrl(url));
 
 /**
  * Runs work once for concurrent callers in a detached fiber. Interrupting one caller leaves the
@@ -43,21 +47,38 @@ class Shared<A, E> {
   join(work: () => Effect.Effect<A, E>): Effect.Effect<A, E> {
     return Effect.suspend(() => {
       if (this.fiber) return Fiber.join(this.fiber);
-      const fiber = Effect.runFork(work(), { signal: storageShutdownSignal() });
-      this.fiber = fiber;
-      // Runs at once if the fiber already exited, e.g. after fatal storage shutdown.
-      fiber.addObserver((exit) => {
-        if (this.fiber === fiber && !(this.keepSuccess && Exit.isSuccess(exit)))
-          this.fiber = undefined;
-      });
-      return Fiber.join(fiber);
+      return Effect.forkDetach(Effect.suspend(work)).pipe(
+        Effect.flatMap((fiber) => {
+          // The fork can yield to another caller first; a fiber that hasn't started costs nothing.
+          if (this.fiber) {
+            fiber.interruptUnsafe();
+            return Fiber.join(this.fiber);
+          }
+          this.fiber = fiber;
+          const shutdown = storageShutdownSignal();
+          const stop = () => fiber.interruptUnsafe();
+          shutdown.addEventListener("abort", stop, { once: true });
+          if (shutdown.aborted) stop();
+          // Runs at once if the fiber already exited.
+          fiber.addObserver((exit) => {
+            shutdown.removeEventListener("abort", stop);
+            // Callers may all have left; Effect does not report a detached fiber that dies.
+            if (Exit.isFailure(exit) && Cause.hasDies(exit.cause))
+              logger.error("Shared background work died:", Cause.pretty(exit.cause));
+            if (this.fiber === fiber && !(this.keepSuccess && Exit.isSuccess(exit)))
+              this.fiber = undefined;
+          });
+          return Fiber.join(fiber);
+        }),
+      );
     });
   }
 }
 
-/** One initialize() call's state. Re-initializing retires it, so its late work never commits. */
+/** One account's state. A different account identity retires it, so its late work never commits. */
 type Account = {
-  readonly settings: Settings;
+  /** Same-identity settings changes apply in place, so in-flight work still commits. */
+  settings: Settings;
   readonly keys: AccountStorageKeys;
   retired: boolean;
   readonly adapter: Shared<EffectAdapter, AdapterError>;
@@ -94,17 +115,17 @@ export function getAccountStorageKeys(settings: Settings): AccountStorageKeys {
 }
 
 /** Removes cached articles and sync timestamps left behind by other (or pre-per-account) accounts. */
-export async function removeStaleAccountKeys(settings: Settings): Promise<void> {
-  assertStorageHealthy();
+export const removeStaleAccountKeys = Effect.fn("repository.removeStale")(function* (
+  settings: Settings,
+) {
   const current = new Set(Object.values(getAccountStorageKeys(settings)));
   const prefixes = ["articles", "lastSyncTimestamp", "lastFullSyncTimestamp"];
-  const stale = Object.keys(await browser.storage.local.get(null)).filter(
+  const stale = Object.keys(yield* localRead("read stale account data", null)).filter(
     (key) => !current.has(key) && prefixes.some((p) => key === p || key.startsWith(`${p}:`)),
   );
-  if (stale.length > 0) {
-    await removeLocal("remove stale account data", stale);
-  }
-}
+  if (stale.length > 0)
+    yield* storagePromise(() => removeLocal("remove stale account data", stale));
+});
 
 export class ArticlesRepository {
   private account: Account | undefined;
@@ -115,8 +136,14 @@ export class ArticlesRepository {
   constructor(private readonly tokens?: TokenManager) {}
 
   initialize(settings: Settings): void {
-    assertStorageHealthy();
     logger.info("Initializing ArticlesRepository with settings:", settings);
+    if (
+      this.account &&
+      getAccountIdentity(this.account.settings) === getAccountIdentity(settings)
+    ) {
+      this.account.settings = settings;
+      return;
+    }
     if (this.account) this.account.retired = true;
     this.account = {
       settings,
@@ -128,22 +155,33 @@ export class ArticlesRepository {
     };
   }
 
-  private active(): Account {
-    if (!this.account) throw new Error("ArticlesRepository is not initialized");
-    return this.account;
+  /**
+   * Removes other accounts' keys after in-flight commits finish, so a retired account's commit
+   * that already passed its retired check cannot write its keys back.
+   */
+  removeStaleKeys(settings: Settings): Effect.Effect<void, LocalError> {
+    return Semaphore.withPermit(this.commits, removeStaleAccountKeys(settings));
+  }
+
+  private active(): Effect.Effect<Account> {
+    return Effect.suspend(() =>
+      this.account
+        ? Effect.succeed(this.account)
+        : Effect.die("ArticlesRepository is not initialized"),
+    );
   }
 
   private adapter(account: Account): Effect.Effect<EffectAdapter, AdapterError> {
     return account.adapter.join(() => getReadyAdapter(account.settings, this.tokens));
   }
 
-  readonly saveArticleEffect = Effect.fn("repository.save")(function* (
+  readonly saveArticle = Effect.fn("repository.save")(function* (
     this: ArticlesRepository,
     article: Pick<Article, "url" | "title">,
   ) {
-    const account = this.active();
+    const account = yield* this.active();
     const api = yield* this.adapter(account);
-    const canonicalUrl = yield* fromLegacyPromise(() => canonicalizeUrl(article.url));
+    const canonicalUrl = yield* canonical(article.url);
     // Browser mutations cannot be cancelled after submission; commit and bookkeeping must finish together.
     return yield* Effect.gen({ self: this }, function* () {
       const savedArticle = yield* api.saveArticle({
@@ -156,11 +194,11 @@ export class ArticlesRepository {
       return saved;
     }).pipe(Effect.uninterruptible);
   });
-  readonly deleteArticleEffect = Effect.fn("repository.delete")(function* (
+  readonly deleteArticle = Effect.fn("repository.delete")(function* (
     this: ArticlesRepository,
     id: number | string,
   ) {
-    const account = this.active();
+    const account = yield* this.active();
     const api = yield* this.adapter(account);
     return yield* Effect.gen({ self: this }, function* () {
       yield* api.deleteArticle(id);
@@ -170,54 +208,35 @@ export class ArticlesRepository {
     }).pipe(Effect.uninterruptible);
   });
   /** Concurrent callers share one fetch and its committed result or failure. */
-  readonly syncWithAPIEffect = Effect.fn("repository.sync")(function* (
+  readonly syncWithAPI = Effect.fn("repository.sync")(function* (
     this: ArticlesRepository,
     options?: SyncOptions,
   ) {
-    const account = this.active();
+    const account = yield* this.active();
     return yield* account.sync.join(() => this.syncAccount(account, options));
   });
-  readonly testConnectionEffect = Effect.gen({ self: this }, function* () {
-    const api = yield* this.adapter(this.active());
+  readonly testConnection = Effect.gen({ self: this }, function* () {
+    const api = yield* this.adapter(yield* this.active());
     yield* storageHealthy;
     return yield* api.testConnection;
   });
 
-  saveArticle(article: Pick<Article, "url" | "title">): Promise<Article> {
-    return runOperation(this.saveArticleEffect(article));
-  }
-  deleteArticle(id: number | string): Promise<{ success: boolean; id: string | number }> {
-    return runOperation(this.deleteArticleEffect(id));
-  }
-  syncWithAPI(options?: SyncOptions): Promise<Synced> {
-    return runOperation(this.syncWithAPIEffect(options));
-  }
-  testConnection(): Promise<boolean> {
-    return runOperation(this.testConnectionEffect);
-  }
+  readonly getAllArticles: Effect.Effect<Article[], LocalError> = Effect.gen(
+    { self: this },
+    function* () {
+      return yield* this.articles(yield* this.active());
+    },
+  );
 
-  async getArticle(id: number | string): Promise<Article | undefined> {
-    const articles = await this.getAllArticles();
-    // Ids are compared as strings: the storage may hold entries written by
-    // versions that used the other type, and bookmark ids are strings in both
-    // APIs (GUIDs on Firefox, decimal strings on Chromium).
-    return articles.find((a) => String(a.id) === String(id));
-  }
-
-  getAllArticles(): Promise<Article[]> {
-    return this.articles(this.active());
-  }
-
-  private async articles(account: Account): Promise<Article[]> {
-    assertStorageHealthy();
-    if (account.articles) return account.articles;
-    const result = await browser.storage.local.get([account.keys.articles]).catch(() => {
-      throw new BrowserFailure("read local articles");
+  private articles(account: Account): Effect.Effect<Article[], LocalError> {
+    return Effect.gen(function* () {
+      yield* storageHealthy;
+      if (account.articles) return account.articles;
+      const result = yield* localRead("read local articles", [account.keys.articles]);
+      // A commit may have published while this read was pending; it is newer.
+      account.articles ??= (result[account.keys.articles] as Article[] | undefined) || [];
+      return account.articles;
     });
-    assertStorageHealthy();
-    // A commit may have published while this read was pending; it is newer.
-    account.articles ??= (result?.[account.keys.articles] as Article[] | undefined) || [];
-    return account.articles;
   }
 
   /**
@@ -227,47 +246,52 @@ export class ArticlesRepository {
   private commit(
     account: Account,
     remote: Remote | undefined,
-    change: Mutation | ((articles: Article[]) => Promise<Article[]>),
-    after?: () => Promise<void>,
-  ): Effect.Effect<void, AdapterError> {
+    change: Mutation | ((articles: Article[]) => Effect.Effect<Article[], LocalError>),
+    after?: Effect.Effect<void, FatalStorageFailure>,
+  ): Effect.Effect<void, LocalError> {
     const [outcome, operation] = remote ?? [undefined, undefined];
-    const work = fromLegacyPromise(async () => {
+    const work = Effect.gen({ self: this }, function* () {
       // A retired account's late work must not reach storage the next account may share.
       if (account.retired) return;
-      assertStorageHealthy(outcome, operation);
-      const articles = await this.articles(account);
+      yield* storageHealthyAfter(outcome, operation);
+      const articles = yield* this.articles(account);
       const next =
         typeof change === "function"
-          ? await change(articles)
-          : await this.apply(account, articles, change);
+          ? yield* change(articles)
+          : yield* this.apply(account, articles, change);
       if (next !== articles) {
-        await setLocal("persist articles", { [account.keys.articles]: next }, outcome, operation);
-        assertStorageHealthy(outcome, operation);
+        yield* storagePromise(() =>
+          setLocal("persist articles", { [account.keys.articles]: next }, outcome, operation),
+        );
+        yield* storageHealthyAfter(outcome, operation);
         account.articles = next;
       }
       if (typeof change !== "function" && account.sync.running) account.pending.push(change);
-      await after?.();
+      if (after) yield* after;
     });
-    return Semaphore.withPermit(this.commits, work.pipe(Effect.uninterruptible));
+    return Semaphore.withPermit(this.commits, work).pipe(Effect.uninterruptible);
   }
 
-  private async apply(
+  private apply(
     account: Account,
     articles: Article[],
     mutation: Mutation,
-  ): Promise<Article[]> {
-    if (mutation.type === "delete") {
-      // String comparison, so entries stored with the other id type (see getArticle) still match.
-      const target = String(mutation.id);
-      return articles.filter((a) => String(a.id) !== target);
-    }
-    for (const a of articles) {
-      if (await this.sameUrl(account, a.url, mutation.article.url)) {
-        logger.debug("Article already exists in cache, skipping add:", mutation.article.url);
-        return articles;
+  ): Effect.Effect<Article[], FatalStorageFailure> {
+    return Effect.gen({ self: this }, function* () {
+      if (mutation.type === "delete") {
+        // Ids are compared as strings: storage may hold entries written by versions that used the
+        // other type, and bookmark ids are strings (GUIDs on Firefox, decimal strings on Chromium).
+        const target = String(mutation.id);
+        return articles.filter((a) => String(a.id) !== target);
       }
-    }
-    return [mutation.article, ...articles];
+      for (const a of articles) {
+        if (yield* this.sameUrl(account, a.url, mutation.article.url)) {
+          logger.debug("Article already exists in cache, skipping add:", mutation.article.url);
+          return articles;
+        }
+      }
+      return [mutation.article, ...articles];
+    });
   }
 
   private syncAccount(
@@ -277,7 +301,7 @@ export class ArticlesRepository {
     return Effect.gen({ self: this }, function* () {
       account.pending = [];
       const api = yield* this.adapter(account);
-      const timestamps = yield* fromLegacyPromise(() => this.timestamps(account));
+      const timestamps = yield* this.timestamps(account);
       const syncOptions: SyncOptions = {
         ...options,
         lastSyncTimestamp: timestamps.last ?? undefined,
@@ -299,37 +323,39 @@ export class ArticlesRepository {
         `Synced ${syncResult.articles.length} articles from API using ${syncResult.mode} mode`,
         { metadata: syncResult.metadata },
       );
-      const fetched = yield* fromLegacyPromise(() =>
-        Promise.all(
-          syncResult.articles.map(async (article) => {
-            const canonicalUrl = await canonicalizeUrl(article.url);
-            return account.settings.normalizeOnSave
+      const fetched = yield* Effect.forEach(syncResult.articles, (article) =>
+        canonical(article.url).pipe(
+          Effect.map((canonicalUrl) =>
+            account.settings.normalizeOnSave
               ? { ...article, canonicalUrl, url: canonicalUrl }
-              : { ...article, canonicalUrl };
-          }),
+              : { ...article, canonicalUrl },
+          ),
         ),
       );
 
       yield* this.commit(
         account,
         ["succeeded", "sync"],
-        async (articles) => {
-          let next =
-            syncResult.mode === "overwrite" ? fetched : merge(account.settings, articles, fetched);
-          // Mutations committed after the fetch started may be missing from the snapshot.
-          if (account.pending.length > 0)
-            logger.info(`Re-applying ${account.pending.length} pending operations after sync`);
-          for (const mutation of account.pending) next = await this.apply(account, next, mutation);
-          account.pending = [];
-          return next;
-        },
-        () =>
-          this.storeTimestamps(account, {
-            full: syncResult.mode === "overwrite" ? Date.parse(fetchStartedAt) : timestamps.full,
-            last: fetchStartedAt,
+        (articles) =>
+          Effect.gen({ self: this }, function* () {
+            let next =
+              syncResult.mode === "overwrite"
+                ? fetched
+                : merge(account.settings, articles, fetched);
+            // Mutations committed after the fetch started may be missing from the snapshot.
+            if (account.pending.length > 0)
+              logger.info(`Re-applying ${account.pending.length} pending operations after sync`);
+            for (const mutation of account.pending)
+              next = yield* this.apply(account, next, mutation);
+            account.pending = [];
+            return next;
           }),
+        this.storeTimestamps(account, {
+          full: syncResult.mode === "overwrite" ? Date.parse(fetchStartedAt) : timestamps.full,
+          last: fetchStartedAt,
+        }),
       );
-      const items = yield* fromLegacyPromise(() => this.articles(account));
+      const items = yield* this.articles(account);
       return { items, total: items.length, syncResult };
     }).pipe(
       Effect.tapError((error) =>
@@ -338,18 +364,25 @@ export class ArticlesRepository {
     );
   }
 
-  private sameUrl(account: Account, a: string, b: string): Promise<boolean> | boolean {
-    if (!account.settings.normalizeOnCompare) return a === b;
-    return Promise.all([canonicalizeUrl(a), canonicalizeUrl(b)]).then(([x, y]) => x === y);
+  private sameUrl(
+    account: Account,
+    a: string,
+    b: string,
+  ): Effect.Effect<boolean, FatalStorageFailure> {
+    if (!account.settings.normalizeOnCompare) return Effect.succeed(a === b);
+    return Effect.zipWith(canonical(a), canonical(b), (x, y) => x === y);
   }
 
-  async findSaved(url: string): Promise<Article | undefined> {
-    const account = this.active();
-    for (const article of await this.articles(account)) {
-      if (await this.sameUrl(account, article.url, url)) return article;
+  readonly findSaved = Effect.fn("repository.findSaved")(function* (
+    this: ArticlesRepository,
+    url: string,
+  ) {
+    const account = yield* this.active();
+    for (const article of yield* this.articles(account)) {
+      if (yield* this.sameUrl(account, article.url, url)) return article;
     }
     return undefined;
-  }
+  });
 
   private filterBySearch(articles: Article[], search?: string): Article[] {
     if (!search) {
@@ -364,12 +397,13 @@ export class ArticlesRepository {
     });
   }
 
-  async getRecentArticles(
+  readonly getRecentArticles = Effect.fn("repository.recent")(function* (
+    this: ArticlesRepository,
     page = 1,
     perPage = 30,
     search?: string,
-  ): Promise<{ items: Article[]; page: number; pages: number; total: number }> {
-    const articles = this.filterBySearch(await this.getAllArticles(), search).sort((a, b) =>
+  ) {
+    const articles = this.filterBySearch(yield* this.getAllArticles, search).sort((a, b) =>
       b.created_at > a.created_at ? 1 : -1,
     );
     const articlesNumber = articles.length;
@@ -384,59 +418,44 @@ export class ArticlesRepository {
       pages,
       total: articlesNumber,
     };
+  });
+
+  private timestamps(
+    account: Account,
+  ): Effect.Effect<NonNullable<Account["timestamps"]>, LocalError> {
+    return Effect.gen(function* () {
+      if (account.timestamps) return account.timestamps;
+      const { keys } = account;
+      const result = yield* localRead("read sync metadata", [
+        keys.lastFullSyncTimestamp,
+        keys.lastSyncTimestamp,
+      ]);
+      account.timestamps ??= {
+        full: (result[keys.lastFullSyncTimestamp] as number | undefined) || null,
+        last: (result[keys.lastSyncTimestamp] as string | undefined) || null,
+      };
+      return account.timestamps;
+    });
   }
 
-  updateArticles(articles: Article[]): Promise<void> {
-    return runOperation(this.commit(this.active(), undefined, () => Promise.resolve(articles)));
-  }
-
-  mergeArticles(articles: Article[]): Promise<void> {
-    const account = this.active();
-    return runOperation(
-      this.commit(account, undefined, (existing) =>
-        Promise.resolve(merge(account.settings, existing, articles)),
-      ),
-    );
-  }
-
-  async clear(): Promise<void> {
-    const account = this.active();
-    await removeLocal("clear articles", account.keys.articles);
-    assertStorageHealthy();
-    account.articles = undefined;
-  }
-
-  private async timestamps(account: Account): Promise<NonNullable<Account["timestamps"]>> {
-    if (account.timestamps) return account.timestamps;
-    const { keys } = account;
-    const result = await browser.storage.local
-      .get([keys.lastFullSyncTimestamp, keys.lastSyncTimestamp])
-      .catch(() => {
-        throw new BrowserFailure("read sync metadata");
-      });
-    assertStorageHealthy();
-    account.timestamps ??= {
-      full: (result[keys.lastFullSyncTimestamp] as number | undefined) || null,
-      last: (result[keys.lastSyncTimestamp] as string | undefined) || null,
-    };
-    return account.timestamps;
-  }
-
-  private async storeTimestamps(
+  private storeTimestamps(
     account: Account,
     timestamps: NonNullable<Account["timestamps"]>,
-  ): Promise<void> {
-    await setLocal(
-      "persist sync timestamps",
-      {
-        [account.keys.lastFullSyncTimestamp]: timestamps.full,
-        [account.keys.lastSyncTimestamp]: timestamps.last,
-      },
-      "succeeded",
-      "sync",
+  ): Effect.Effect<void, FatalStorageFailure> {
+    return storagePromise(() =>
+      setLocal(
+        "persist sync timestamps",
+        {
+          [account.keys.lastFullSyncTimestamp]: timestamps.full,
+          [account.keys.lastSyncTimestamp]: timestamps.last,
+        },
+        "succeeded",
+        "sync",
+      ),
+    ).pipe(
+      Effect.andThen(storageHealthy),
+      Effect.tap(() => Effect.sync(() => (account.timestamps = timestamps))),
     );
-    assertStorageHealthy();
-    account.timestamps = timestamps;
   }
 }
 

@@ -1,8 +1,10 @@
+import { Effect, Fiber } from "effect";
+import { forkDetachLogged, runOperation } from "../src/background/api/effect-adapter";
+import { logger } from "../src/utils/logger";
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
 import * as v from "valibot";
-import { ApiClient } from "../src/background/api/api-client";
+import { requestJson } from "../src/background/api/effect-api-client";
 import { ArticlesRepository, getAccountStorageKeys } from "../src/background/articles-repository";
-import { tokenManager } from "../src/background/token-manager";
 import { DEFAULT_SETTINGS, settingsSchema } from "../src/utils/settings";
 import { canonicalizeUrl } from "../src/utils/url-helpers";
 import { cleanUrl, initializeWithRawFilterLists } from "../src/utils/filter-list-url-cleaner";
@@ -72,25 +74,28 @@ test("filter exceptions survive fresh loading and cache loading", async () => {
   }
 });
 
-test("HTTP failures reject requests and fail connection tests", async () => {
-  spyOn(tokenManager, "getAccessToken").mockResolvedValue("test");
+test("HTTP failures reject requests with their recovery category", async () => {
+  Object.assign(globalThis, { browser: { permissions: { contains: async () => true } } });
   const fetchMock = spyOn(globalThis, "fetch");
-  for (const status of [401, 403, 404, 500]) {
-    fetchMock.mockResolvedValue(new Response("failure", { status }));
-    const client = new ApiClient(
-      "test",
-      "https://example.com",
-      {},
-      { autoRetryOnAuth: false, rateLimit: { delayMs: 0 } },
+  const request = () =>
+    runOperation(
+      requestJson({
+        operation: "test.delete",
+        url: "https://example.com/articles/1",
+        init: { method: "DELETE" },
+      }),
     );
-    await expect(client.delete("/articles/1")).rejects.toThrow(String(status));
-    expect(await client.testConnection()).toBe(false);
+  for (const [status, tag] of [
+    [401, "CredentialsFailure"],
+    [403, "CredentialsFailure"],
+    [404, "HttpFailure"],
+    [500, "HttpFailure"],
+  ] as const) {
+    fetchMock.mockResolvedValue(new Response("failure", { status }));
+    await expect(request()).rejects.toMatchObject({ _tag: tag });
   }
-  fetchMock.mockResolvedValue(
-    new Response(null, { status: 204, headers: { "Content-Type": "application/json" } }),
-  );
-  const client = new ApiClient("test", "https://example.com");
-  expect((await client.delete("/articles/1", { authenticated: false })).status).toBe(204);
+  fetchMock.mockResolvedValue(new Response(null, { status: 204 }));
+  expect(await request()).toBeUndefined();
 });
 
 test("failed remote deletion preserves cached articles", async () => {
@@ -121,11 +126,56 @@ test("failed remote deletion preserves cached articles", async () => {
   });
   const repository = new ArticlesRepository();
   await repository.initialize(DEFAULT_SETTINGS);
-  await expect(repository.deleteArticle(1)).rejects.toThrow("Browser delete bookmark failed");
-  expect(await repository.getAllArticles()).toEqual([article]);
+  await expect(runOperation(repository.deleteArticle(1))).rejects.toThrow(
+    "Browser delete bookmark failed",
+  );
+  expect(await runOperation(repository.getAllArticles)).toEqual([article]);
   expect(storage[keys.articles]).toEqual([article]);
   remove.mockResolvedValue(undefined);
-  await repository.deleteArticle(1);
-  expect(await repository.getAllArticles()).toEqual([]);
+  await runOperation(repository.deleteArticle(1));
+  expect(await runOperation(repository.getAllArticles)).toEqual([]);
   expect(storage[keys.articles]).toEqual([]);
+});
+
+test("a detached fiber that dies is logged, and an interrupted one is not", async () => {
+  const error = spyOn(logger, "error").mockImplementation(() => {});
+  await Effect.runPromise(
+    forkDetachLogged("Background work", Effect.die(new Error("boom"))).pipe(
+      Effect.flatMap(Fiber.await),
+    ),
+  );
+  expect(error).toHaveBeenCalledTimes(1);
+  expect(error.mock.calls[0]?.[0]).toBe("Background work failed:");
+  expect(String(error.mock.calls[0]?.[1])).toContain("boom");
+
+  await Effect.runPromise(
+    forkDetachLogged("Interrupted work", Effect.interrupt).pipe(Effect.flatMap(Fiber.await)),
+  );
+  expect(error).toHaveBeenCalledTimes(1);
+});
+
+test("shared work that dies after every caller left is logged", async () => {
+  let releaseIdle!: () => void;
+  const idle = new Promise<void>((resolve) => (releaseIdle = resolve));
+  let logged!: () => void;
+  const died = new Promise<void>((resolve) => (logged = resolve));
+  Object.assign(globalThis, {
+    browser: {
+      storage: { local: { get: async () => ({}) } },
+      bookmarks: { getTree: async () => [{ id: "folder", title: "Pouch", children: [] }] },
+      idle: { queryState: () => idle.then(() => "active") },
+    },
+  });
+  const repository = new ArticlesRepository();
+  repository.initialize({ ...DEFAULT_SETTINGS, backend: "bookmarks", apiConfig: {} });
+  spyOn(logger, "info").mockImplementation((message) => {
+    if (message === "Starting cache sync with API") throw new Error("boom");
+  });
+  const error = spyOn(logger, "error").mockImplementation(() => logged());
+  const caller = Effect.runFork(repository.syncWithAPI());
+  await Effect.runPromise(Fiber.interrupt(caller));
+  releaseIdle();
+  await died;
+  expect(error.mock.calls[0]?.[0]).toBe("Shared background work died:");
+  expect(String(error.mock.calls[0]?.[1])).toContain("boom");
 });

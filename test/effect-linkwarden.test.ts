@@ -9,7 +9,7 @@ import { ArticlesRepository, getAccountStorageKeys } from "../src/background/art
 import { DEFAULT_SETTINGS } from "../src/utils/settings";
 import { initializeUrlCanonizer } from "../src/utils/url-helpers";
 import { resetFilterListSources, setFilterListSources } from "../src/utils/filter-list-manager";
-import type { LinkwardenSettings } from "../src/utils/settings-schemas";
+import { backendForms, type LinkwardenSettings } from "../src/utils/settings-schemas";
 
 const settings: LinkwardenSettings = {
   ...DEFAULT_SETTINGS,
@@ -174,7 +174,7 @@ test("the static token never enters TokenManager or refresh, and rejection is ne
     issuedAt: 0,
     refreshCount: 0,
   };
-  await tokens.storeToken("linkwarden", legacy);
+  await runOperation(tokens.storeToken("linkwarden", legacy));
   const refresh = spyOn(tokens, "refreshToken");
   const getAccessToken = spyOn(tokens, "getAccessToken");
   const storeToken = spyOn(tokens, "storeToken");
@@ -185,14 +185,14 @@ test("the static token never enters TokenManager or refresh, and rejection is ne
   );
   const repo = new ArticlesRepository(tokens);
   await repo.initialize(settings);
-  await repo.syncWithAPI();
+  await runOperation(repo.syncWithAPI());
   rejectToken = true;
-  const rejected = await repo.testConnection().catch((error: unknown) => errorResponse(error));
+  const rejected = await runOperation(repo.testConnection).catch((error: unknown) => errorResponse(error));
   expect(rejected).toMatchObject({
     code: "CredentialsFailure",
     details: { operation: "linkwarden.testConnection" },
   });
-  await tokens.checkAndRefreshTokens();
+  await runOperation(tokens.checkAndRefreshTokens);
   expect(refresh).not.toHaveBeenCalled();
   expect(getAccessToken).not.toHaveBeenCalled();
   expect(storeToken).not.toHaveBeenCalled();
@@ -459,7 +459,7 @@ test("draft connection test reports an actionable failure and stores no credenti
   api(() => json({ response: "You must be logged in." }, 401));
   const repo = new ArticlesRepository(new TokenManager());
   await repo.initialize(settings);
-  const result = await repo.testConnection().catch((error: unknown) => errorResponse(error));
+  const result = await runOperation(repo.testConnection).catch((error: unknown) => errorResponse(error));
   expect(result).toMatchObject({
     code: "CredentialsFailure",
     details: { operation: "linkwarden.testConnection" },
@@ -481,15 +481,15 @@ test("repository save, delete, and every sync mode commit complete Linkwarden li
   const ids = () => (storage[keys.articles] as { id: number }[]).map((a) => a.id).sort();
   const repo = new ArticlesRepository(new TokenManager({ persist: false }));
   await repo.initialize(settings);
-  await repo.syncWithAPI({ mode: "overwrite" });
+  await runOperation(repo.syncWithAPI({ mode: "overwrite" }));
   expect(ids()).toEqual([1, 2]);
-  await repo.saveArticle({ url: "https://example.com/3", title: "Link 3" });
+  await runOperation(repo.saveArticle({ url: "https://example.com/3", title: "Link 3" }));
   expect(ids()).toEqual([1, 2, 3]);
-  await repo.deleteArticle(1);
+  await runOperation(repo.deleteArticle(1));
   expect(ids()).toEqual([2, 3]);
   listed = [4];
   // A requested update still replaces the cache, so remote deletions disappear locally.
-  await repo.syncWithAPI({ mode: "update" });
+  await runOperation(repo.syncWithAPI({ mode: "update" }));
   expect(ids()).toEqual([4]);
   expect(typeof storage[keys.lastSyncTimestamp]).toBe("string");
   expect(typeof storage[keys.lastFullSyncTimestamp]).toBe("number");
@@ -507,12 +507,12 @@ for (const operation of ["save", "delete"] as const) {
     );
     const repo = new ArticlesRepository(new TokenManager({ persist: false }));
     await repo.initialize(settings);
-    await repo.testConnection();
+    await runOperation(repo.testConnection);
     rejectReads = true;
     const result = await failure(
       operation === "save"
-        ? repo.saveArticleEffect({ url: "https://example.com/1", title: "a" })
-        : repo.deleteArticleEffect(1),
+        ? repo.saveArticle({ url: "https://example.com/1", title: "a" })
+        : repo.deleteArticle(1),
     );
     expect(result.code).toBe("BrowserFailure");
     expect(result.details).toMatchObject({
@@ -524,3 +524,8 @@ for (const operation of ["save", "delete"] as const) {
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method !== undefined)).toHaveLength(1);
   });
 }
+
+test("the options form says sync needs Linkwarden 2.10 or later", () => {
+  // Older servers answer /api/v1/search with a bare HTTP 404.
+  expect(backendForms.linkwarden.formConfig[0]?.label).toContain("Linkwarden 2.10 or later");
+});

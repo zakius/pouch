@@ -88,19 +88,19 @@ setFilterListSources([{ name: "empty", url: "data:text/plain;base64,IQ==" }]);
 await initializeUrlCanonizer();
 const repo = new ArticlesRepository();
 await repo.initialize(DEFAULT_SETTINGS);
-await repo.testConnection();
-await repo.getAllArticles();
+await runOperation(repo.testConnection);
+await runOperation(repo.getAllArticles);
 writes = 0;
 gatePreparation = true;
 let syncResult;
 if (phase === "sync") {
   syncing = true;
-  syncResult = repo.syncWithAPI();
+  syncResult = runOperation(repo.syncWithAPI());
   await syncEntered.promise;
 }
 const controller = new AbortController();
 const effect =
-  operation === "save" ? repo.saveArticleEffect(article) : repo.deleteArticleEffect(article.id);
+  operation === "save" ? repo.saveArticle(article) : repo.deleteArticle(article.id);
 const result = runOperation(effect, controller.signal).catch((error: unknown) => error);
 await entered.promise;
 controller.abort();
@@ -127,7 +127,7 @@ if (phase === "fatal" || phase === "failed-commit") {
     expect(mutations).toBe(1);
     expect(writes).toBe(1);
     expect(stored).toHaveLength(operation === "save" ? 1 : 0);
-    expect(await repo.getAllArticles()).toHaveLength(operation === "save" ? 1 : 0);
+    expect(await runOperation(repo.getAllArticles)).toHaveLength(operation === "save" ? 1 : 0);
     expect(errorResponse(error).details).toEqual({
       remoteOperation: operation,
       remoteOutcome: "succeeded",
@@ -139,7 +139,7 @@ if (syncResult) {
   syncGate.resolve();
   const synced = await syncResult;
   expect(synced.items).toHaveLength(operation === "save" ? 1 : 0);
-  expect(await repo.getAllArticles()).toHaveLength(operation === "save" ? 1 : 0);
+  expect(await runOperation(repo.getAllArticles)).toHaveLength(operation === "save" ? 1 : 0);
   expect(stored).toHaveLength(operation === "save" ? 1 : 0);
   expect(mutations).toBe(1);
 }

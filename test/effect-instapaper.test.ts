@@ -438,7 +438,7 @@ test("draft connection test uses its own tokens and leaves the active account un
   const stored = structuredClone(storage.api_tokens);
   const repo = new ArticlesRepository(new TokenManager({ persist: false }));
   await repo.initialize({ ...settings, apiConfig: { ...settings.apiConfig, username: "draft" } });
-  expect(await repo.testConnection()).toBe(true);
+  expect(await runOperation(repo.testConnection)).toBe(true);
   expect(storage.api_tokens).toEqual(stored);
   expect(active.getTokenMetadata("instapaper")?.accessToken).toBe("token");
 });
@@ -450,11 +450,11 @@ test("repository keeps the previous cache when the snapshot is incomplete", asyn
   api(() => json(syncResponse(full)));
   const repo = new ArticlesRepository(new TokenManager({ persist: false }));
   await repo.initialize(settings);
-  const result = await repo.syncWithAPI().catch((error: unknown) => errorResponse(error));
+  const result = await runOperation(repo.syncWithAPI()).catch((error: unknown) => errorResponse(error));
   expect(result).toMatchObject({ code: "IncompleteSnapshotFailure" });
   expect(storage[keys.articles]).toEqual(previous);
   expect(storage[keys.lastSyncTimestamp]).toBeUndefined();
-  expect(await repo.getAllArticles()).toEqual(previous);
+  expect(await runOperation(repo.getAllArticles)).toEqual(previous);
 });
 
 test("repository save, delete, and sync commit Instapaper outcomes to the account cache", async () => {
@@ -469,10 +469,10 @@ test("repository save, delete, and sync commit Instapaper outcomes to the accoun
   });
   const repo = new ArticlesRepository(new TokenManager({ persist: false }));
   await repo.initialize(settings);
-  expect((await repo.syncWithAPI()).items.map((a) => a.id)).toEqual([1, 2]);
-  await repo.saveArticle({ url: "https://example.com/3", title: "Article 3" });
+  expect((await runOperation(repo.syncWithAPI())).items.map((a) => a.id)).toEqual([1, 2]);
+  await runOperation(repo.saveArticle({ url: "https://example.com/3", title: "Article 3" }));
   expect((storage[keys.articles] as { id: number }[]).map((a) => a.id)).toEqual([3, 1, 2]);
-  await repo.deleteArticle(1);
+  await runOperation(repo.deleteArticle(1));
   expect((storage[keys.articles] as { id: number }[]).map((a) => a.id)).toEqual([3, 2]);
   expect(typeof storage[keys.lastSyncTimestamp]).toBe("string");
 });
@@ -484,12 +484,12 @@ for (const operation of ["save", "delete"] as const) {
     const fetchMock = api(() => json(operation === "save" ? [bookmark(1)] : []));
     const repo = new ArticlesRepository(new TokenManager({ persist: false }));
     await repo.initialize(settings);
-    await repo.testConnection().catch(() => {});
+    await runOperation(repo.testConnection).catch(() => {});
     rejectReads = true;
     const result = await failure(
       operation === "save"
-        ? repo.saveArticleEffect({ url: "https://example.com/1", title: "a" })
-        : repo.deleteArticleEffect(1),
+        ? repo.saveArticle({ url: "https://example.com/1", title: "a" })
+        : repo.deleteArticle(1),
     );
     expect(result.code).toBe("BrowserFailure");
     expect(result.details).toMatchObject({

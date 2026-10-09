@@ -8,25 +8,14 @@ import { requestJson, validate } from "../effect-api-client";
 import {
   ConfigurationFailure,
   ProviderFailure,
-  runOperation,
   storageHealthy,
   type AcquisitionError,
   type EffectAdapter,
 } from "../effect-adapter";
-import type {
-  ReadItLaterAPI,
-  SavingArticle,
-  SyncOptions,
-  SyncResult,
-} from "../read-it-later-adapter";
+import type { SavingArticle, SyncOptions } from "../read-it-later-adapter";
 
 export type LinkaceSettings = v.InferInput<typeof linkaceSettingsSchema>;
 export type LinkaceConfig = v.InferInput<typeof linkaceConfigSchema>;
-
-const formConfig = [
-  { name: "url", label: "API URL" },
-  { name: "token", label: "API Token" },
-];
 
 const linkaceLinkSchema = v.object({
   id: v.number(),
@@ -112,8 +101,6 @@ export const createLinkaceAdapter = Effect.fn("linkace.acquire")(function* (
   };
 
   const adapter: EffectAdapter = {
-    displayName: "LinkAce",
-    formConfig,
     saveArticle: Effect.fn("linkace.save")(function* (article: SavingArticle) {
       const data = yield* request("linkace.save", "/api/v2/links", {
         mutation: "save",
@@ -186,29 +173,3 @@ export const createLinkaceAdapter = Effect.fn("linkace.acquire")(function* (
   yield* storageHealthy;
   return adapter;
 }) satisfies (settings: LinkaceSettings) => Effect.Effect<EffectAdapter, AcquisitionError>;
-
-/** Legacy entry point removed with the remaining Promise callers in #81. */
-export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings> {
-  readonly displayName = "LinkAce";
-  readonly formConfig = formConfig;
-  private ready: EffectAdapter | undefined;
-  async initialize(settings: LinkaceSettings): Promise<void> {
-    this.ready = await runOperation(createLinkaceAdapter(settings));
-  }
-  private api(): EffectAdapter {
-    if (!this.ready) throw new ConfigurationFailure("linkace.acquire");
-    return this.ready;
-  }
-  testConnection(): Promise<boolean> {
-    return runOperation(this.api().testConnection);
-  }
-  saveArticle(article: SavingArticle): Promise<Article> {
-    return runOperation(this.api().saveArticle(article));
-  }
-  deleteArticle(id: number | string): Promise<void> {
-    return runOperation(this.api().deleteArticle(id));
-  }
-  sync(options?: SyncOptions): Promise<SyncResult> {
-    return runOperation(this.api().sync(options));
-  }
-}

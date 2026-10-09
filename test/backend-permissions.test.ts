@@ -36,7 +36,8 @@ const {
   originPatternFromUrl,
   pruneBackendPermissions,
 } = await import("../src/utils/backend-permissions");
-const { ApiClient } = await import("../src/background/api/api-client");
+const { requestJson } = await import("../src/background/api/effect-api-client");
+const { runOperation } = await import("../src/background/api/effect-adapter");
 const manifest = (await import("../src/manifest.json")).default;
 
 const selfHostedSettings = {
@@ -155,30 +156,22 @@ test("missingPermissionMessage names the origin and points at settings", () => {
   expect(message.toLowerCase()).toContain("settings");
 });
 
-test("api-client reports a missing host permission instead of a bare network error", async () => {
+test("a request without the host permission fails with PermissionFailure before fetching", async () => {
   const fetchMock = spyOn(globalThis, "fetch").mockRejectedValue(
     new TypeError("NetworkError when attempting to fetch resource."),
   );
-  spyOn(console, "warn").mockImplementation(() => {});
-  spyOn(console, "error").mockImplementation(() => {});
-  const client = new ApiClient("karakeep", "https://k3s.local", {
-    rateLimit: { delayMs: 0 },
-  });
-  await expect(client.get("/bookmarks")).rejects.toThrow(/permission/i);
-  expect(fetchMock).toHaveBeenCalledTimes(1);
+  await expect(
+    runOperation(requestJson({ operation: "karakeep.sync", url: "https://k3s.local/bookmarks" })),
+  ).rejects.toMatchObject({ _tag: "PermissionFailure" });
+  expect(fetchMock).not.toHaveBeenCalled();
 });
 
-test("api-client keeps plain network errors when the origin is granted", async () => {
+test("a granted origin keeps network errors as NetworkFailure", async () => {
   permissionState["https://k3s.local/*"] = true;
   spyOn(globalThis, "fetch").mockRejectedValue(
     new TypeError("NetworkError when attempting to fetch resource."),
   );
-  spyOn(console, "warn").mockImplementation(() => {});
-  spyOn(console, "error").mockImplementation(() => {});
-  const client = new ApiClient("karakeep", "https://k3s.local", {
-    rateLimit: { delayMs: 0 },
-  });
-  await expect(client.get("/bookmarks")).rejects.toThrow(
-    "NetworkError when attempting to fetch resource.",
-  );
+  await expect(
+    runOperation(requestJson({ operation: "karakeep.sync", url: "https://k3s.local/bookmarks" })),
+  ).rejects.toMatchObject({ _tag: "NetworkFailure" });
 });

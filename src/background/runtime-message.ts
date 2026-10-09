@@ -38,7 +38,35 @@ export function parseRuntimeMessage(message: unknown) {
   return parsed.output;
 }
 
+export function invalidRequest(message: string) {
+  return { error: message, code: "INVALID_REQUEST", details: {} };
+}
+
+const detail = v.union([v.string(), v.number(), v.boolean(), v.object({ name: v.string() })]);
+/** What crosses the runtime message boundary: plain, cloneable and free of provider payloads. */
+const errorResponseSchema = v.looseObject({
+  error: v.string(),
+  code: v.pipe(v.string(), v.regex(/^[A-Za-z_]+$/)),
+  details: v.record(
+    v.string(),
+    v.optional(v.union([detail, v.object({ name: v.string(), message: v.string() })])),
+  ),
+});
+
+/** Classifies a boundary failure: operational (adapter tag), fatal storage, interruption or defect. */
 export function errorResponse(error: unknown) {
+  const response = classify(error);
+  const parsed = v.safeParse(errorResponseSchema, response);
+  return parsed.success
+    ? response
+    : {
+        error: "Unexpected background error. Check the extension diagnostics.",
+        code: "INTERNAL_DEFECT",
+        details: {},
+      };
+}
+
+function classify(error: unknown) {
   if (error instanceof FatalStorageError) {
     const { operation, cause, remoteOutcome, remoteOperation } = error.diagnostic;
     return { ...error.diagnostic, details: { operation, cause, remoteOutcome, remoteOperation } };
@@ -64,16 +92,15 @@ export function errorResponse(error: unknown) {
       },
     };
   }
-  if (error instanceof InvalidRequest)
-    return { error: error.message, code: "INVALID_REQUEST", details: {} };
+  if (error instanceof InvalidRequest) return invalidRequest(error.message);
   if (error instanceof OperationInterrupted)
     return { error: error.message, code: "OPERATION_INTERRUPTED", details: error.mutation ?? {} };
   if (error instanceof OperationDefect)
     return { error: error.message, code: "INTERNAL_DEFECT", details: error.mutation ?? {} };
-  // #81 removes the legacy Promise error response after every backend has a typed failure contract.
+  // runOperation classifies every failure above; anything else is a defect.
   return {
-    error: error instanceof Error ? error.message : "Unknown error",
-    code: "LEGACY_FAILURE",
+    error: "Unexpected background error. Check the extension diagnostics.",
+    code: "INTERNAL_DEFECT",
     details: {},
   };
 }

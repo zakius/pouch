@@ -10,7 +10,6 @@ import {
   PermissionFailure,
   OperationDefect,
   OperationInterrupted,
-  fromLegacyPromise,
   runOperation,
   recordMutationSuccess,
 } from "../src/background/api/effect-adapter";
@@ -160,16 +159,25 @@ test("browser acquisition rejection is typed while synchronous implementation er
   );
 });
 
-test("runner and Promise bridge preserve interruption separately from defects", async () => {
+test("the message boundary sends plain errors by recovery category", async () => {
+  const codeOf = (effect: Effect.Effect<unknown, unknown>) =>
+    runOperation(effect).then(
+      () => undefined,
+      (error: unknown) => errorResponse(error).code,
+    );
+  expect(await codeOf(Effect.interrupt)).toBe("OPERATION_INTERRUPTED");
+  expect(await codeOf(Effect.die(new TypeError("bug")))).toBe("INTERNAL_DEFECT");
+  // A failure outside the typed contract is a defect, not a message to show.
+  expect(errorResponse(new TypeError("SECRET")).code).toBe("INTERNAL_DEFECT");
+  expect(JSON.stringify(errorResponse(new TypeError("SECRET")))).not.toContain("SECRET");
+  const response = errorResponse(new BrowserFailure("read tab", "unavailable"));
+  expect(response).toMatchObject({ code: "BrowserFailure", details: { operation: "read tab" } });
+  expect(structuredClone(response)).toEqual(response);
+});
+
+test("the runner preserves interruption separately from defects", async () => {
   await expect(runOperation(Effect.interrupt)).rejects.toBeInstanceOf(OperationInterrupted);
   await expect(runOperation(Effect.die(new Error("bug")))).rejects.toBeInstanceOf(OperationDefect);
-  const interrupted = new OperationInterrupted(Cause.interrupt(1));
-  await expect(
-    runOperation(fromLegacyPromise(() => Promise.reject(interrupted))),
-  ).rejects.toBeInstanceOf(OperationInterrupted);
-  await expect(
-    runOperation(fromLegacyPromise(() => Promise.reject(new TypeError("bug")))),
-  ).rejects.toBeInstanceOf(OperationDefect);
   const controller = new AbortController();
   controller.abort();
   await expect(runOperation(Effect.never, controller.signal)).rejects.toBeInstanceOf(
@@ -218,9 +226,9 @@ test("a failed native sync acquisition permits a later retry", async () => {
   const repo = new ArticlesRepository();
   await repo.initialize(settings);
   granted = false;
-  await expect(repo.syncWithAPI()).rejects.toBeInstanceOf(PermissionFailure);
+  await expect(runOperation(repo.syncWithAPI())).rejects.toBeInstanceOf(PermissionFailure);
   granted = true;
-  expect((await repo.syncWithAPI()).items.map((article) => article.id)).toEqual([bookmarkId]);
+  expect((await runOperation(repo.syncWithAPI())).items.map((article) => article.id)).toEqual([bookmarkId]);
 });
 
 for (const operation of ["save", "delete"]) {
@@ -314,12 +322,12 @@ for (const operation of ["save", "delete"] as const) {
     await initializeUrlCanonizer();
     const repo = new ArticlesRepository();
     await repo.initialize(settings);
-    await repo.testConnection();
+    await runOperation(repo.testConnection);
     rejectArticles = true;
     const error = await (
       operation === "save"
-        ? repo.saveArticle({ title: "Saved", url: "https://example.com" })
-        : repo.deleteArticle(bookmarkId)
+        ? runOperation(repo.saveArticle({ title: "Saved", url: "https://example.com" }))
+        : runOperation(repo.deleteArticle(bookmarkId))
     ).catch((error: unknown) => error);
     expect(error).toBeInstanceOf(BrowserFailure);
     const response = errorResponse(error);
@@ -340,9 +348,9 @@ for (const operation of ["save", "delete"] as const) {
     expect(removed).toHaveLength(operation === "delete" ? 1 : 0);
     expect(getStorageDiagnostic()).toBeUndefined();
     rejectArticles = false;
-    expect(await repo.getAllArticles()).toEqual([]);
+    expect(await runOperation(repo.getAllArticles)).toEqual([]);
     if (operation === "delete") browser.bookmarks.getChildren = async () => [];
-    const synced = await repo.syncWithAPI();
+    const synced = await runOperation(repo.syncWithAPI());
     expect(synced.items).toHaveLength(operation === "save" ? 1 : 0);
     expect(stored).toHaveLength(operation === "save" ? 1 : 0);
     expect(created).toHaveLength(operation === "save" ? 1 : 0);

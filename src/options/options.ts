@@ -5,7 +5,6 @@ import {
 } from "../utils/storage-diagnostics-ui";
 import "../utils/chromium";
 import * as v from "valibot";
-import { availableBackends, getAdapter } from "../utils/adapter-factory";
 import {
   ensureBackendPermissions,
   missingPermissionMessage,
@@ -14,6 +13,9 @@ import {
 import { LogLevel } from "../utils/log-levels";
 import { logger } from "../utils/logger";
 import { getSettings, type Settings, settingsSchema } from "../utils/settings";
+import { backendForms } from "../utils/settings-schemas";
+
+const availableBackends = Object.keys(backendForms) as Settings["backend"][];
 
 type DomElementsNullable = {
   backendSelect: HTMLSelectElement | null;
@@ -60,10 +62,9 @@ async function initialize(): Promise<void> {
     const settings = await getSettings();
     if (isStorageStopped()) return;
     for (const backend of availableBackends) {
-      const adapter = getAdapter(backend);
       const option = document.createElement("option");
       option.value = backend;
-      option.textContent = adapter.displayName;
+      option.textContent = backendForms[backend].displayName;
       dom.backendSelect.appendChild(option);
     }
     configCache[settings.backend] = settings.apiConfig;
@@ -106,8 +107,7 @@ async function loadBackend(backend: Settings["backend"]): Promise<void> {
       configDrafts[previousBackend] = draft;
     }
   }
-  const factory = getAdapter(backend);
-  const formConfig = factory.formConfig;
+  const { formConfig } = backendForms[backend];
   dom.configContainer.innerHTML = "";
   const form = document.createElement("form");
   form.id = `${backend}-config`;
@@ -226,9 +226,8 @@ function getSettingsFromForm(): Settings | null {
     const input = document.getElementById(id) as HTMLInputElement | null;
     return input?.value || "";
   };
-  const factory = getAdapter(dom.backendSelect.value as Settings["backend"]);
   const apiConfig: Record<string, string> = {};
-  for (const field of factory.formConfig) {
+  for (const field of backendForms[dom.backendSelect.value as Settings["backend"]].formConfig) {
     apiConfig[field.name as string] = getInputValue(field.name as string);
   }
   const rawSettings = {

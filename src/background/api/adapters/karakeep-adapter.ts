@@ -8,25 +8,14 @@ import {
   ConfigurationFailure,
   IncompleteSnapshotFailure,
   ProviderFailure,
-  runOperation,
   storageHealthy,
   type AcquisitionError,
   type EffectAdapter,
 } from "../effect-adapter";
-import type {
-  ReadItLaterAPI,
-  SavingArticle,
-  SyncOptions,
-  SyncResult,
-} from "../read-it-later-adapter";
+import type { SavingArticle, SyncOptions } from "../read-it-later-adapter";
 
 export type KarakeepSettings = v.InferInput<typeof karakeepSettingsSchema>;
 export type KarakeepConfig = v.InferInput<typeof karakeepConfigSchema>;
-
-const formConfig = [
-  { name: "url", label: "API URL" },
-  { name: "token", label: "API Token" },
-];
 
 /** Karakeep's OpenAPI `Bookmark`: link bookmarks carry `url`, text and asset bookmarks may carry `sourceUrl`. */
 const karakeepBookmarkSchema = v.object({
@@ -100,8 +89,6 @@ export const createKarakeepAdapter = Effect.fn("karakeep.acquire")(function* (
   };
 
   const adapter: EffectAdapter = {
-    displayName: "Karakeep",
-    formConfig,
     saveArticle: Effect.fn("karakeep.save")(function* (article: SavingArticle) {
       // 201 creates the bookmark; 200 returns the existing bookmark for the same URL.
       const data = yield* request("karakeep.save", "/bookmarks", {
@@ -170,29 +157,3 @@ export const createKarakeepAdapter = Effect.fn("karakeep.acquire")(function* (
   yield* storageHealthy;
   return adapter;
 }) satisfies (settings: KarakeepSettings) => Effect.Effect<EffectAdapter, AcquisitionError>;
-
-/** Legacy entry point removed with the remaining Promise callers in #81. */
-export class KarakeepAdapter implements ReadItLaterAPI<KarakeepSettings> {
-  readonly displayName = "Karakeep";
-  readonly formConfig = formConfig;
-  private ready: EffectAdapter | undefined;
-  async initialize(settings: KarakeepSettings): Promise<void> {
-    this.ready = await runOperation(createKarakeepAdapter(settings));
-  }
-  private api(): EffectAdapter {
-    if (!this.ready) throw new ConfigurationFailure("karakeep.acquire");
-    return this.ready;
-  }
-  testConnection(): Promise<boolean> {
-    return runOperation(this.api().testConnection);
-  }
-  saveArticle(article: SavingArticle): Promise<Article> {
-    return runOperation(this.api().saveArticle(article));
-  }
-  deleteArticle(id: number | string): Promise<void> {
-    return runOperation(this.api().deleteArticle(id));
-  }
-  sync(options?: SyncOptions): Promise<SyncResult> {
-    return runOperation(this.api().sync(options));
-  }
-}
