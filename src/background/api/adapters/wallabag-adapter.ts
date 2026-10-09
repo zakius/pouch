@@ -3,7 +3,12 @@ import { Effect, Semaphore } from "effect";
 import * as v from "valibot";
 import { wallabagConfigSchema, wallabagSettingsSchema } from "../../../utils/settings-schemas";
 import { TokenManager, parseOAuthToken, fromTokenPromise, tokenManager } from "../../token-manager";
-import { checkHostPermission, requestJson, type EffectRequest } from "../effect-api-client";
+import {
+  checkHostPermission,
+  requestJson,
+  validate,
+  type EffectRequest,
+} from "../effect-api-client";
 import {
   ConfigurationFailure,
   CredentialsFailure,
@@ -85,13 +90,6 @@ const wallabagSyncResponseSchema = v.union([
   }),
   wallabagErrorSchema,
 ]);
-
-function validate<S extends v.GenericSchema>(schema: S, data: unknown, operation: string) {
-  const parsed = v.safeParse(schema, data);
-  return parsed.success
-    ? Effect.succeed(parsed.output)
-    : Effect.fail(new InvalidResponseFailure(operation));
-}
 
 export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
   settings: WallabagSettings,

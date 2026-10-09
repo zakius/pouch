@@ -53,6 +53,7 @@ export function errorResponse(error: unknown) {
         ...(error._tag === "RateLimitFailure" ? { retryAfterMs: error.retryAfterMs } : {}),
         ...(error._tag === "TimeoutFailure" ? { timeoutMs: error.timeoutMs } : {}),
         ...(error._tag === "InvalidResponseFailure" ? { responseKind: error.responseKind } : {}),
+        ...(error._tag === "ProviderFailure" ? { providerCode: error.providerCode } : {}),
         ...error.mutation,
         ...(error._tag === "BrowserFailure"
           ? { reason: error.reason, ...(error.cause ? { cause: error.cause } : {}) }

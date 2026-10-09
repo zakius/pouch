@@ -8,9 +8,18 @@ import {
   runOperation,
   type TransportError,
 } from "./api/effect-adapter";
+import {
+  assertStorageHealthy,
+  getStorageDiagnostic,
+  setLocal,
+  type RemoteOutcome,
+} from "../utils/fatal-storage";
+import { logger } from "../utils/logger";
 
 export function fromTokenPromise<A>(operation: () => Promise<A>): Effect.Effect<A, TransportError> {
-  return fromLegacyPromise(operation).pipe(Effect.catchTag("ConfigurationFailure", Effect.die));
+  return fromLegacyPromise(operation).pipe(
+    Effect.catchTags({ ConfigurationFailure: Effect.die, IncompleteSnapshotFailure: Effect.die }),
+  );
 }
 
 function isHeaderToken(value: string): boolean {
@@ -42,14 +51,6 @@ export function parseOAuthToken(
     ? Effect.succeed(parsed.output)
     : Effect.fail(new InvalidResponseFailure(operation, "token"));
 }
-
-import {
-  assertStorageHealthy,
-  getStorageDiagnostic,
-  setLocal,
-  type RemoteOutcome,
-} from "../utils/fatal-storage";
-import { logger } from "../utils/logger";
 
 export const TOKEN_CHECK_ALARM_NAME = "token-refresh-check";
 

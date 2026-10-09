@@ -52,7 +52,12 @@ export class BrowserFailure extends OperationError {
   readonly _tag = "BrowserFailure";
   constructor(
     readonly operation: string,
-    readonly reason: "missing-folder" | "permission-denied" | "unavailable" | "unknown" = "unknown",
+    readonly reason:
+      | "missing-folder"
+      | "permission-denied"
+      | "unavailable"
+      | "crypto"
+      | "unknown" = "unknown",
     readonly cause?: { name: string },
   ) {
     const guidance = {
@@ -61,6 +66,7 @@ export class BrowserFailure extends OperationError {
       "permission-denied":
         "Browser denied bookmarks access. Grant bookmarks permission in extension settings.",
       unavailable: "The browser API is unavailable. Check extension availability.",
+      crypto: "Browser cryptography could not sign the request. Check browser support.",
       unknown: "Check browser bookmarks access and try again.",
     };
     super(`Browser ${operation} failed. ${guidance[reason]}`);
@@ -118,6 +124,26 @@ export class RateLimitFailure extends OperationError {
     super("The server rate limit is exhausted (HTTP 429). Wait before starting another operation.");
   }
 }
+/** Carries only the provider's numeric code; provider messages may echo request data. */
+export class ProviderFailure extends OperationError {
+  readonly _tag = "ProviderFailure";
+  constructor(
+    readonly operation: string,
+    readonly providerCode: number,
+  ) {
+    super(
+      `The server rejected the request (provider error ${providerCode}). Check the account and extension diagnostics.`,
+    );
+  }
+}
+export class IncompleteSnapshotFailure extends OperationError {
+  readonly _tag = "IncompleteSnapshotFailure";
+  constructor(readonly operation: string) {
+    super(
+      "The server did not return a complete article list. Pouch kept the previous articles. Try syncing again later.",
+    );
+  }
+}
 export type TransportError =
   | PermissionFailure
   | BrowserFailure
@@ -127,6 +153,7 @@ export type TransportError =
   | InvalidResponseFailure
   | HttpFailure
   | RateLimitFailure
+  | ProviderFailure
   | FatalStorageFailure;
 export class FatalStorageFailure extends FatalStorageError {
   constructor(diagnostic: StorageDiagnostic) {
@@ -136,9 +163,9 @@ export class FatalStorageFailure extends FatalStorageError {
 export type AcquisitionError = ConfigurationFailure | TransportError;
 export type SaveError = TransportError;
 export type DeleteError = TransportError;
-export type SyncError = TransportError;
+export type SyncError = TransportError | IncompleteSnapshotFailure;
 export type ConnectionError = TransportError;
-export type AdapterError = AcquisitionError;
+export type AdapterError = AcquisitionError | IncompleteSnapshotFailure;
 
 /** Ready operations capture implementation dependencies; no private services escape in R. */
 export interface EffectAdapter {
@@ -169,7 +196,9 @@ export function isAdapterError(error: unknown): error is AdapterError {
     error instanceof TimeoutFailure ||
     error instanceof InvalidResponseFailure ||
     error instanceof HttpFailure ||
-    error instanceof RateLimitFailure
+    error instanceof RateLimitFailure ||
+    error instanceof ProviderFailure ||
+    error instanceof IncompleteSnapshotFailure
   );
 }
 
