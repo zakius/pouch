@@ -86,7 +86,7 @@ export interface EffectRequest {
   /** Returns the raw body instead of parsing JSON. */
   readonly format?: "text";
   /** Maps a provider error envelope in any parsed body to a definitive rejection. */
-  readonly providerFailure?: (data: unknown) => ProviderFailure | undefined;
+  readonly providerFailure?: (data: unknown) => ProviderFailure | RateLimitFailure | undefined;
   /**
    * A parsed body this rejects is an invalid response; a mutation's outcome stays unknown.
    * A body it accepts is a confirmed success, even if it carries an `error` key.
@@ -173,8 +173,13 @@ export const requestJson = Effect.fn("transport.request")(function* (request: Ef
             async (): Promise<unknown> => JSON.parse(await response.text()),
           ).pipe(Effect.orElseSucceed(() => undefined));
           const provider = request.providerFailure(data);
-          if (provider)
-            return yield* Effect.fail(response.status >= 500 ? unknownOutcome(provider) : provider);
+          if (provider?._tag === "ProviderFailure" && response.status >= 500)
+            return yield* Effect.fail(unknownOutcome(provider));
+          if (provider) {
+            // A rate limit is a definite rejection even with a server-error status.
+            if (mutation) yield* recordMutationOutcome();
+            return yield* Effect.fail(provider);
+          }
         }
         return yield* Effect.fail(
           response.status >= 500
