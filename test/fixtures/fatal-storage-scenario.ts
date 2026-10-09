@@ -367,19 +367,30 @@ switch (scenario) {
   case "raindrop-message-sync":
   case "linkace-message-save":
   case "linkace-message-delete":
-  case "linkace-message-sync": {
-    const linkace = scenario.startsWith("linkace");
-    const accountSettings = linkace
-      ? {
-          ...DEFAULT_SETTINGS,
-          backend: "linkace" as const,
-          apiConfig: { url: "https://links.example.com", token: "KEY" },
-        }
-      : {
-          ...DEFAULT_SETTINGS,
-          backend: "raindrop" as const,
-          apiConfig: { apiKey: "KEY" },
-        };
+  case "linkace-message-sync":
+  case "karakeep-message-save":
+  case "karakeep-message-delete":
+  case "karakeep-message-sync":
+  case "karakeep-message-timestamp": {
+    const backend = scenario.split("-")[0];
+    const accountSettings =
+      backend === "linkace"
+        ? {
+            ...DEFAULT_SETTINGS,
+            backend: "linkace" as const,
+            apiConfig: { url: "https://links.example.com", token: "KEY" },
+          }
+        : backend === "karakeep"
+          ? {
+              ...DEFAULT_SETTINGS,
+              backend: "karakeep" as const,
+              apiConfig: { url: "https://keep.example.com/api/v1", token: "KEY" },
+            }
+          : {
+              ...DEFAULT_SETTINGS,
+              backend: "raindrop" as const,
+              apiConfig: { apiKey: "KEY" },
+            };
     const accountKeys = getAccountStorageKeys(accountSettings);
     store[accountKeys.articles] = [];
     browser.storage.sync.get = (async () => accountSettings) as typeof browser.storage.sync.get;
@@ -397,24 +408,43 @@ switch (scenario) {
       url: raindrop.link,
       created_at: raindrop.created,
     });
+    const bookmarkOf = (raindrop: typeof item) => ({
+      id: String(raindrop._id),
+      title: raindrop.title,
+      createdAt: raindrop.created,
+      content: { type: "link", url: raindrop.link },
+    });
     const respond = (body: unknown) => new Response(JSON.stringify(body));
+    const origin = {
+      linkace: "https://links.example.com/",
+      karakeep: "https://keep.example.com/",
+    }[backend];
     globalThis.fetch = (async (url: string, init?: RequestInit) => {
       fetches++;
-      if (
-        !String(url).startsWith(linkace ? "https://links.example.com/" : "https://api.raindrop.io/")
-      )
+      if (!String(url).startsWith(origin ?? "https://api.raindrop.io/"))
         return new Response("! empty");
       if (init?.method === "POST") {
         remoteSaves++;
-        return respond(linkace ? { data: linkOf(item) } : { result: true, item });
+        return respond(
+          backend === "linkace"
+            ? { data: linkOf(item) }
+            : backend === "karakeep"
+              ? bookmarkOf(item)
+              : { result: true, item },
+        );
       }
       if (init?.method === "DELETE") {
         remoteDeletes++;
-        return respond(linkace ? {} : { result: true });
+        if (backend === "karakeep") return new Response(null, { status: 204 });
+        return respond(backend === "linkace" ? {} : { result: true });
       }
       remoteReads++;
       return respond(
-        linkace ? { data: [linkOf(listed)] } : { result: true, items: [listed], count: 1 },
+        backend === "linkace"
+          ? { data: [linkOf(listed)] }
+          : backend === "karakeep"
+            ? { bookmarks: [bookmarkOf(listed)], nextCursor: null }
+            : { result: true, items: [listed], count: 1 },
       );
     }) as typeof fetch;
     await import("../../src/background/background");
@@ -424,17 +454,15 @@ switch (scenario) {
       });
     // Background initialization runs its own sync; let it commit before storage starts failing.
     await message({ type: "getArticles", payload: {} });
-    for (
-      let i = 0;
-      i < 200 && !JSON.stringify(store[accountKeys.articles]).includes('"id":41');
-      i++
-    )
+    for (let i = 0; i < 200 && !JSON.stringify(store[accountKeys.articles]).match(/"id":"?41/); i++)
       await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(remoteReads, 1);
     assert.equal(getStorageDiagnostic(), undefined);
     const reads = remoteReads;
-    failKey = accountKeys.articles;
-    if (scenario.endsWith("-message-sync")) {
+    failKey = scenario.endsWith("-message-timestamp")
+      ? accountKeys.lastSyncTimestamp
+      : accountKeys.articles;
+    if (scenario.endsWith("-message-sync") || scenario.endsWith("-message-timestamp")) {
       const saved = await message({
         type: "saveSettings",
         payload: { settings: accountSettings },
@@ -449,7 +477,7 @@ switch (scenario) {
       const result = await message(
         operation === "save"
           ? { type: "saveArticle", payload: { url: item.link, title: item.title } }
-          : { type: "deleteArticle", payload: { articleId: 41 } },
+          : { type: "deleteArticle", payload: { articleId: backend === "karakeep" ? "41" : 41 } },
       );
       assert.equal(result.code, "FATAL_LOCAL_STORAGE");
       assert.equal(result.remoteOutcome, "succeeded");

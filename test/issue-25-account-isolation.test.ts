@@ -235,23 +235,23 @@ test("test connection uses isolated tokens while a real request for the same bac
     }
     return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
   }) as typeof fetch);
-  const karakeep = (token: string) =>
+  const linkwarden = (token: string) =>
     ({
       ...DEFAULT_SETTINGS,
-      backend: "karakeep",
-      apiConfig: { url: "https://karakeep.example", token },
+      backend: "linkwarden",
+      apiConfig: { url: "https://linkwarden.example", token },
     }) as RepoSettings;
 
   const activeRepo = new ArticlesRepository();
-  await activeRepo.initialize(karakeep("active-token"));
+  await activeRepo.initialize(linkwarden("active-token"));
   expect(await activeRepo.testConnection()).toBe(true);
 
   const testRepo = new ArticlesRepository(new TokenManager({ persist: false }));
-  await testRepo.initialize(karakeep("draft-token"));
+  await testRepo.initialize(linkwarden("draft-token"));
   const testResult = testRepo.testConnection();
   await draftRequestStarted.promise;
 
-  await tokenManager.storeToken("karakeep", {
+  await tokenManager.storeToken("linkwarden", {
     accessToken: "rotated-token",
     refreshToken: "",
     tokenType: "Bearer",
@@ -269,10 +269,10 @@ test("test connection uses isolated tokens while a real request for the same bac
     "Bearer draft-token",
     "Bearer rotated-token",
   ]);
-  expect(await tokenManager.getAccessToken("karakeep")).toBe("rotated-token");
+  expect(await tokenManager.getAccessToken("linkwarden")).toBe("rotated-token");
   const persisted = storage.api_tokens as [string, { accessToken: string }][];
   expect(persisted).toEqual([
-    ["karakeep", expect.objectContaining({ accessToken: "rotated-token" })],
+    ["linkwarden", expect.objectContaining({ accessToken: "rotated-token" })],
   ]);
 });
 

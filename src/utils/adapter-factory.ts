@@ -2,6 +2,7 @@ import { createBookmarksAdapter } from "../background/api/adapters/bookmarks-ada
 import type {
   BookmarksSettings,
   InstapaperSettings,
+  KarakeepSettings,
   LinkaceSettings,
   RaindropSettings,
   WallabagSettings,
@@ -11,7 +12,10 @@ import {
   InstapaperAdapter,
   createInstapaperAdapter,
 } from "../background/api/adapters/instapaper-adapter";
-import { KarakeepAdapter } from "../background/api/adapters/karakeep-adapter";
+import {
+  KarakeepAdapter,
+  createKarakeepAdapter,
+} from "../background/api/adapters/karakeep-adapter";
 import { LinkaceAdapter, createLinkaceAdapter } from "../background/api/adapters/linkace-adapter";
 import { LinkwardenAdapter } from "../background/api/adapters/linkwarden-adapter";
 import {
@@ -52,7 +56,8 @@ export function getReadyAdapter(
     | WallabagSettings
     | InstapaperSettings
     | RaindropSettings
-    | LinkaceSettings,
+    | LinkaceSettings
+    | KarakeepSettings,
   tokens?: TokenManager,
 ) {
   switch (settings.backend) {
@@ -66,5 +71,7 @@ export function getReadyAdapter(
       return createRaindropAdapter(settings);
     case "linkace":
       return createLinkaceAdapter(settings);
+    case "karakeep":
+      return createKarakeepAdapter(settings);
   }
 }
