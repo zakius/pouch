@@ -125,7 +125,7 @@ export class RateLimitFailure extends OperationError {
     readonly operation: string,
     readonly retryAfterMs: number,
   ) {
-    super("The server rate limit is exhausted (HTTP 429). Wait before starting another operation.");
+    super("The server rate limit is reached. Wait and try again later.");
   }
 }
 /** Carries only the provider's numeric code, if any; provider messages may echo request data. */

@@ -12,6 +12,7 @@ import {
   IncompleteSnapshotFailure,
   InvalidResponseFailure,
   ProviderFailure,
+  RateLimitFailure,
   storageHealthy,
   type AcquisitionError,
   type EffectAdapter,
@@ -139,6 +140,9 @@ export async function oauthHeader(
 const providerFailure = (operation: string) => (data: unknown) => {
   for (const item of Array.isArray(data) ? data : [data]) {
     const parsed = v.safeParse(instapaperErrorSchema, item);
+    // 1040: rate limit exceeded; nothing was applied. Instapaper sends no retry delay.
+    if (parsed.success && parsed.output.error_code === 1040)
+      return new RateLimitFailure(operation, 1000);
     if (parsed.success) return new ProviderFailure(operation, parsed.output.error_code);
   }
   return undefined;

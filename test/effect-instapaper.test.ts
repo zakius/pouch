@@ -300,6 +300,48 @@ for (const [name, response] of [
   });
 }
 
+const rateLimited = (status: number) =>
+  json([{ type: "error", error_code: 1040, message: "SECRET" }], status);
+for (const [operation, status] of [
+  ["save", 400],
+  ["delete", 200],
+  ["sync", 500],
+] as const) {
+  test(`${operation} rate limit (1040, HTTP ${status}) was not applied, so it retries`, async () => {
+    const fetchMock = api((call) =>
+      call === 1
+        ? rateLimited(status)
+        : operation === "save"
+          ? json([bookmark(1)])
+          : operation === "delete"
+            ? json([])
+            : json(syncResponse([1])),
+    );
+    const adapter = await acquire();
+    await runOperation(
+      operation === "save"
+        ? adapter.saveArticle({ url: "https://a", title: "a" })
+        : operation === "delete"
+          ? adapter.deleteArticle(1)
+          : adapter.sync(),
+    );
+    expect(apiCalls(fetchMock)).toHaveLength(2);
+  });
+}
+
+test("a persistent rate limit fails as a definite rate-limit rejection", async () => {
+  const fetchMock = api(() => rateLimited(500));
+  const result = await failure((await acquire()).saveArticle({ url: "https://a", title: "a" }));
+  expect(result).toMatchObject({
+    code: "RateLimitFailure",
+    error: "The server rate limit is reached. Wait and try again later.",
+    details: { operation: "instapaper.save" },
+  });
+  expect(result.details).not.toHaveProperty("remoteOutcome");
+  expect(JSON.stringify(result)).not.toContain("SECRET");
+  expect(apiCalls(fetchMock)).toHaveLength(4);
+});
+
 for (const kind of ["network", "server", "provider-server"] as const) {
   for (const operation of ["save", "delete"] as const) {
     test(`${operation} with unknown ${kind} outcome is never repeated`, async () => {
