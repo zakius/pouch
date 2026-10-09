@@ -41,10 +41,10 @@ await repo.initialize(DEFAULT_SETTINGS);
 const operation = process.argv[2];
 const effect =
   operation === "save"
-    ? repo.saveArticleEffect({ url: "https://example.com", title: "Saved" })
+    ? repo.saveArticle({ url: "https://example.com", title: "Saved" })
     : operation === "delete"
-      ? repo.deleteArticleEffect("12abcDEF_-xy")
-      : repo.syncWithAPIEffect();
+      ? repo.deleteArticle("12abcDEF_-xy")
+      : repo.syncWithAPI();
 try {
   await runOperation(effect);
   throw new Error("local write unexpectedly succeeded");
@@ -62,9 +62,9 @@ try {
   expect(response.error).toContain("Do not repeat it");
   expect(JSON.stringify(response)).not.toContain("credentials");
 }
-await expect(repo.testConnection()).rejects.toBeInstanceOf(FatalStorageFailure);
+await expect(runOperation(repo.testConnection)).rejects.toBeInstanceOf(FatalStorageFailure);
 await expect(
-  repo.saveArticle({ url: "https://example.com/again", title: "Again" }),
+  runOperation(repo.saveArticle({ url: "https://example.com/again", title: "Again" })),
 ).rejects.toBeInstanceOf(FatalStorageFailure);
 expect(mutations).toBe(operation === "sync" ? 0 : 1);
 console.log("typed-fatal-ok");

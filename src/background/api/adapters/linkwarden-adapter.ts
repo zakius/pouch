@@ -8,25 +8,14 @@ import {
   ConfigurationFailure,
   IncompleteSnapshotFailure,
   ProviderFailure,
-  runOperation,
   storageHealthy,
   type AcquisitionError,
   type EffectAdapter,
 } from "../effect-adapter";
-import type {
-  ReadItLaterAPI,
-  SavingArticle,
-  SyncOptions,
-  SyncResult,
-} from "../read-it-later-adapter";
+import type { SavingArticle, SyncOptions } from "../read-it-later-adapter";
 
 export type LinkwardenSettings = v.InferInput<typeof linkwardenSettingsSchema>;
 export type LinkwardenConfig = v.InferInput<typeof linkwardenConfigSchema>;
-
-const formConfig = [
-  { name: "url", label: "API URL" },
-  { name: "token", label: "API Token" },
-];
 
 /** Linkwarden's Prisma `Link`: uploaded PDFs and images have no `url`. */
 const linkwardenLinkSchema = v.object({
@@ -97,8 +86,6 @@ export const createLinkwardenAdapter = Effect.fn("linkwarden.acquire")(function*
   };
 
   const adapter: EffectAdapter = {
-    displayName: "Linkwarden",
-    formConfig,
     saveArticle: Effect.fn("linkwarden.save")(function* (article: SavingArticle) {
       // A duplicate URL is a 409 rejection when the user prevents duplicate links.
       const data = yield* request("linkwarden.save", "/links", {
@@ -166,29 +153,3 @@ export const createLinkwardenAdapter = Effect.fn("linkwarden.acquire")(function*
   yield* storageHealthy;
   return adapter;
 }) satisfies (settings: LinkwardenSettings) => Effect.Effect<EffectAdapter, AcquisitionError>;
-
-/** Legacy entry point removed with the remaining Promise callers in #81. */
-export class LinkwardenAdapter implements ReadItLaterAPI<LinkwardenSettings> {
-  readonly displayName = "Linkwarden";
-  readonly formConfig = formConfig;
-  private ready: EffectAdapter | undefined;
-  async initialize(settings: LinkwardenSettings): Promise<void> {
-    this.ready = await runOperation(createLinkwardenAdapter(settings));
-  }
-  private api(): EffectAdapter {
-    if (!this.ready) throw new ConfigurationFailure("linkwarden.acquire");
-    return this.ready;
-  }
-  testConnection(): Promise<boolean> {
-    return runOperation(this.api().testConnection);
-  }
-  saveArticle(article: SavingArticle): Promise<Article> {
-    return runOperation(this.api().saveArticle(article));
-  }
-  deleteArticle(id: number | string): Promise<void> {
-    return runOperation(this.api().deleteArticle(id));
-  }
-  sync(options?: SyncOptions): Promise<SyncResult> {
-    return runOperation(this.api().sync(options));
-  }
-}

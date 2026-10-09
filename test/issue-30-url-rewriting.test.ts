@@ -1,3 +1,4 @@
+import { runOperation } from "../src/background/api/effect-adapter";
 import { Effect } from "effect";
 import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
 import * as factory from "../src/utils/adapter-factory";
@@ -130,9 +131,9 @@ test("Comparison without normalization matches exact saved URLs only", async () 
   storage[keys.articles] = [saved];
   const repository = new ArticlesRepository();
   await repository.initialize({ ...DEFAULT_SETTINGS, normalizeOnCompare: false });
-  expect(await repository.findSaved("https://www.youtube.com/watch?v=abc123")).toEqual(saved);
-  expect(await repository.findSaved("https://youtu.be/abc123")).toBeUndefined();
-  expect(await repository.findSaved("https://www.youtube.com/watch?v=abc123&si=x")).toBeUndefined();
+  expect(await runOperation(repository.findSaved("https://www.youtube.com/watch?v=abc123"))).toEqual(saved);
+  expect(await runOperation(repository.findSaved("https://youtu.be/abc123"))).toBeUndefined();
+  expect(await runOperation(repository.findSaved("https://www.youtube.com/watch?v=abc123&si=x"))).toBeUndefined();
 });
 
 test("Comparison with normalization canonicalizes both sides", async () => {
@@ -146,8 +147,8 @@ test("Comparison with normalization canonicalizes both sides", async () => {
   storage[keys.articles] = [saved];
   const repository = new ArticlesRepository();
   await repository.initialize({ ...DEFAULT_SETTINGS, normalizeOnCompare: true });
-  expect(await repository.findSaved("https://youtu.be/abc123")).toEqual(saved);
-  expect(await repository.findSaved("https://example.com/other")).toBeUndefined();
+  expect(await runOperation(repository.findSaved("https://youtu.be/abc123"))).toEqual(saved);
+  expect(await runOperation(repository.findSaved("https://example.com/other"))).toBeUndefined();
 });
 
 test("Duplicate detection follows the comparison setting", async () => {
@@ -168,8 +169,8 @@ test("Duplicate detection follows the comparison setting", async () => {
     title: "Video",
     created_at: "2026-01-02",
   }));
-  await exactRepository.saveArticle({ url: "https://youtu.be/abc123", title: "Video" });
-  expect(((await exactRepository.getAllArticles()) as Article[]).length).toBe(2);
+  await runOperation(exactRepository.saveArticle({ url: "https://youtu.be/abc123", title: "Video" }));
+  expect(((await runOperation(exactRepository.getAllArticles)) as Article[]).length).toBe(2);
 
   const { storage: canonicalStorage } = withStorage();
   canonicalStorage[keys.articles] = [existing];
@@ -181,8 +182,8 @@ test("Duplicate detection follows the comparison setting", async () => {
     title: "Video",
     created_at: "2026-01-02",
   }));
-  await canonicalRepository.saveArticle({ url: "https://youtu.be/abc123", title: "Video" });
-  const articles = (await canonicalRepository.getAllArticles()) as Article[];
+  await runOperation(canonicalRepository.saveArticle({ url: "https://youtu.be/abc123", title: "Video" }));
+  const articles = (await runOperation(canonicalRepository.getAllArticles)) as Article[];
   expect(articles.length).toBe(1);
   expect(articles[0].id).toBe(1);
 });
@@ -192,10 +193,10 @@ test("Saving honors normalizeOnSave independently", async () => {
 
   const rawRepository = new ArticlesRepository();
   await rawRepository.initialize({ ...DEFAULT_SETTINGS, normalizeOnSave: false });
-  const rawSaved = await rawRepository.saveArticle({
+  const rawSaved = await runOperation(rawRepository.saveArticle({
     url: "https://youtu.be/abc123",
     title: "Video",
-  });
+  }));
   expect(rawSaved.url).toBe("https://youtu.be/abc123");
   expect(rawSaved.canonicalUrl).toBe("https://www.youtube.com/watch?v=abc123");
 
@@ -208,10 +209,10 @@ test("Saving honors normalizeOnSave independently", async () => {
     normalizeOnSave: true,
     normalizeOnCompare: false,
   });
-  const normalizedSaved = await normalizedRepository.saveArticle({
+  const normalizedSaved = await runOperation(normalizedRepository.saveArticle({
     url: "https://youtu.be/abc123",
     title: "Video",
-  });
+  }));
   expect(normalizedSaved.url).toBe("https://www.youtube.com/watch?v=abc123");
 });
 
@@ -251,7 +252,7 @@ test("Existing stored articles are compared against recomputed canonical values"
 
   const repository = new ArticlesRepository();
   await repository.initialize({ ...DEFAULT_SETTINGS, normalizeOnCompare: true });
-  expect(await repository.findSaved("https://cache.test/page?track=1&keep=1")).toEqual(
+  expect(await runOperation(repository.findSaved("https://cache.test/page?track=1&keep=1"))).toEqual(
     staleCanonical,
   );
 });

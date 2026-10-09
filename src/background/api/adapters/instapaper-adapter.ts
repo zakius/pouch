@@ -3,7 +3,7 @@ import * as v from "valibot";
 import { instapaperConfigSchema, instapaperSettingsSchema } from "../../../utils/settings-schemas";
 export { instapaperConfigSchema, instapaperSettingsSchema };
 import type { Article } from "../../../types/common";
-import { TokenManager, fromTokenPromise, tokenManager } from "../../token-manager";
+import { TokenManager, tokenManager } from "../../token-manager";
 import { requestJson, validate } from "../effect-api-client";
 import {
   BrowserFailure,
@@ -12,28 +12,16 @@ import {
   IncompleteSnapshotFailure,
   InvalidResponseFailure,
   ProviderFailure,
-  runOperation,
   storageHealthy,
   type AcquisitionError,
   type EffectAdapter,
 } from "../effect-adapter";
-import type {
-  ReadItLaterAPI,
-  SavingArticle,
-  SyncOptions,
-  SyncResult,
-} from "../read-it-later-adapter";
+import type { SavingArticle, SyncOptions } from "../read-it-later-adapter";
 
 export type InstapaperSettings = v.InferInput<typeof instapaperSettingsSchema>;
 export type InstapaperConfig = v.InferInput<typeof instapaperConfigSchema>;
 
 const apiUrl = "https://www.instapaper.com";
-const formConfig = [
-  { name: "consumerKey", label: "OAuth Consumer Key" },
-  { name: "consumerSecret", label: "OAuth Consumer Secret" },
-  { name: "username", label: "Instapaper Username" },
-  { name: "password", label: "Instapaper Password" },
-];
 
 const instapaperTagSchema = v.object({
   id: v.number(),
@@ -177,9 +165,7 @@ export const createInstapaperAdapter = Effect.fn("instapaper.acquire")(function*
     return yield* Effect.fail(new ConfigurationFailure("instapaper.acquire"));
   const config = { ...parsed.output.apiConfig };
   const consumer = { key: config.consumerKey, secret: config.consumerSecret };
-  const generation = yield* fromTokenPromise(() =>
-    tokens.bindAccount("instapaper", JSON.stringify(config)),
-  );
+  const generation = yield* tokens.bindAccount("instapaper", JSON.stringify(config));
   const owned = Effect.try({
     try: () => tokens.assertAccount("instapaper", generation),
     catch: () => new CredentialsFailure("instapaper.account"),
@@ -239,21 +225,19 @@ export const createInstapaperAdapter = Effect.fn("instapaper.acquire")(function*
   const token = { key, secret };
   const now = Date.now();
   // OAuth 1.0a tokens do not expire; one year prompts periodic re-authentication. The secret stays in memory.
-  yield* fromTokenPromise(() =>
-    tokens.storeToken(
-      "instapaper",
-      {
-        accessToken: key,
-        refreshToken: "",
-        tokenType: "OAuth",
-        expiresAt: now + 365 * 24 * 60 * 60 * 1000,
-        issuedAt: now,
-        refreshCount: 0,
-      },
-      "succeeded",
-      "authentication",
-      generation,
-    ),
+  yield* tokens.storeToken(
+    "instapaper",
+    {
+      accessToken: key,
+      refreshToken: "",
+      tokenType: "OAuth",
+      expiresAt: now + 365 * 24 * 60 * 60 * 1000,
+      issuedAt: now,
+      refreshCount: 0,
+    },
+    "succeeded",
+    "authentication",
+    generation,
   );
 
   const request = (
@@ -264,8 +248,6 @@ export const createInstapaperAdapter = Effect.fn("instapaper.acquire")(function*
   ) => signedRequest(operation, endpoint, params, { ...options, token });
 
   const adapter: EffectAdapter = {
-    displayName: "Instapaper",
-    formConfig,
     saveArticle: Effect.fn("instapaper.save")(function* (article: SavingArticle) {
       const data = yield* request(
         "instapaper.save",
@@ -347,30 +329,3 @@ export const createInstapaperAdapter = Effect.fn("instapaper.acquire")(function*
   settings: InstapaperSettings,
   tokens?: TokenManager,
 ) => Effect.Effect<EffectAdapter, AcquisitionError>;
-
-/** Legacy entry point removed with the remaining Promise callers in #81. */
-export class InstapaperAdapter implements ReadItLaterAPI<InstapaperSettings> {
-  readonly displayName = "Instapaper";
-  readonly formConfig = formConfig;
-  private ready: EffectAdapter | undefined;
-  constructor(readonly tokens: TokenManager = tokenManager) {}
-  async initialize(settings: InstapaperSettings): Promise<void> {
-    this.ready = await runOperation(createInstapaperAdapter(settings, this.tokens));
-  }
-  private api(): EffectAdapter {
-    if (!this.ready) throw new ConfigurationFailure("instapaper.acquire");
-    return this.ready;
-  }
-  testConnection(): Promise<boolean> {
-    return runOperation(this.api().testConnection);
-  }
-  saveArticle(article: SavingArticle): Promise<Article> {
-    return runOperation(this.api().saveArticle(article));
-  }
-  deleteArticle(id: number | string): Promise<void> {
-    return runOperation(this.api().deleteArticle(id));
-  }
-  sync(options?: SyncOptions): Promise<SyncResult> {
-    return runOperation(this.api().sync(options));
-  }
-}

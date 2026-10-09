@@ -5,7 +5,6 @@ import { requestJson, retryAfterDelay } from "../src/background/api/effect-api-c
 import {
   CredentialsFailure,
   OperationInterrupted,
-  fromLegacyPromise,
   runOperation,
 } from "../src/background/api/effect-adapter";
 import { errorResponse } from "../src/background/runtime-message";
@@ -268,7 +267,7 @@ test("required token failure stops fetch and retains its recovery category", asy
 });
 test("ready Wallabag saves, deletes, tests, and paginates full and incremental sync", async () => {
   const tokens = new TokenManager({ persist: false });
-  await tokens.storeToken("wallabag", oldToken);
+  await runOperation(tokens.storeToken("wallabag", oldToken));
   const urls: string[] = [];
   spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
     urls.push(String(url));
@@ -302,7 +301,7 @@ for (const operation of ["save", "delete"] as const) {
     setFilterListSources([{ name: "empty", url: "data:text/plain,! empty" }]);
     await initializeUrlCanonizer();
     const tokens = new TokenManager({ persist: false });
-    await tokens.storeToken("wallabag", oldToken);
+    await runOperation(tokens.storeToken("wallabag", oldToken));
     const fetchMock = spyOn(globalThis, "fetch").mockImplementation(async (_url, init) =>
       init?.method === "DELETE" ? new Response(null, { status: 204 }) : json(item),
     );
@@ -310,7 +309,7 @@ for (const operation of ["save", "delete"] as const) {
     await repo.initialize(settings);
     rejectReads = true;
     const result = await failure(
-      operation === "save" ? repo.saveArticleEffect(item) : repo.deleteArticleEffect("42"),
+      operation === "save" ? repo.saveArticle(item) : repo.deleteArticle("42"),
     );
     expect(result.code).toBe("BrowserFailure");
     expect(result.details).toMatchObject({
@@ -334,15 +333,15 @@ const refreshConfig = {
 for (const kind of ["server", "rate", "shape", "rejected"] as const) {
   test(`concurrent refresh shares its complete ${kind} result and preserves credential policy`, async () => {
     const tokens = new TokenManager({ persist: false, refreshCooldownMs: 0 });
-    await tokens.storeToken("wallabag", oldToken);
+    await runOperation(tokens.storeToken("wallabag", oldToken));
     const started = deferred<void>();
     const release = deferred<Response>();
     const fetchMock = spyOn(globalThis, "fetch").mockImplementation(async () => {
       started.resolve();
       return release.promise;
     });
-    const first = tokens.refreshToken("wallabag", refreshConfig);
-    const second = tokens.refreshToken("wallabag", refreshConfig);
+    const first = runOperation(tokens.refreshToken("wallabag", refreshConfig));
+    const second = runOperation(tokens.refreshToken("wallabag", refreshConfig));
     await started.promise;
     release.resolve(
       kind === "rate"
@@ -375,15 +374,15 @@ for (const kind of ["server", "rate", "shape", "rejected"] as const) {
 }
 test("repeated transient failures never erase credentials and expired tokens retain the last failure", async () => {
   const tokens = new TokenManager({ persist: false, refreshCooldownMs: 0, maxRefreshAttempts: 1 });
-  await tokens.storeToken("wallabag", { ...oldToken, expiresAt: Date.now() + 60000 });
+  await runOperation(tokens.storeToken("wallabag", { ...oldToken, expiresAt: Date.now() + 60000 }));
   tokens.setRefreshConfigProvider("wallabag", () => refreshConfig);
   const fetchMock = spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("SECRET"));
   for (let index = 0; index < 4; index++)
-    expect((await tokens.refreshToken("wallabag")).requiresReauth).toBe(false);
-  expect(await tokens.getAccessToken("wallabag")).toBe("active-access");
+    expect((await runOperation(tokens.refreshToken("wallabag"))).requiresReauth).toBe(false);
+  expect(await runOperation(tokens.getAccessToken("wallabag"))).toBe("active-access");
   expect(tokens.getTokenMetadata("wallabag")?.refreshCount).toBeGreaterThan(1);
-  await tokens.storeToken("wallabag", { ...oldToken, expiresAt: Date.now() - 1 });
-  const result = await failure(fromLegacyPromise(() => tokens.getAccessToken("wallabag")));
+  await runOperation(tokens.storeToken("wallabag", { ...oldToken, expiresAt: Date.now() - 1 }));
+  const result = await failure(tokens.getAccessToken("wallabag"));
   expect(result.code).toBe("NetworkFailure");
   expect(fetchMock.mock.calls.length).toBeGreaterThan(4);
 });
@@ -396,9 +395,9 @@ test("malformed token fields and ambiguous OAuth 400 responses preserve credenti
     json({ error: "invalid_request", error_description: "SECRET" }, 400),
   ]) {
     const tokens = new TokenManager({ persist: false });
-    await tokens.storeToken("wallabag", oldToken);
+    await runOperation(tokens.storeToken("wallabag", oldToken));
     spyOn(globalThis, "fetch").mockResolvedValue(response);
-    const result = await tokens.refreshToken("wallabag", refreshConfig);
+    const result = await runOperation(tokens.refreshToken("wallabag", refreshConfig));
     expect(result.success).toBe(false);
     expect(result.requiresReauth).toBe(false);
     expect(tokens.getTokenMetadata("wallabag")?.accessToken).toBe("active-access");
@@ -407,35 +406,35 @@ test("malformed token fields and ambiguous OAuth 400 responses preserve credenti
 });
 test("token rotation is persisted before publication and used on the next refresh", async () => {
   const tokens = new TokenManager({ refreshCooldownMs: 0 });
-  await tokens.storeToken("wallabag", oldToken);
+  await runOperation(tokens.storeToken("wallabag", oldToken));
   const bodies: string[] = [];
   spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
     bodies.push(String(init?.body));
     return json(token);
   });
-  expect((await tokens.refreshToken("wallabag", refreshConfig)).success).toBe(true);
+  expect((await runOperation(tokens.refreshToken("wallabag", refreshConfig))).success).toBe(true);
   expect(storage.api_tokens).toEqual([
     [
       "wallabag",
       expect.objectContaining({ accessToken: "rotated-access", refreshToken: "rotated-refresh" }),
     ],
   ]);
-  expect((await tokens.refreshToken("wallabag", refreshConfig)).success).toBe(true);
+  expect((await runOperation(tokens.refreshToken("wallabag", refreshConfig))).success).toBe(true);
   expect(bodies[1]).toContain("refresh_token=rotated-refresh");
 });
 test("a late refresh cannot install old-account credentials after replacement", async () => {
   const tokens = new TokenManager();
-  await tokens.storeToken("wallabag", oldToken);
+  await runOperation(tokens.storeToken("wallabag", oldToken));
   const started = deferred<void>();
   const release = deferred<Response>();
   spyOn(globalThis, "fetch").mockImplementation(async () => {
     started.resolve();
     return release.promise;
   });
-  const pending = tokens.refreshToken("wallabag", refreshConfig);
+  const pending = runOperation(tokens.refreshToken("wallabag", refreshConfig));
   await started.promise;
-  await tokens.clearAllTokens();
-  await tokens.storeToken("wallabag", { ...oldToken, accessToken: "replacement" });
+  await runOperation(tokens.clearToken("wallabag"));
+  await runOperation(tokens.storeToken("wallabag", { ...oldToken, accessToken: "replacement" }));
   release.resolve(json(token));
   expect((await pending).success).toBe(false);
   expect(tokens.getTokenMetadata("wallabag")?.accessToken).toBe("replacement");
@@ -445,7 +444,7 @@ test("a late refresh cannot install old-account credentials after replacement", 
 });
 test("cancelled refresh waiter and draft authentication cannot cancel or change active refresh", async () => {
   const active = new TokenManager();
-  await active.storeToken("wallabag", oldToken);
+  await runOperation(active.storeToken("wallabag", oldToken));
   const draft = new TokenManager({ persist: false });
   const started = deferred<void>();
   const release = deferred<Response>();
@@ -460,11 +459,11 @@ test("cancelled refresh waiter and draft authentication cannot cancel or change 
   });
   const controller = new AbortController();
   const waiting = runOperation(
-    fromLegacyPromise(() => active.refreshToken("wallabag", refreshConfig)),
+    active.refreshToken("wallabag", refreshConfig),
     controller.signal,
   ).catch((error: unknown) => error);
   await started.promise;
-  const shared = active.refreshToken("wallabag", refreshConfig);
+  const shared = runOperation(active.refreshToken("wallabag", refreshConfig));
   controller.abort();
   expect(await waiting).toBeInstanceOf(OperationInterrupted);
   const api = await runOperation(createWallabagAdapter(settings, draft));
@@ -481,7 +480,7 @@ test("cancelled refresh waiter and draft authentication cannot cancel or change 
 });
 test("failed ready connection test preserves actionable typed reason instead of returning false", async () => {
   const tokens = new TokenManager({ persist: false });
-  await tokens.storeToken("wallabag", oldToken);
+  await runOperation(tokens.storeToken("wallabag", oldToken));
   spyOn(globalThis, "fetch").mockResolvedValue(json({ secret: "SECRET" }));
   const api = await runOperation(createWallabagAdapter(settings, tokens));
   expect((await failure(api.testConnection)).code).toBe("InvalidResponseFailure");
@@ -489,7 +488,7 @@ test("failed ready connection test preserves actionable typed reason instead of 
 
 test("Wallabag retries an explicit auth rejection with the rotated required token", async () => {
   const tokens = new TokenManager({ persist: false });
-  await tokens.storeToken("wallabag", oldToken);
+  await runOperation(tokens.storeToken("wallabag", oldToken));
   const methods: string[] = [];
   const auth: (string | null)[] = [];
   spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
@@ -510,7 +509,7 @@ test("Wallabag retries an explicit auth rejection with the rotated required toke
 });
 test("transient auth recovery does not repeat a mutation or attempt password authentication", async () => {
   const tokens = new TokenManager({ persist: false });
-  await tokens.storeToken("wallabag", oldToken);
+  await runOperation(tokens.storeToken("wallabag", oldToken));
   const methods: string[] = [];
   spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
     if (String(url).includes("oauth")) {
@@ -528,7 +527,7 @@ test("transient auth recovery does not repeat a mutation or attempt password aut
 });
 test("definitive refresh rejection allows password authentication before retrying", async () => {
   const tokens = new TokenManager({ persist: false });
-  await tokens.storeToken("wallabag", oldToken);
+  await runOperation(tokens.storeToken("wallabag", oldToken));
   const grants: string[] = [];
   spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
     if (String(url).includes("oauth")) {
@@ -556,7 +555,7 @@ test("provider error envelope is a rejection and cannot claim mutation success",
 });
 test("malformed persisted required token fails before any authenticated request", async () => {
   const tokens = new TokenManager({ persist: false });
-  await tokens.storeToken("wallabag", { ...oldToken, accessToken: "" });
+  await runOperation(tokens.storeToken("wallabag", { ...oldToken, accessToken: "" }));
   const fetchMock = spyOn(globalThis, "fetch");
   const api = await runOperation(createWallabagAdapter(settings, tokens));
   expect((await failure(api.testConnection)).code).toBe("InvalidResponseFailure");
@@ -569,7 +568,7 @@ test("repository sync retains typed missing permission at acquisition", async ()
   await repo.initialize(settings);
   granted = false;
   const fetchMock = spyOn(globalThis, "fetch");
-  const result = await repo.syncWithAPI().catch((error: unknown) => errorResponse(error));
+  const result = await runOperation(repo.syncWithAPI()).catch((error: unknown) => errorResponse(error));
   expect(result).toMatchObject({
     code: "PermissionFailure",
     details: { permission: "server access" },
@@ -596,7 +595,7 @@ test("late password authentication cannot publish or use replacement-account cre
   });
   const pending = failure(createWallabagAdapter(settings, tokens));
   await started.promise;
-  await tokens.clearToken("wallabag");
+  await runOperation(tokens.clearToken("wallabag"));
   const replacement = await runOperation(
     createWallabagAdapter(
       {
@@ -619,9 +618,9 @@ test("late password authentication cannot publish or use replacement-account cre
 
 test("a stale ready adapter cannot send the replacement token to its old server", async () => {
   const tokens = new TokenManager({ persist: false });
-  await tokens.storeToken("wallabag", oldToken);
+  await runOperation(tokens.storeToken("wallabag", oldToken));
   const stale = await runOperation(createWallabagAdapter(settings, tokens));
-  await tokens.clearAllTokens();
+  await runOperation(tokens.clearToken("wallabag"));
   const fetchMock = spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
     if (String(url).includes("oauth")) return json(token);
     expect(String(url)).toContain("replacement.example");
@@ -682,7 +681,7 @@ for (const invalid of ["bad\r\ntoken", "bad\ntoken", "bad\u0100token", "token\r\
     expect(oauth.details).toMatchObject({ responseKind: "token" });
     expect(tokens.getTokenMetadata("wallabag")).toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    await tokens.storeToken("wallabag", { ...oldToken, accessToken: invalid });
+    await runOperation(tokens.storeToken("wallabag", { ...oldToken, accessToken: invalid }));
     const api = await runOperation(createWallabagAdapter(settings, tokens));
     fetchMock.mockClear();
     const persisted = await failure(api.saveArticle(item));
@@ -708,7 +707,7 @@ test("header preflight failure does not mark a mutation as submitted", async () 
 
 test("sync decision diagnostics precede a failed first page without account secrets", async () => {
   const tokens = new TokenManager({ persist: false });
-  await tokens.storeToken("wallabag", oldToken);
+  await runOperation(tokens.storeToken("wallabag", oldToken));
   const { logger } = await import("../src/utils/logger");
   const log = spyOn(logger, "info");
   const timestamp = Date.now() - 86400001;
@@ -730,7 +729,7 @@ test("sync decision diagnostics precede a failed first page without account secr
 
 test("account invalidation gates an authentication commit queued behind persistence", async () => {
   const tokens = new TokenManager();
-  const generation = await tokens.bindAccount("wallabag", "A");
+  const generation = await runOperation(tokens.bindAccount("wallabag", "A"));
   const started = deferred<void>();
   const release = deferred<void>();
   browser.storage.local.set = async (data) => {
@@ -738,12 +737,12 @@ test("account invalidation gates an authentication commit queued behind persiste
     await release.promise;
     Object.assign(storage, data);
   };
-  const blocker = tokens.storeToken("other", oldToken);
+  const blocker = runOperation(tokens.storeToken("other", oldToken));
   await started.promise;
-  const stale = tokens
-    .storeToken("wallabag", oldToken, undefined, undefined, generation)
-    .catch((error: unknown) => error);
-  const clearing = tokens.clearToken("wallabag");
+  const stale = runOperation(
+    tokens.storeToken("wallabag", oldToken, undefined, undefined, generation),
+  ).catch((error: unknown) => error);
+  const clearing = runOperation(tokens.clearToken("wallabag"));
   release.resolve();
   await blocker;
   expect(await stale).toBeInstanceOf(CredentialsFailure);
@@ -753,7 +752,7 @@ test("account invalidation gates an authentication commit queued behind persiste
 
 test("late rejection does not clear a newer token without refresh capability", async () => {
   const tokens = new TokenManager({ persist: false });
-  await tokens.storeToken("wallabag", { ...oldToken, refreshToken: "" });
+  await runOperation(tokens.storeToken("wallabag", { ...oldToken, refreshToken: "" }));
   const started = deferred<void>();
   const release = deferred<Response>();
   let calls = 0;
@@ -768,11 +767,11 @@ test("late rejection does not clear a newer token without refresh capability", a
   const api = await runOperation(createWallabagAdapter(settings, tokens));
   const pending = runOperation(api.testConnection);
   await started.promise;
-  await tokens.storeToken("wallabag", {
+  await runOperation(tokens.storeToken("wallabag", {
     ...oldToken,
     refreshToken: "",
     accessToken: "replacement",
-  });
+  }));
   release.resolve(json({}, 401));
   // The newer token has not been rejected and does not require a password grant.
   expect(await pending.catch((error: unknown) => errorResponse(error))).toMatchObject({
@@ -816,16 +815,16 @@ test("replacement during acquisition permission cannot reclaim account ownership
 
 test("missing refresh capability preserves a current token until expiry", async () => {
   const tokens = new TokenManager({ persist: false });
-  await tokens.storeToken("wallabag", {
+  await runOperation(tokens.storeToken("wallabag", {
     ...oldToken,
     refreshToken: "",
     expiresAt: Date.now() + 60000,
-  });
+  }));
   const fetchMock = spyOn(globalThis, "fetch");
-  expect(await tokens.getAccessToken("wallabag")).toBe("active-access");
+  expect(await runOperation(tokens.getAccessToken("wallabag"))).toBe("active-access");
   expect(tokens.getTokenMetadata("wallabag")?.accessToken).toBe("active-access");
-  await tokens.storeToken("wallabag", { ...oldToken, refreshToken: "", expiresAt: Date.now() - 1 });
-  expect(await tokens.getAccessToken("wallabag").catch((error: unknown) => error)).toBeInstanceOf(
+  await runOperation(tokens.storeToken("wallabag", { ...oldToken, refreshToken: "", expiresAt: Date.now() - 1 }));
+  expect(await runOperation(tokens.getAccessToken("wallabag")).catch((error: unknown) => error)).toBeInstanceOf(
     CredentialsFailure,
   );
   expect(tokens.getTokenMetadata("wallabag")?.accessToken).toBe("active-access");
@@ -834,7 +833,7 @@ test("missing refresh capability preserves a current token until expiry", async 
 
 test("concurrent replacement acquisitions wait for the previous account's token deletion", async () => {
   const tokens = new TokenManager();
-  await tokens.storeToken("wallabag", { ...oldToken, accessToken: "A-token" });
+  await runOperation(tokens.storeToken("wallabag", { ...oldToken, accessToken: "A-token" }));
   await runOperation(createWallabagAdapter(settings, tokens));
   const replacement: WallabagSettings = {
     ...settings,
@@ -884,7 +883,7 @@ test("invalidation during acquisition token persistence fails the acquisition", 
   const fetchMock = spyOn(globalThis, "fetch").mockImplementation(async () => json(token));
   const pending = failure(createWallabagAdapter(settings, tokens));
   await started.promise;
-  const clearing = tokens.clearToken("wallabag");
+  const clearing = runOperation(tokens.clearToken("wallabag"));
   release.resolve();
   expect((await pending).code).toBe("CredentialsFailure");
   await clearing;

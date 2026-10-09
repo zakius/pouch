@@ -77,3 +77,57 @@ export const wallabagSettingsSchema = v.object({
   apiConfig: wallabagConfigSchema,
 });
 export type WallabagSettings = v.InferInput<typeof wallabagSettingsSchema>;
+
+type FormField = { name: string; label: string };
+/** What the options page shows per backend, kept apart from the adapters so it needs no Effect code. */
+export const backendForms: Record<
+  "bookmarks" | "wallabag" | "instapaper" | "raindrop" | "karakeep" | "linkace" | "linkwarden",
+  { displayName: string; formConfig: FormField[] }
+> = {
+  bookmarks: { displayName: "Browser Bookmarks", formConfig: [] },
+  wallabag: {
+    displayName: "Wallabag",
+    formConfig: [
+      { name: "url", label: "API URL" },
+      { name: "clientId", label: "Client ID" },
+      { name: "clientSecret", label: "Client Secret" },
+      { name: "username", label: "Username" },
+      { name: "password", label: "Password" },
+    ],
+  },
+  instapaper: {
+    displayName: "Instapaper",
+    formConfig: [
+      { name: "consumerKey", label: "OAuth Consumer Key" },
+      { name: "consumerSecret", label: "OAuth Consumer Secret" },
+      { name: "username", label: "Instapaper Username" },
+      { name: "password", label: "Instapaper Password" },
+    ],
+  },
+  raindrop: {
+    displayName: "Raindrop.io",
+    formConfig: [{ name: "apiKey", label: "API Key (Test Token)" }],
+  },
+  karakeep: {
+    displayName: "Karakeep",
+    formConfig: [
+      { name: "url", label: "API URL" },
+      { name: "token", label: "API Token" },
+    ],
+  },
+  linkace: {
+    displayName: "LinkAce",
+    formConfig: [
+      { name: "url", label: "API URL" },
+      { name: "token", label: "API Token" },
+    ],
+  },
+  linkwarden: {
+    displayName: "Linkwarden",
+    formConfig: [
+      // Sync uses /api/v1/search, which older servers answer with HTTP 404.
+      { name: "url", label: "API URL (needs Linkwarden 2.10 or later)" },
+      { name: "token", label: "API Token" },
+    ],
+  },
+};

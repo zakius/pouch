@@ -2,7 +2,7 @@ import { logger } from "../../../utils/logger";
 import { Effect, Semaphore } from "effect";
 import * as v from "valibot";
 import { wallabagConfigSchema, wallabagSettingsSchema } from "../../../utils/settings-schemas";
-import { TokenManager, parseOAuthToken, fromTokenPromise, tokenManager } from "../../token-manager";
+import { TokenManager, parseOAuthToken, tokenManager } from "../../token-manager";
 import {
   checkHostPermission,
   requestJson,
@@ -14,28 +14,15 @@ import {
   CredentialsFailure,
   InvalidResponseFailure,
   HttpFailure,
-  runOperation,
   storageHealthy,
   type EffectAdapter,
   type AcquisitionError,
 } from "../effect-adapter";
 import type { Article } from "../../../types/common";
-import type {
-  ReadItLaterAPI,
-  SavingArticle,
-  SyncOptions,
-  SyncResult,
-} from "../read-it-later-adapter";
+import type { SavingArticle, SyncOptions } from "../read-it-later-adapter";
 export { wallabagConfigSchema, wallabagSettingsSchema };
 export type WallabagSettings = v.InferInput<typeof wallabagSettingsSchema>;
 export type WallabagConfig = v.InferInput<typeof wallabagConfigSchema>;
-const formConfig = [
-  { name: "url", label: "API URL" },
-  { name: "clientId", label: "Client ID" },
-  { name: "clientSecret", label: "Client Secret" },
-  { name: "username", label: "Username" },
-  { name: "password", label: "Password" },
-];
 const wallabagTagSchema = v.object({
   id: v.number(),
   name: v.string(),
@@ -107,9 +94,7 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
   const config = { ...parsed.output.apiConfig };
   const baseUrl = config.url.replace(/\/$/, "");
   const tokenUrl = `${baseUrl}/oauth/v2/token`;
-  const generation = yield* fromTokenPromise(() =>
-    tokens.bindAccount("wallabag", JSON.stringify(config)),
-  );
+  const generation = yield* tokens.bindAccount("wallabag", JSON.stringify(config));
   const owned = Effect.try({
     try: () => tokens.assertAccount("wallabag", generation),
     catch: () => new CredentialsFailure("wallabag.account"),
@@ -143,22 +128,20 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
     });
     const token = yield* parseOAuthToken(data, "wallabag.authenticate");
     const now = Date.now();
-    yield* fromTokenPromise(() =>
-      tokens.storeToken(
-        "wallabag",
-        {
-          accessToken: token.access_token,
-          refreshToken: token.refresh_token ?? "",
-          tokenType: token.token_type ?? "Bearer",
-          expiresAt: now + (token.expires_in ?? 3600) * 1000,
-          issuedAt: now,
-          scope: token.scope ?? undefined,
-          refreshCount: 0,
-        },
-        "succeeded",
-        "authentication",
-        generation,
-      ),
+    yield* tokens.storeToken(
+      "wallabag",
+      {
+        accessToken: token.access_token,
+        refreshToken: token.refresh_token ?? "",
+        tokenType: token.token_type ?? "Bearer",
+        expiresAt: now + (token.expires_in ?? 3600) * 1000,
+        issuedAt: now,
+        scope: token.scope ?? undefined,
+        refreshCount: 0,
+      },
+      "succeeded",
+      "authentication",
+      generation,
     );
   });
   const onAuthRejected = (authorization: string | undefined) =>
@@ -170,11 +153,11 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
         !token.refreshToken &&
         authorization === `${token.tokenType} ${token.accessToken}`
       )
-        yield* fromTokenPromise(() => tokens.discardRejectedToken("wallabag", token));
+        yield* tokens.discardRejectedToken("wallabag", token);
     });
   const recoverAuth = Effect.gen(function* () {
     yield* owned;
-    const result = yield* fromTokenPromise(() => tokens.refreshToken("wallabag"));
+    const result = yield* tokens.refreshToken("wallabag");
     yield* owned;
     if (result.success) return;
     if (result.requiresReauth) return yield* authenticate;
@@ -183,7 +166,7 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
   if (!tokens.getTokenMetadata("wallabag")) yield* authenticate;
   const authorization = Effect.gen(function* () {
     yield* owned;
-    const access = yield* fromTokenPromise(() => tokens.getAccessToken("wallabag"));
+    const access = yield* tokens.getAccessToken("wallabag");
     yield* owned;
     if (!access) return yield* Effect.fail(new CredentialsFailure("wallabag.request"));
     const type = tokens.getTokenMetadata("wallabag")?.tokenType ?? "Bearer";
@@ -226,8 +209,6 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
     return parsed;
   });
   const adapter: EffectAdapter = {
-    displayName: "Wallabag",
-    formConfig,
     saveArticle: Effect.fn("wallabag.save")(function* (article: SavingArticle) {
       const data = yield* request("/api/entries.json", {
         operation: "wallabag.save",
@@ -320,36 +301,3 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
   settings: WallabagSettings,
   tokens?: TokenManager,
 ) => Effect.Effect<EffectAdapter, AcquisitionError>;
-
-/** Legacy entry point removed with the remaining Promise callers in #81. */
-export class WallabagAdapter implements ReadItLaterAPI<WallabagSettings> {
-  readonly displayName = "Wallabag";
-  readonly formConfig = formConfig;
-  private ready: EffectAdapter | undefined;
-  constructor(readonly tokens: TokenManager = tokenManager) {}
-  async initialize(settings: WallabagSettings): Promise<void> {
-    this.ready = await runOperation(createWallabagAdapter(settings, this.tokens));
-  }
-  private api(): EffectAdapter {
-    if (!this.ready) throw new ConfigurationFailure("wallabag.acquire");
-    return this.ready;
-  }
-  testConnection(): Promise<boolean> {
-    return runOperation(this.api().testConnection);
-  }
-  saveArticle(article: SavingArticle): Promise<Article> {
-    return runOperation(this.api().saveArticle(article));
-  }
-  deleteArticle(id: number | string): Promise<void> {
-    return runOperation(this.api().deleteArticle(id));
-  }
-  sync(options?: SyncOptions): Promise<SyncResult> {
-    return runOperation(this.api().sync(options));
-  }
-  cleanup(): Promise<void> {
-    return this.tokens.clearToken("wallabag");
-  }
-  getTokenHealth() {
-    return this.tokens.getTokenHealth().wallabag ?? { isValid: false };
-  }
-}

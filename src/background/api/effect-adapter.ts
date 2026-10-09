@@ -5,9 +5,10 @@ import {
   FatalStorageError,
   assertStorageHealthy,
   storageShutdownSignal,
+  type RemoteOutcome,
   type StorageDiagnostic,
 } from "../../utils/fatal-storage";
-import type { SavingArticle, SyncOptions, SyncResult, FormConfig } from "./read-it-later-adapter";
+import type { SavingArticle, SyncOptions, SyncResult } from "./read-it-later-adapter";
 
 type MutationOutcome = {
   remoteOperation: "save" | "delete";
@@ -169,21 +170,25 @@ export type AdapterError = AcquisitionError | IncompleteSnapshotFailure;
 
 /** Ready operations capture implementation dependencies; no private services escape in R. */
 export interface EffectAdapter {
-  readonly displayName: string;
-  readonly formConfig: FormConfig;
   readonly saveArticle: (article: SavingArticle) => Effect.Effect<Article, SaveError>;
   readonly deleteArticle: (id: number | string) => Effect.Effect<void, DeleteError>;
   readonly sync: (options?: SyncOptions) => Effect.Effect<SyncResult, SyncError>;
   readonly testConnection: Effect.Effect<true, ConnectionError>;
 }
 
-export const storageHealthy: Effect.Effect<void, FatalStorageFailure> = Effect.try({
-  try: () => assertStorageHealthy(),
-  catch: (error) => {
-    if (error instanceof FatalStorageError) return new FatalStorageFailure(error.diagnostic);
-    throw error;
-  },
-});
+/** With a remote outcome, a fatal failure reports that outcome too. */
+export const storageHealthyAfter = (
+  remoteOutcome?: RemoteOutcome,
+  remoteOperation?: string,
+): Effect.Effect<void, FatalStorageFailure> =>
+  Effect.try({
+    try: () => assertStorageHealthy(remoteOutcome, remoteOperation),
+    catch: (error) => {
+      if (error instanceof FatalStorageError) return new FatalStorageFailure(error.diagnostic);
+      throw error;
+    },
+  });
+export const storageHealthy = storageHealthyAfter();
 
 export function isAdapterError(error: unknown): error is AdapterError {
   return (
@@ -202,20 +207,25 @@ export function isAdapterError(error: unknown): error is AdapterError {
   );
 }
 
-/** Removed in #81 with the Promise repository coordination and unmigrated callers. */
-export function fromLegacyPromise<A>(operation: () => Promise<A>): Effect.Effect<A, AdapterError> {
+/** Runs a Promise whose only rejection is fatal storage, e.g. `setLocal`, which latches it first. */
+export function storagePromise<A>(run: () => Promise<A>): Effect.Effect<A, FatalStorageFailure> {
   return Effect.tryPromise({
-    try: operation,
+    try: run,
     catch: (error) => {
       if (error instanceof FatalStorageError) return new FatalStorageFailure(error.diagnostic);
-      if (isAdapterError(error)) return error;
       throw error;
     },
-  }).pipe(
-    Effect.catchDefect((defect) =>
-      defect instanceof OperationInterrupted ? Effect.interrupt : Effect.die(defect),
-    ),
-  );
+  });
+}
+
+export function localRead(
+  operation: string,
+  keys: string | string[] | null,
+): Effect.Effect<Record<string, unknown>, BrowserFailure | FatalStorageFailure> {
+  return Effect.tryPromise({
+    try: () => browser.storage.local.get(keys),
+    catch: () => new BrowserFailure(operation),
+  }).pipe(Effect.tap(() => storageHealthy));
 }
 
 export class OperationDefect extends OperationError {
@@ -250,7 +260,7 @@ export class OperationInterrupted extends Error {
   }
 }
 
-/** Browser/legacy boundary preserves failures rather than squashing Exit into a generic Error. */
+/** The browser boundary: classifies the Exit into a typed failure, fatal storage, interruption or defect. */
 export async function runOperation<A, E>(
   operation: Effect.Effect<A, E>,
   signal?: AbortSignal,

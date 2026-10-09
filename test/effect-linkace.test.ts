@@ -163,7 +163,7 @@ test("the static token never enters TokenManager or refresh, and rejection is ne
     issuedAt: 0,
     refreshCount: 0,
   };
-  await tokens.storeToken("linkace", legacy);
+  await runOperation(tokens.storeToken("linkace", legacy));
   const refresh = spyOn(tokens, "refreshToken");
   const getAccessToken = spyOn(tokens, "getAccessToken");
   const fetchMock = api((url) =>
@@ -173,13 +173,13 @@ test("the static token never enters TokenManager or refresh, and rejection is ne
   );
   const repo = new ArticlesRepository(tokens);
   await repo.initialize(settings);
-  await repo.syncWithAPI();
-  const rejected = await repo.testConnection().catch((error: unknown) => errorResponse(error));
+  await runOperation(repo.syncWithAPI());
+  const rejected = await runOperation(repo.testConnection).catch((error: unknown) => errorResponse(error));
   expect(rejected).toMatchObject({
     code: "CredentialsFailure",
     details: { operation: "linkace.testConnection" },
   });
-  await tokens.checkAndRefreshTokens();
+  await runOperation(tokens.checkAndRefreshTokens);
   expect(refresh).not.toHaveBeenCalled();
   expect(getAccessToken).not.toHaveBeenCalled();
   const linkace = fetchMock.mock.calls.filter(([url]) => urlOf([url]).host === "links.example.com");
@@ -430,7 +430,7 @@ test("draft connection test reports an actionable failure and stores no credenti
   api(() => json({ message: "Unauthenticated." }, 401));
   const repo = new ArticlesRepository(new TokenManager());
   await repo.initialize(settings);
-  const result = await repo.testConnection().catch((error: unknown) => errorResponse(error));
+  const result = await runOperation(repo.testConnection).catch((error: unknown) => errorResponse(error));
   expect(result).toMatchObject({
     code: "CredentialsFailure",
     details: { operation: "linkace.testConnection" },
@@ -451,16 +451,16 @@ test("repository save, delete, overwrite and update sync commit LinkAce outcomes
   const ids = () => (storage[keys.articles] as { id: number }[]).map((a) => a.id).sort();
   const repo = new ArticlesRepository(new TokenManager({ persist: false }));
   await repo.initialize(settings);
-  await repo.syncWithAPI({ mode: "overwrite" });
+  await runOperation(repo.syncWithAPI({ mode: "overwrite" }));
   expect(ids()).toEqual([1, 2]);
-  await repo.saveArticle({ url: "https://example.com/3", title: "Link 3" });
+  await runOperation(repo.saveArticle({ url: "https://example.com/3", title: "Link 3" }));
   expect(ids()).toEqual([1, 2, 3]);
-  await repo.deleteArticle(1);
+  await runOperation(repo.deleteArticle(1));
   expect(ids()).toEqual([2, 3]);
   listed = [4];
-  await repo.syncWithAPI({ mode: "update" });
+  await runOperation(repo.syncWithAPI({ mode: "update" }));
   expect(ids()).toEqual([2, 3, 4]);
-  await repo.syncWithAPI({ mode: "overwrite" });
+  await runOperation(repo.syncWithAPI({ mode: "overwrite" }));
   expect(ids()).toEqual([4]);
   expect(typeof storage[keys.lastSyncTimestamp]).toBe("string");
 });
@@ -474,12 +474,12 @@ for (const operation of ["save", "delete"] as const) {
     );
     const repo = new ArticlesRepository(new TokenManager({ persist: false }));
     await repo.initialize(settings);
-    await repo.testConnection();
+    await runOperation(repo.testConnection);
     rejectReads = true;
     const result = await failure(
       operation === "save"
-        ? repo.saveArticleEffect({ url: "https://example.com/1", title: "a" })
-        : repo.deleteArticleEffect(1),
+        ? repo.saveArticle({ url: "https://example.com/1", title: "a" })
+        : repo.deleteArticle(1),
     );
     expect(result.code).toBe("BrowserFailure");
     expect(result.details).toMatchObject({

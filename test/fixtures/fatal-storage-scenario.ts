@@ -1,3 +1,4 @@
+import { runOperation } from "../../src/background/api/effect-adapter";
 import assert from "node:assert/strict";
 import {
   ArticlesRepository,
@@ -5,7 +6,10 @@ import {
   removeStaleAccountKeys,
 } from "../../src/background/articles-repository";
 import { TokenManager } from "../../src/background/token-manager";
-import { ApiClient } from "../../src/background/api/api-client";
+import { requestJson } from "../../src/background/api/effect-api-client";
+import { createWallabagAdapter } from "../../src/background/api/adapters/wallabag-adapter";
+import { createInstapaperAdapter } from "../../src/background/api/adapters/instapaper-adapter";
+import { Effect } from "effect";
 import { DEFAULT_SETTINGS } from "../../src/utils/settings";
 import {
   checkStorageOnStartup,
@@ -150,7 +154,7 @@ Object.assign(globalThis, {
 setFilterListSources([{ name: "empty", url: "data:text/plain;base64,ISBlbXB0eQ==" }]);
 const repository = new ArticlesRepository();
 await repository.initialize(settings);
-const priorCache = await repository.getAllArticles();
+const priorCache = await runOperation(repository.getAllArticles);
 const tokens = new TokenManager();
 const baseToken = {
   accessToken: "old",
@@ -167,10 +171,20 @@ const rejectsFatal = async (work: () => unknown) => {
   assert.equal(getStorageDiagnostic()?.code, "FATAL_LOCAL_STORAGE");
   assert.equal(storageShutdownSignal().aborted, true);
 };
+/** A local-only articles commit, as sync and mutations make. */
+const commitArticles = (articles: (typeof original)[]) =>
+  runOperation(
+    Reflect.get(repository, "commit").call(
+      repository,
+      Reflect.get(repository, "account"),
+      undefined,
+      () => Effect.succeed(articles),
+    ) as Effect.Effect<void>,
+  );
 const queuedFailure = async () => {
   rejectSet = true;
-  const first = repository.updateArticles([]);
-  const second = repository.mergeArticles([{ ...original, id: "queued" }]);
+  const first = commitArticles([]);
+  const second = commitArticles([{ ...original, id: "queued" }]);
   await Promise.all([rejectsFatal(() => first), rejectsFatal(() => second)]);
   assert.equal(writes, 1);
 };
@@ -179,7 +193,7 @@ switch (scenario) {
   case "articles":
     rejectSet = true;
     await rejectsFatal(() =>
-      repository.saveArticle({ url: "https://example.com/new", title: "New" }),
+      runOperation(repository.saveArticle({ url: "https://example.com/new", title: "New" })),
     );
     assert.equal(remoteSaves, 1);
     assert.equal(getStorageDiagnostic()?.remoteOutcome, "succeeded");
@@ -187,7 +201,7 @@ switch (scenario) {
     break;
   case "delete":
     rejectSet = true;
-    await rejectsFatal(() => repository.deleteArticle(original.id));
+    await rejectsFatal(() => runOperation(repository.deleteArticle(original.id)));
     assert.equal(remoteDeletes, 1);
     assert.equal(getStorageDiagnostic()?.remoteOperation, "delete");
     break;
@@ -196,32 +210,31 @@ switch (scenario) {
     break;
   case "sync-articles":
     rejectSet = true;
-    await rejectsFatal(() => repository.syncWithAPI({ mode: "overwrite" }));
+    await rejectsFatal(() => runOperation(repository.syncWithAPI({ mode: "overwrite" })));
     assert.equal(getStorageDiagnostic()?.remoteOutcome, "succeeded");
     assert.equal(getStorageDiagnostic()?.remoteOperation, "sync");
     break;
   case "timestamps":
     failKey = keys.lastSyncTimestamp;
-    await rejectsFatal(() => repository.syncWithAPI({ mode: "overwrite" }));
+    await rejectsFatal(() => runOperation(repository.syncWithAPI({ mode: "overwrite" })));
     assert.equal(store[keys.lastSyncTimestamp], undefined);
     assert.equal(Reflect.get(repository, "account").timestamps.last, null);
     assert.equal(getStorageDiagnostic()?.operation, "persist sync timestamps");
     break;
   case "tokens":
     rejectSet = true;
-    await rejectsFatal(() => tokens.storeToken("service", baseToken));
+    await rejectsFatal(() => runOperation(tokens.storeToken("service", baseToken)));
     assert.equal(tokens.getTokenMetadata("service"), null);
     break;
   case "token-clear":
-  case "token-clear-all":
   case "token-refresh":
   case "token-refresh-failed":
   case "token-refresh-transient": {
-    await tokens.storeToken("service", baseToken);
+    await runOperation(tokens.storeToken("service", baseToken));
     const before = structuredClone(tokens.getTokenMetadata("service"));
     rejectSet = true;
-    if (scenario === "token-clear") await rejectsFatal(() => tokens.clearToken("service"));
-    else if (scenario === "token-clear-all") await rejectsFatal(() => tokens.clearAllTokens());
+    if (scenario === "token-clear")
+      await rejectsFatal(() => runOperation(tokens.clearToken("service")));
     else {
       globalThis.fetch = async () => {
         if (scenario === "token-refresh-transient") throw new TypeError("network failed SECRET");
@@ -230,13 +243,15 @@ switch (scenario) {
         });
       };
       await rejectsFatal(() =>
-        tokens.refreshToken("service", {
-          serviceName: "service",
-          refreshUrl: "https://example.com/token",
-          clientId: "id",
-          clientSecret: "secret",
-          refreshToken: "refresh",
-        }),
+        runOperation(
+          tokens.refreshToken("service", {
+            serviceName: "service",
+            refreshUrl: "https://example.com/token",
+            clientId: "id",
+            clientSecret: "secret",
+            refreshToken: "refresh",
+          }),
+        ),
       );
       assert.equal(
         getStorageDiagnostic()?.remoteOutcome,
@@ -314,10 +329,12 @@ switch (scenario) {
       created_at: "2026-01-01T00:00:00Z",
     };
     store[accountKeys.articles] = [original];
-    await tokens.storeToken("wallabag", { ...baseToken, expiresAt: Date.now() + 3600000 });
+    await runOperation(
+      tokens.storeToken("wallabag", { ...baseToken, expiresAt: Date.now() + 3600000 }),
+    );
     const repo = new ArticlesRepository(tokens);
     await repo.initialize(wallabagSettings);
-    await repo.getAllArticles();
+    await runOperation(repo.getAllArticles);
     const before = structuredClone(Reflect.get(repo, "account").articles);
     const bookmark = { type: "bookmark", bookmark_id: 42, url: saved.url, title: saved.title };
     globalThis.fetch = async (url, init) => {
@@ -344,10 +361,11 @@ switch (scenario) {
     failKey = scenario.endsWith("-sync-timestamp")
       ? accountKeys.lastSyncTimestamp
       : accountKeys.articles;
-    if (scenario.endsWith("-save-storage")) await rejectsFatal(() => repo.saveArticle(saved));
+    if (scenario.endsWith("-save-storage"))
+      await rejectsFatal(() => runOperation(repo.saveArticle(saved)));
     else if (scenario.endsWith("-delete-storage"))
-      await rejectsFatal(() => repo.deleteArticle(original.id));
-    else await rejectsFatal(() => repo.syncWithAPI({ mode: "overwrite" }));
+      await rejectsFatal(() => runOperation(repo.deleteArticle(original.id)));
+    else await rejectsFatal(() => runOperation(repo.syncWithAPI({ mode: "overwrite" })));
     if (!scenario.endsWith("-sync-timestamp"))
       assert.deepEqual(Reflect.get(repo, "account").articles, before);
     else {
@@ -356,9 +374,9 @@ switch (scenario) {
     }
     assert.equal(getStorageDiagnostic()?.remoteOutcome, "succeeded");
     const calls = fetches;
-    await rejectsFatal(() => repo.saveArticle(saved));
-    await rejectsFatal(() => repo.testConnection());
-    await rejectsFatal(() => tokens.checkAndRefreshTokens());
+    await rejectsFatal(() => runOperation(repo.saveArticle(saved)));
+    await rejectsFatal(() => runOperation(repo.testConnection));
+    await rejectsFatal(() => runOperation(tokens.checkAndRefreshTokens));
     assert.equal(fetches, calls, "fatal shutdown blocks future transport and maintenance");
     break;
   }
@@ -601,16 +619,18 @@ switch (scenario) {
     break;
   }
   case "token-schema": {
-    await tokens.storeToken("service", baseToken);
+    await runOperation(tokens.storeToken("service", baseToken));
     globalThis.fetch = async () =>
       new Response(JSON.stringify({ access_token: 12 }), { status: 200 });
-    const result = await tokens.refreshToken("service", {
-      serviceName: "service",
-      refreshUrl: "https://example.com/token",
-      clientId: "id",
-      clientSecret: "secret",
-      refreshToken: "refresh",
-    });
+    const result = await runOperation(
+      tokens.refreshToken("service", {
+        serviceName: "service",
+        refreshUrl: "https://example.com/token",
+        clientId: "id",
+        clientSecret: "secret",
+        refreshToken: "refresh",
+      }),
+    );
     assert.equal(result.success, false);
     assert.match(result.error!, /invalid token/);
     assert.equal(result.failure?._tag, "InvalidResponseFailure");
@@ -620,7 +640,7 @@ switch (scenario) {
   case "draft": {
     rejectSet = true;
     const draft = new TokenManager({ persist: false });
-    await draft.storeToken("service", baseToken);
+    await runOperation(draft.storeToken("service", baseToken));
     assert.equal(writes, 0);
     assert.equal(getStorageDiagnostic(), undefined);
     break;
@@ -633,14 +653,10 @@ switch (scenario) {
     rejectRemove = true;
     await rejectsFatal(() => clearFilterListCache());
     break;
-  case "clear":
-    rejectRemove = true;
-    await rejectsFatal(() => repository.clear());
-    break;
   case "stale":
     store.articles = [];
     rejectRemove = true;
-    await rejectsFatal(() => removeStaleAccountKeys(settings));
+    await rejectsFatal(() => runOperation(removeStaleAccountKeys(settings)));
     break;
   case "startup-set":
     rejectSet = true;
@@ -665,10 +681,12 @@ switch (scenario) {
     globalThis.fetch = async () => {
       throw new TypeError("Network down");
     };
-    const client = new ApiClient("test", "https://example.com");
-    await assert.rejects(client.get("/", { authenticated: false }), /Network down/);
+    await assert.rejects(
+      runOperation(requestJson({ operation: "test", url: "https://example.com/" })),
+      { _tag: "NetworkFailure" },
+    );
     assert.equal(getStorageDiagnostic(), undefined);
-    await repository.updateArticles([original]);
+    await commitArticles([original]);
     break;
   }
   case "interrupt": {
@@ -682,7 +700,7 @@ switch (scenario) {
         init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
       });
     };
-    const request = new ApiClient("test", "https://example.com").get("/", { authenticated: false });
+    const request = runOperation(requestJson({ operation: "test", url: "https://example.com/" }));
     const failure = rejectsFatal(() => request);
     await ready;
     rejectSet = true;
@@ -703,7 +721,9 @@ switch (scenario) {
       });
       return { id: "late-GUID", title: "Late", url: "https://example.com/late" };
     };
-    const save = repository.saveArticle({ url: "https://example.com/late", title: "Late" });
+    const save = runOperation(
+      repository.saveArticle({ url: "https://example.com/late", title: "Late" }),
+    );
     const failure = rejectsFatal(() => save);
     await ready;
     rejectSet = true;
@@ -722,8 +742,8 @@ switch (scenario) {
       await release.promise;
       return [{ id: "remote-GUID", title: "Remote", url: "https://example.com/remote" }];
     };
-    const first = rejectsFatal(() => repository.syncWithAPI({ mode: "overwrite" }));
-    const joined = rejectsFatal(() => repository.syncWithAPI());
+    const first = rejectsFatal(() => runOperation(repository.syncWithAPI({ mode: "overwrite" })));
+    const joined = rejectsFatal(() => runOperation(repository.syncWithAPI()));
     await fetching.promise;
     rejectSet = true;
     await rejectsFatal(() => setLocal("other work", {}));
@@ -1002,13 +1022,13 @@ switch (scenario) {
         "startup-filter-alarm-create-race",
       ].includes(ordering),
     );
-    for (const callback of [() => events.startup(), () => events.installed({ reason: "update" })]) {
-      await assert.rejects(callback, FatalStorageError);
-    }
-    const counts = [remoteReads, fetches, writes];
+    // The listener boundary logs the fatal failure; no listener starts new work.
+    const counts = [remoteReads, fetches, writes, menus.size, alarms.size];
+    await events.startup();
+    await events.installed({ reason: "update" });
     for (const name of ["refresh", "refresh-filters", "token-refresh-check"])
       await events.alarm({ name });
-    assert.deepEqual([remoteReads, fetches, writes], counts);
+    assert.deepEqual([remoteReads, fetches, writes, menus.size, alarms.size], counts);
     break;
   }
   case "external-health":
@@ -1197,7 +1217,6 @@ switch (scenario) {
   }
   case "auth-outcome":
   case "instapaper-auth-outcome": {
-    const { WallabagAdapter } = await import("../../src/background/api/adapters/wallabag-adapter");
     globalThis.fetch = async () =>
       new Response(
         JSON.stringify({
@@ -1210,35 +1229,42 @@ switch (scenario) {
       );
     rejectSet = true;
     if (scenario === "auth-outcome") {
-      const adapter = new WallabagAdapter(tokens);
       await rejectsFatal(() =>
-        adapter.initialize({
-          ...settings,
-          backend: "wallabag",
-          apiConfig: {
-            url: "https://example.com",
-            clientId: "client",
-            clientSecret: "secret",
-            username: "user",
-            password: "password",
-          },
-        }),
+        runOperation(
+          createWallabagAdapter(
+            {
+              ...settings,
+              backend: "wallabag",
+              apiConfig: {
+                url: "https://example.com",
+                clientId: "client",
+                clientSecret: "secret",
+                username: "user",
+                password: "password",
+              },
+            },
+            tokens,
+          ),
+        ),
       );
     } else {
-      const { InstapaperAdapter } =
-        await import("../../src/background/api/adapters/instapaper-adapter");
       globalThis.fetch = async () => new Response("oauth_token=token&oauth_token_secret=secret");
       await rejectsFatal(() =>
-        new InstapaperAdapter(tokens).initialize({
-          ...settings,
-          backend: "instapaper",
-          apiConfig: {
-            consumerKey: "client",
-            consumerSecret: "secret",
-            username: "user",
-            password: "password",
-          },
-        }),
+        runOperation(
+          createInstapaperAdapter(
+            {
+              ...settings,
+              backend: "instapaper",
+              apiConfig: {
+                consumerKey: "client",
+                consumerSecret: "secret",
+                username: "user",
+                password: "password",
+              },
+            },
+            tokens,
+          ),
+        ),
       );
     }
     assert.equal(getStorageDiagnostic()?.remoteOperation, "authentication");
@@ -1274,17 +1300,17 @@ switch (scenario) {
       if (++commits === 2) queuedSave();
       return result;
     });
-    const first = repository.updateArticles([]);
+    const first = commitArticles([]);
     const firstFailure = rejectsFatal(() => first);
     await ready;
     let saveDiagnostic: any;
     let deleteDiagnostic: any;
-    const save = repository
-      .saveArticle({ url: "https://example.com/new", title: "New" })
-      .catch((error) => {
-        saveDiagnostic = error.diagnostic;
-        throw error;
-      });
+    const save = runOperation(
+      repository.saveArticle({ url: "https://example.com/new", title: "New" }),
+    ).catch((error) => {
+      saveDiagnostic = error.diagnostic;
+      throw error;
+    });
     const saveFailure = rejectsFatal(() => save);
     await queued;
     assert.equal(remoteSaves, 1);
@@ -1300,7 +1326,7 @@ switch (scenario) {
         return result;
       });
       deleted = rejectsFatal(() =>
-        repository.deleteArticle(original.id).catch((error) => {
+        runOperation(repository.deleteArticle(original.id)).catch((error) => {
           deleteDiagnostic = error.diagnostic;
           throw error;
         }),
@@ -1339,12 +1365,12 @@ if (getStorageDiagnostic()) {
   assert.equal(getStorageDiagnostic()!.error.includes("https://"), false);
   const count = [writes, removes, remoteSaves, remoteDeletes, fetches];
   await rejectsFatal(() =>
-    repository.saveArticle({ url: "https://example.com/blocked", title: "Blocked" }),
+    runOperation(repository.saveArticle({ url: "https://example.com/blocked", title: "Blocked" })),
   );
-  await rejectsFatal(() => repository.deleteArticle(original.id));
-  await rejectsFatal(() => repository.syncWithAPI());
+  await rejectsFatal(() => runOperation(repository.deleteArticle(original.id)));
+  await rejectsFatal(() => runOperation(repository.syncWithAPI()));
   await rejectsFatal(() => refreshFilterLists());
-  await rejectsFatal(() => tokens.checkAndRefreshTokens());
+  await rejectsFatal(() => runOperation(tokens.checkAndRefreshTokens));
   assert.deepEqual([writes, removes, remoteSaves, remoteDeletes, fetches], count);
   if (!["timestamps", "background", "worker-restart"].includes(scenario!)) {
     assert.strictEqual(Reflect.get(repository, "account").articles, priorCache);
