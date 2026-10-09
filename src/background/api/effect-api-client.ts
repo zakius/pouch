@@ -87,7 +87,10 @@ export interface EffectRequest {
   readonly format?: "text";
   /** Maps a provider error envelope in any parsed body to a definitive rejection. */
   readonly providerFailure?: (data: unknown) => ProviderFailure | undefined;
-  /** A parsed body this rejects is an invalid response; a mutation's outcome stays unknown. */
+  /**
+   * A parsed body this rejects is an invalid response; a mutation's outcome stays unknown.
+   * A body it accepts is a confirmed success, even if it carries an `error` key.
+   */
   readonly confirms?: (data: unknown) => boolean;
 }
 
@@ -208,7 +211,13 @@ export const requestJson = Effect.fn("transport.request")(function* (request: Ef
           unknownOutcome(new InvalidResponseFailure(operation, request.responseKind)),
         );
       }
-      if (mutation && typeof data === "object" && data !== null && "error" in data) {
+      if (
+        mutation &&
+        !request.confirms &&
+        typeof data === "object" &&
+        data !== null &&
+        "error" in data
+      ) {
         yield* recordMutationOutcome();
         yield* storageHealthy;
         return yield* Effect.fail(new HttpFailure(operation, response.status));

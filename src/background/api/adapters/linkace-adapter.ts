@@ -1,30 +1,32 @@
+import { Effect } from "effect";
 import * as v from "valibot";
 import { linkaceConfigSchema, linkaceSettingsSchema } from "../../../utils/settings-schemas";
 export { linkaceConfigSchema, linkaceSettingsSchema };
 import type { Article } from "../../../types/common";
 import { logger } from "../../../utils/logger";
-import { type TokenManager, type TokenRefreshConfig, tokenManager } from "../../token-manager";
-import { type ApiClient, createApiClient } from "../api-client";
+import { requestJson, validate } from "../effect-api-client";
+import {
+  ConfigurationFailure,
+  ProviderFailure,
+  runOperation,
+  storageHealthy,
+  type AcquisitionError,
+  type EffectAdapter,
+} from "../effect-adapter";
 import type {
   ReadItLaterAPI,
   SavingArticle,
   SyncOptions,
   SyncResult,
 } from "../read-it-later-adapter";
-import type { TokenizedAdapter } from "../tokenized-adapter";
 
 export type LinkaceSettings = v.InferInput<typeof linkaceSettingsSchema>;
 export type LinkaceConfig = v.InferInput<typeof linkaceConfigSchema>;
 
-const linkaceTagSchema = v.object({
-  id: v.number(),
-  name: v.string(),
-});
-
-const linkaceListSchema = v.object({
-  id: v.number(),
-  name: v.string(),
-});
+const formConfig = [
+  { name: "url", label: "API URL" },
+  { name: "token", label: "API Token" },
+];
 
 const linkaceLinkSchema = v.object({
   id: v.number(),
@@ -33,249 +35,180 @@ const linkaceLinkSchema = v.object({
   description: v.optional(v.nullable(v.string())),
   created_at: v.string(),
   updated_at: v.optional(v.nullable(v.string())),
-  lists: v.optional(v.array(linkaceListSchema)),
-  tags: v.optional(v.array(linkaceTagSchema)),
+  lists: v.optional(v.array(v.object({ id: v.number(), name: v.string() }))),
+  tags: v.optional(v.array(v.object({ id: v.number(), name: v.string() }))),
   visibility: v.optional(v.number()),
   check_disabled: v.optional(v.union([v.boolean(), v.number()])),
   status: v.optional(v.number()),
   icon: v.optional(v.nullable(v.string())),
   thumbnail: v.optional(v.nullable(v.string())),
 });
-
-const linkaceErrorSchema = v.object({
-  message: v.string(),
-  errors: v.optional(v.record(v.string(), v.array(v.string()))),
+const linkaceErrorSchema = v.object({ message: v.string() });
+/** LinkAce answers a created link either wrapped in `data` or as the bare link. */
+const linkaceSaveResponseSchema = v.union([
+  v.object({ data: linkaceLinkSchema }),
+  linkaceLinkSchema,
+]);
+/** Page totals come from `meta`, from Laravel's flat paginator fields, or not at all. */
+const linkacePageSchema = v.object({
+  data: v.array(linkaceLinkSchema),
+  last_page: v.optional(v.number()),
+  meta: v.optional(v.object({ last_page: v.number() })),
 });
 
-const linkaceSaveResponseSchema = v.union([
-  v.object({
-    data: linkaceLinkSchema,
-  }),
-  linkaceErrorSchema,
-]);
+type LinkaceLink = v.InferOutput<typeof linkaceLinkSchema>;
 
-const linkaceSyncResponseSchema = v.union([
-  v.object({
-    data: v.array(linkaceLinkSchema),
-    links: v.optional(
-      v.object({
-        first: v.optional(v.string()),
-        last: v.optional(v.string()),
-        prev: v.optional(v.string()),
-        next: v.optional(v.string()),
-      }),
-    ),
-    meta: v.optional(
-      v.object({
-        current_page: v.number(),
-        from: v.optional(v.number()),
-        last_page: v.number(),
-        per_page: v.number(),
-        to: v.optional(v.number()),
-        total: v.number(),
-      }),
-    ),
-  }),
-  linkaceErrorSchema,
-]);
+/** A `message` envelope without `data` is a definitive rejection; the message may echo request data. */
+const providerFailure = (operation: string) => (data: unknown) =>
+  v.is(linkaceErrorSchema, data) && !("data" in data) ? new ProviderFailure(operation) : undefined;
 
-interface LinkaceLink {
-  id: number;
-  url: string;
-  title: string;
-  description?: string | null;
-  created_at: string;
-  updated_at?: string | null;
-  lists?: { id: number; name: string }[];
-  tags?: { id: number; name: string }[];
-  visibility?: number;
-  check_disabled?: boolean | number;
-  status?: number;
-  icon?: string | null;
-  thumbnail?: string | null;
-}
+const toArticle = (item: LinkaceLink): Article => ({
+  id: item.id,
+  title: item.title,
+  url: item.url,
+  created_at: item.created_at,
+});
 
-export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings>, TokenizedAdapter {
-  constructor(public readonly tokens: TokenManager = tokenManager) {}
+/** The static API token never enters TokenManager, so it cannot reach refresh or token removal. */
+export const createLinkaceAdapter = Effect.fn("linkace.acquire")(function* (
+  settings: LinkaceSettings,
+) {
+  const parsed = v.safeParse(linkaceSettingsSchema, settings);
+  const token = parsed.success ? parsed.output.apiConfig.token.trim() : "";
+  // A missing token must not degrade into an unauthenticated request.
+  if (!parsed.success || !token || /[\r\n]/.test(token))
+    return yield* Effect.fail(new ConfigurationFailure("linkace.acquire"));
+  const apiUrl = parsed.output.apiConfig.url.replace(/\/+$/, "");
+  const authorization = Effect.succeed(`Bearer ${token}`);
 
-  public readonly displayName = "LinkAce";
-  private apiUrl: string = "";
-  private token: string = "";
-  private apiClient!: ApiClient;
-
-  formConfig = [
-    { name: "url", label: "API URL" },
-    { name: "token", label: "API Token" },
-  ];
-
-  getServiceName(): string {
-    return "linkace";
-  }
-
-  getTokenRefreshConfig(): TokenRefreshConfig {
-    throw new Error("LinkAce uses static API tokens, no refresh configuration available");
-  }
-
-  createTokenMetadata(_tokenData: Record<string, unknown>) {
-    const now = Date.now();
-    return {
-      accessToken: this.token,
-      refreshToken: "", // No refresh token for static API keys
-      tokenType: "Bearer",
-      expiresAt: now + 365 * 24 * 60 * 60 * 1000, // 1 year from now (effectively never expires)
-      issuedAt: now,
-      scope: undefined,
-      refreshCount: 0,
-    };
-  }
-
-  getBaseUrl(): string {
-    return this.apiUrl;
-  }
-
-  getAuthEndpoint(): string {
-    return "";
-  }
-
-  async initialize(settings: LinkaceSettings): Promise<void> {
-    this.apiUrl = settings.apiConfig.url;
-    this.token = settings.apiConfig.token;
-
-    const tokenMetadata = this.createTokenMetadata({});
-    await this.tokens.storeToken(this.getServiceName(), tokenMetadata);
-
-    this.apiClient = createApiClient(this, {
-      baseUrl: this.apiUrl,
-      rateLimit: {
-        delayMs: 1000,
-        maxRetries: 3,
-        lowLimitThreshold: 10,
+  const request = (
+    operation: string,
+    endpoint: string,
+    options: {
+      init?: RequestInit;
+      mutation?: "save" | "delete";
+      timeoutMs?: number;
+      confirms?: v.GenericSchema;
+    } = {},
+  ) => {
+    const { confirms } = options;
+    return requestJson({
+      operation,
+      url: `${apiUrl}${endpoint}`,
+      // Without it Laravel answers rejected authentication with a login redirect, not 401.
+      init: {
+        ...options.init,
+        headers: {
+          Accept: "application/json",
+          ...(options.init?.body === undefined ? {} : { "Content-Type": "application/json" }),
+        },
       },
+      mutation: options.mutation,
+      timeoutMs: options.timeoutMs,
+      authorization,
+      providerFailure: providerFailure(operation),
+      confirms: confirms && ((data) => v.is(confirms, data)),
     });
-  }
+  };
 
-  async testConnection(): Promise<boolean> {
-    try {
-      return await this.apiClient.testConnection("/api/v2/links?per_page=1");
-    } catch (error) {
-      logger.error("LinkAce connection test failed:", error);
-      return false;
-    }
-  }
-
-  async saveArticle(article: SavingArticle): Promise<Article> {
-    const response = await this.apiClient.post("/api/v2/links", {
-      url: article.url,
-      title: article.title,
-      visibility: 1, // LinkAce visibility: 1 = public, 2 = internal, 3 = private
-      check_disabled: false,
-    });
-    const validatedData = v.parse(linkaceSaveResponseSchema, response.data);
-
-    if ("message" in validatedData) {
-      throw new Error(`Failed to save article: ${validatedData.message}`);
-    }
-
-    return this.mapArticle(validatedData.data);
-  }
-
-  async deleteArticle(id: number): Promise<void> {
-    await this.apiClient.delete(`/api/v2/links/${id}`);
-  }
-
-  /**
-   * LinkAce Sync (DOCUMENTED INCREMENTAL SUPPORT)
-   *
-   * LinkAce API supports incremental sync via created_after parameter
-   * API docs: https://api-docs.linkace.org/
-   *
-   * PARAMETER: created_after
-   * - Format: ISO 8601 timestamp string
-   * - Filters links created after this timestamp
-   *
-   * LIMITATIONS:
-   * - Deletion tracking: UNKNOWN (not documented)
-   * - Update tracking: UNKNOWN (not documented)
-   *
-   * STRATEGY:
-   * - Use incremental sync for speed
-   * - Perform periodic full syncs to catch potential deletions
-   */
-  async sync(options?: SyncOptions): Promise<SyncResult> {
-    const perPage = 30;
-    const allArticles: Article[] = [];
-    let currentPage = 1;
-    let hasMorePages = true;
-    let totalFetched = 0;
-
-    // Build base query parameters
-    const baseParams = new URLSearchParams({
-      per_page: perPage.toString(),
-    });
-
-    // LinkAce documents created_after parameter for incremental sync
-    // Format: ISO 8601 timestamp string
-    if (options?.lastSyncTimestamp && options.mode === "update") {
-      baseParams.set("created_after", options.lastSyncTimestamp);
-      logger.debug("Using LinkAce incremental sync with created_after parameter", {
-        lastSyncTimestamp: options.lastSyncTimestamp,
+  const adapter: EffectAdapter = {
+    displayName: "LinkAce",
+    formConfig,
+    saveArticle: Effect.fn("linkace.save")(function* (article: SavingArticle) {
+      const data = yield* request("linkace.save", "/api/v2/links", {
+        mutation: "save",
+        confirms: linkaceSaveResponseSchema,
+        init: {
+          method: "POST",
+          body: JSON.stringify({
+            url: article.url,
+            title: article.title,
+            visibility: 1, // 1 = public, 2 = internal, 3 = private
+            check_disabled: false,
+          }),
+        },
       });
-    }
-
-    while (hasMorePages) {
-      baseParams.set("page", currentPage.toString());
-      const response = await this.apiClient.get(`/api/v2/links?${baseParams.toString()}`);
-      const validatedData = v.parse(linkaceSyncResponseSchema, response.data);
-
-      if ("message" in validatedData) {
-        throw new Error(`Failed to sync articles: ${validatedData.message}`);
+      const saved = yield* validate(linkaceSaveResponseSchema, data, "linkace.save");
+      return toArticle("data" in saved ? saved.data : saved);
+    }),
+    deleteArticle: Effect.fn("linkace.delete")(function* (id: number | string) {
+      yield* request("linkace.delete", `/api/v2/links/${encodeURIComponent(String(id))}`, {
+        mutation: "delete",
+        init: { method: "DELETE" },
+      });
+    }),
+    /**
+     * Update sync sends `created_after`, but LinkAce's link list does not honour it and
+     * returns every link; the repository merges the full listing either way.
+     *
+     * Without a page total, a short page ends the listing.
+     */
+    sync: Effect.fn("linkace.sync")(function* (options?: SyncOptions) {
+      const perPage = 30;
+      const query = new URLSearchParams({ per_page: String(perPage) });
+      if (options?.lastSyncTimestamp && options.mode === "update") {
+        query.set("created_after", options.lastSyncTimestamp);
+        logger.debug("Sending LinkAce created_after (not honoured by the list endpoint)", {
+          lastSyncTimestamp: options.lastSyncTimestamp,
+        });
       }
-
-      const pageArticles = validatedData.data.map((item: LinkaceLink) => this.mapArticle(item));
-      allArticles.push(...pageArticles);
-      totalFetched += pageArticles.length;
-
-      if (validatedData.meta) {
-        hasMorePages = currentPage < validatedData.meta.last_page;
-      } else {
-        hasMorePages = validatedData.data.length === perPage;
+      const articles: Article[] = [];
+      for (let page = 1; ; page++) {
+        // Keeps the one-request-per-second pacing of the shared client this replaces.
+        if (page > 1) yield* Effect.sleep(1000);
+        query.set("page", String(page));
+        const data = yield* request("linkace.sync", `/api/v2/links?${query.toString()}`);
+        const result = yield* validate(linkacePageSchema, data, "linkace.sync");
+        articles.push(...result.data.map(toArticle));
+        const lastPage = result.meta?.last_page ?? result.last_page;
+        if (lastPage === undefined ? result.data.length !== perPage : page >= lastPage) break;
       }
+      return {
+        articles,
+        mode: options?.mode ?? "overwrite",
+        metadata: {
+          totalFetched: articles.length,
+          totalProcessed: articles.length,
+          lastSyncTimestamp: new Date().toISOString(),
+          apiVersion: "2.0",
+        },
+      };
+    }),
+    testConnection: Effect.gen(function* () {
+      const data = yield* request("linkace.testConnection", "/api/v2/links?per_page=1", {
+        timeoutMs: 10000,
+      });
+      yield* validate(linkacePageSchema, data, "linkace.testConnection");
+      yield* storageHealthy;
+      return true as const;
+    }),
+  };
+  yield* storageHealthy;
+  return adapter;
+}) satisfies (settings: LinkaceSettings) => Effect.Effect<EffectAdapter, AcquisitionError>;
 
-      currentPage++;
-    }
-
-    const mode = options?.mode || "overwrite";
-
-    return {
-      articles: allArticles,
-      mode,
-      metadata: {
-        totalFetched,
-        totalProcessed: allArticles.length,
-        lastSyncTimestamp: new Date().toISOString(),
-        apiVersion: "2.0",
-      },
-    };
+/** Legacy entry point removed with the remaining Promise callers in #81. */
+export class LinkaceAdapter implements ReadItLaterAPI<LinkaceSettings> {
+  readonly displayName = "LinkAce";
+  readonly formConfig = formConfig;
+  private ready: EffectAdapter | undefined;
+  async initialize(settings: LinkaceSettings): Promise<void> {
+    this.ready = await runOperation(createLinkaceAdapter(settings));
   }
-
-  public async cleanup(): Promise<void> {
-    await this.apiClient.clearToken();
+  private api(): EffectAdapter {
+    if (!this.ready) throw new ConfigurationFailure("linkace.acquire");
+    return this.ready;
   }
-
-  public getTokenHealth(): {
-    isValid: boolean;
-    expiresAt?: string;
-    refreshCount?: number;
-  } {
-    return this.apiClient.getTokenHealth();
+  testConnection(): Promise<boolean> {
+    return runOperation(this.api().testConnection);
   }
-
-  private mapArticle(item: LinkaceLink): Article {
-    return {
-      id: item.id,
-      title: item.title,
-      url: item.url,
-      created_at: item.created_at,
-    };
+  saveArticle(article: SavingArticle): Promise<Article> {
+    return runOperation(this.api().saveArticle(article));
+  }
+  deleteArticle(id: number | string): Promise<void> {
+    return runOperation(this.api().deleteArticle(id));
+  }
+  sync(options?: SyncOptions): Promise<SyncResult> {
+    return runOperation(this.api().sync(options));
   }
 }

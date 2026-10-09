@@ -436,3 +436,19 @@ for (const operation of ["save", "delete"] as const) {
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method !== undefined)).toHaveLength(1);
   });
 }
+
+for (const operation of ["save", "delete"] as const) {
+  test(`a confirmed ${operation} body with an error key is still a success`, async () => {
+    const fetchMock = api(() =>
+      json(
+        operation === "save"
+          ? { result: true, item: item(1), error: null }
+          : { result: true, error: null },
+      ),
+    );
+    const adapter = await acquire();
+    if (operation === "save") expect((await runOperation(await save())).id).toBe(1);
+    else await runOperation(adapter.deleteArticle(1));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+}

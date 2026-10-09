@@ -364,15 +364,25 @@ switch (scenario) {
   }
   case "raindrop-message-save":
   case "raindrop-message-delete":
-  case "raindrop-message-sync": {
-    const raindropSettings = {
-      ...DEFAULT_SETTINGS,
-      backend: "raindrop" as const,
-      apiConfig: { apiKey: "KEY" },
-    };
-    const accountKeys = getAccountStorageKeys(raindropSettings);
+  case "raindrop-message-sync":
+  case "linkace-message-save":
+  case "linkace-message-delete":
+  case "linkace-message-sync": {
+    const linkace = scenario.startsWith("linkace");
+    const accountSettings = linkace
+      ? {
+          ...DEFAULT_SETTINGS,
+          backend: "linkace" as const,
+          apiConfig: { url: "https://links.example.com", token: "KEY" },
+        }
+      : {
+          ...DEFAULT_SETTINGS,
+          backend: "raindrop" as const,
+          apiConfig: { apiKey: "KEY" },
+        };
+    const accountKeys = getAccountStorageKeys(accountSettings);
     store[accountKeys.articles] = [];
-    browser.storage.sync.get = (async () => raindropSettings) as typeof browser.storage.sync.get;
+    browser.storage.sync.get = (async () => accountSettings) as typeof browser.storage.sync.get;
     const item = {
       _id: 42,
       title: "Saved",
@@ -381,20 +391,31 @@ switch (scenario) {
       tags: [],
     };
     const listed = { ...item, _id: 41, link: "https://example.com/listed" };
-    const raindrop = (body: unknown) => new Response(JSON.stringify(body));
+    const linkOf = (raindrop: typeof item) => ({
+      id: raindrop._id,
+      title: raindrop.title,
+      url: raindrop.link,
+      created_at: raindrop.created,
+    });
+    const respond = (body: unknown) => new Response(JSON.stringify(body));
     globalThis.fetch = (async (url: string, init?: RequestInit) => {
       fetches++;
-      if (!String(url).startsWith("https://api.raindrop.io/")) return new Response("! empty");
+      if (
+        !String(url).startsWith(linkace ? "https://links.example.com/" : "https://api.raindrop.io/")
+      )
+        return new Response("! empty");
       if (init?.method === "POST") {
         remoteSaves++;
-        return raindrop({ result: true, item });
+        return respond(linkace ? { data: linkOf(item) } : { result: true, item });
       }
       if (init?.method === "DELETE") {
         remoteDeletes++;
-        return raindrop({ result: true });
+        return respond(linkace ? {} : { result: true });
       }
       remoteReads++;
-      return raindrop({ result: true, items: [listed], count: 1 });
+      return respond(
+        linkace ? { data: [linkOf(listed)] } : { result: true, items: [listed], count: 1 },
+      );
     }) as typeof fetch;
     await import("../../src/background/background");
     const message = (request: unknown) =>
@@ -413,10 +434,10 @@ switch (scenario) {
     assert.equal(getStorageDiagnostic(), undefined);
     const reads = remoteReads;
     failKey = accountKeys.articles;
-    if (scenario === "raindrop-message-sync") {
+    if (scenario.endsWith("-message-sync")) {
       const saved = await message({
         type: "saveSettings",
-        payload: { settings: raindropSettings },
+        payload: { settings: accountSettings },
       });
       assert.deepEqual(saved, { success: true });
       for (let i = 0; i < 200 && !getStorageDiagnostic(); i++)
@@ -424,7 +445,7 @@ switch (scenario) {
       assert.equal(remoteReads, reads + 1);
       assert.equal(getStorageDiagnostic()?.code, "FATAL_LOCAL_STORAGE");
     } else {
-      const operation = scenario === "raindrop-message-save" ? "save" : "delete";
+      const operation = scenario.endsWith("-message-save") ? "save" : "delete";
       const result = await message(
         operation === "save"
           ? { type: "saveArticle", payload: { url: item.link, title: item.title } }
@@ -442,7 +463,7 @@ switch (scenario) {
     for (const request of [
       { type: "saveArticle", payload: { url: item.link, title: item.title } },
       { type: "deleteArticle", payload: { articleId: 7 } },
-      { type: "testConnection", payload: { settings: raindropSettings } },
+      { type: "testConnection", payload: { settings: accountSettings } },
     ])
       assert.equal((await message(request)).code, "FATAL_LOCAL_STORAGE");
     await events.alarm({ name: "refresh" });
