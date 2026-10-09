@@ -362,6 +362,93 @@ switch (scenario) {
     assert.equal(fetches, calls, "fatal shutdown blocks future transport and maintenance");
     break;
   }
+  case "raindrop-message-save":
+  case "raindrop-message-delete":
+  case "raindrop-message-sync": {
+    const raindropSettings = {
+      ...DEFAULT_SETTINGS,
+      backend: "raindrop" as const,
+      apiConfig: { apiKey: "KEY" },
+    };
+    const accountKeys = getAccountStorageKeys(raindropSettings);
+    store[accountKeys.articles] = [];
+    browser.storage.sync.get = (async () => raindropSettings) as typeof browser.storage.sync.get;
+    const item = {
+      _id: 42,
+      title: "Saved",
+      link: "https://example.com/new",
+      created: "2026",
+      tags: [],
+    };
+    const listed = { ...item, _id: 41, link: "https://example.com/listed" };
+    const raindrop = (body: unknown) => new Response(JSON.stringify(body));
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      fetches++;
+      if (!String(url).startsWith("https://api.raindrop.io/")) return new Response("! empty");
+      if (init?.method === "POST") {
+        remoteSaves++;
+        return raindrop({ result: true, item });
+      }
+      if (init?.method === "DELETE") {
+        remoteDeletes++;
+        return raindrop({ result: true });
+      }
+      remoteReads++;
+      return raindrop({ result: true, items: [listed], count: 1 });
+    }) as typeof fetch;
+    await import("../../src/background/background");
+    const message = (request: unknown) =>
+      new Promise<any>((resolve) => {
+        events.message(request, {}, resolve);
+      });
+    // Background initialization runs its own sync; let it commit before storage starts failing.
+    await message({ type: "getArticles", payload: {} });
+    for (
+      let i = 0;
+      i < 200 && !JSON.stringify(store[accountKeys.articles]).includes('"id":41');
+      i++
+    )
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(remoteReads, 1);
+    assert.equal(getStorageDiagnostic(), undefined);
+    const reads = remoteReads;
+    failKey = accountKeys.articles;
+    if (scenario === "raindrop-message-sync") {
+      const saved = await message({
+        type: "saveSettings",
+        payload: { settings: raindropSettings },
+      });
+      assert.deepEqual(saved, { success: true });
+      for (let i = 0; i < 200 && !getStorageDiagnostic(); i++)
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.equal(remoteReads, reads + 1);
+      assert.equal(getStorageDiagnostic()?.code, "FATAL_LOCAL_STORAGE");
+    } else {
+      const operation = scenario === "raindrop-message-save" ? "save" : "delete";
+      const result = await message(
+        operation === "save"
+          ? { type: "saveArticle", payload: { url: item.link, title: item.title } }
+          : { type: "deleteArticle", payload: { articleId: 41 } },
+      );
+      assert.equal(result.code, "FATAL_LOCAL_STORAGE");
+      assert.equal(result.remoteOutcome, "succeeded");
+      assert.equal(result.remoteOperation, operation);
+      assert.match(result.error, /succeeded/);
+      assert.ok(!JSON.stringify(result).includes("KEY"));
+      assert.equal(operation === "save" ? remoteSaves : remoteDeletes, 1);
+    }
+    assert.equal(storageShutdownSignal().aborted, true);
+    const counts = [remoteSaves, remoteDeletes, remoteReads, fetches];
+    for (const request of [
+      { type: "saveArticle", payload: { url: item.link, title: item.title } },
+      { type: "deleteArticle", payload: { articleId: 7 } },
+      { type: "testConnection", payload: { settings: raindropSettings } },
+    ])
+      assert.equal((await message(request)).code, "FATAL_LOCAL_STORAGE");
+    await events.alarm({ name: "refresh" });
+    assert.deepEqual([remoteSaves, remoteDeletes, remoteReads, fetches], counts);
+    break;
+  }
   case "options-ui": {
     const elements = new Map(
       [

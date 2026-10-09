@@ -124,15 +124,15 @@ export class RateLimitFailure extends OperationError {
     super("The server rate limit is exhausted (HTTP 429). Wait before starting another operation.");
   }
 }
-/** Carries only the provider's numeric code; provider messages may echo request data. */
+/** Carries only the provider's numeric code, if any; provider messages may echo request data. */
 export class ProviderFailure extends OperationError {
   readonly _tag = "ProviderFailure";
   constructor(
     readonly operation: string,
-    readonly providerCode: number,
+    readonly providerCode?: number,
   ) {
     super(
-      `The server rejected the request (provider error ${providerCode}). Check the account and extension diagnostics.`,
+      `The server rejected the request (${providerCode === undefined ? "provider rejection" : `provider error ${providerCode}`}). Check the account and extension diagnostics.`,
     );
   }
 }

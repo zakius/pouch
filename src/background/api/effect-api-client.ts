@@ -87,6 +87,8 @@ export interface EffectRequest {
   readonly format?: "text";
   /** Maps a provider error envelope in any parsed body to a definitive rejection. */
   readonly providerFailure?: (data: unknown) => ProviderFailure | undefined;
+  /** A parsed body this rejects is an invalid response; a mutation's outcome stays unknown. */
+  readonly confirms?: (data: unknown) => boolean;
 }
 
 // Native fetch stays private; timeout covers headers and the consumed body in one attempt.
@@ -199,6 +201,12 @@ export const requestJson = Effect.fn("transport.request")(function* (request: Ef
         if (mutation) yield* recordMutationOutcome();
         yield* storageHealthy;
         return yield* Effect.fail(provider);
+      }
+      if (request.confirms && !request.confirms(data)) {
+        yield* storageHealthy;
+        return yield* Effect.fail(
+          unknownOutcome(new InvalidResponseFailure(operation, request.responseKind)),
+        );
       }
       if (mutation && typeof data === "object" && data !== null && "error" in data) {
         yield* recordMutationOutcome();
