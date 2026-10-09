@@ -371,7 +371,11 @@ switch (scenario) {
   case "karakeep-message-save":
   case "karakeep-message-delete":
   case "karakeep-message-sync":
-  case "karakeep-message-timestamp": {
+  case "karakeep-message-timestamp":
+  case "linkwarden-message-save":
+  case "linkwarden-message-delete":
+  case "linkwarden-message-sync":
+  case "linkwarden-message-timestamp": {
     const backend = scenario.split("-")[0];
     const accountSettings =
       backend === "linkace"
@@ -386,11 +390,17 @@ switch (scenario) {
               backend: "karakeep" as const,
               apiConfig: { url: "https://keep.example.com/api/v1", token: "KEY" },
             }
-          : {
-              ...DEFAULT_SETTINGS,
-              backend: "raindrop" as const,
-              apiConfig: { apiKey: "KEY" },
-            };
+          : backend === "linkwarden"
+            ? {
+                ...DEFAULT_SETTINGS,
+                backend: "linkwarden" as const,
+                apiConfig: { url: "https://warden.example.com", token: "KEY" },
+              }
+            : {
+                ...DEFAULT_SETTINGS,
+                backend: "raindrop" as const,
+                apiConfig: { apiKey: "KEY" },
+              };
     const accountKeys = getAccountStorageKeys(accountSettings);
     store[accountKeys.articles] = [];
     browser.storage.sync.get = (async () => accountSettings) as typeof browser.storage.sync.get;
@@ -414,10 +424,17 @@ switch (scenario) {
       createdAt: raindrop.created,
       content: { type: "link", url: raindrop.link },
     });
+    const wardenOf = (raindrop: typeof item) => ({
+      id: raindrop._id,
+      name: raindrop.title,
+      url: raindrop.link,
+      createdAt: raindrop.created,
+    });
     const respond = (body: unknown) => new Response(JSON.stringify(body));
     const origin = {
       linkace: "https://links.example.com/",
       karakeep: "https://keep.example.com/",
+      linkwarden: "https://warden.example.com/",
     }[backend];
     globalThis.fetch = (async (url: string, init?: RequestInit) => {
       fetches++;
@@ -430,12 +447,15 @@ switch (scenario) {
             ? { data: linkOf(item) }
             : backend === "karakeep"
               ? bookmarkOf(item)
-              : { result: true, item },
+              : backend === "linkwarden"
+                ? { response: wardenOf(item) }
+                : { result: true, item },
         );
       }
       if (init?.method === "DELETE") {
         remoteDeletes++;
         if (backend === "karakeep") return new Response(null, { status: 204 });
+        if (backend === "linkwarden") return respond({ response: wardenOf(listed) });
         return respond(backend === "linkace" ? {} : { result: true });
       }
       remoteReads++;
@@ -444,7 +464,9 @@ switch (scenario) {
           ? { data: [linkOf(listed)] }
           : backend === "karakeep"
             ? { bookmarks: [bookmarkOf(listed)], nextCursor: null }
-            : { result: true, items: [listed], count: 1 },
+            : backend === "linkwarden"
+              ? { data: { links: [wardenOf(listed)], nextCursor: null } }
+              : { result: true, items: [listed], count: 1 },
       );
     }) as typeof fetch;
     await import("../../src/background/background");

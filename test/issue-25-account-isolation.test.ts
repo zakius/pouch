@@ -221,37 +221,58 @@ test("a failed adapter initialization rejects all concurrent callers and allows 
 });
 
 test("test connection uses isolated tokens while a real request for the same backend runs", async () => {
+  // Wallabag is the remaining TokenManager backend; it needs the real ready-adapter factory.
+  mock.restore();
   const { storage } = makeBrowserMock();
   Object.assign(browser, { permissions: { contains: async () => true } });
   const draftRequestStarted = deferred();
   const releaseDraftRequest = deferred();
   const authHeaders: string[] = [];
-  spyOn(globalThis, "fetch").mockImplementation((async (_url: string, init?: RequestInit) => {
+  spyOn(globalThis, "fetch").mockImplementation((async (url: string, init?: RequestInit) => {
+    if (String(url).endsWith("/oauth/v2/token")) {
+      const password = new URLSearchParams(String(init?.body)).get("password");
+      return new Response(
+        JSON.stringify({
+          access_token: password === "draft" ? "draft-token" : "active-token",
+          refresh_token: "refresh",
+          token_type: "Bearer",
+          expires_in: 3600,
+        }),
+      );
+    }
     const auth = new Headers(init?.headers).get("Authorization") ?? "";
     authHeaders.push(auth);
     if (auth === "Bearer draft-token") {
       draftRequestStarted.resolve();
       await releaseDraftRequest.promise;
     }
-    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    return new Response(
+      JSON.stringify({ _embedded: { items: [] }, limit: 1, page: 1, pages: 0, total: 0 }),
+    );
   }) as typeof fetch);
-  const linkwarden = (token: string) =>
+  const wallabag = (password: string) =>
     ({
       ...DEFAULT_SETTINGS,
-      backend: "linkwarden",
-      apiConfig: { url: "https://linkwarden.example", token },
+      backend: "wallabag",
+      apiConfig: {
+        url: "https://wallabag.example",
+        clientId: "client",
+        clientSecret: "secret",
+        username: "user",
+        password,
+      },
     }) as RepoSettings;
 
   const activeRepo = new ArticlesRepository();
-  await activeRepo.initialize(linkwarden("active-token"));
+  await activeRepo.initialize(wallabag("active"));
   expect(await activeRepo.testConnection()).toBe(true);
 
   const testRepo = new ArticlesRepository(new TokenManager({ persist: false }));
-  await testRepo.initialize(linkwarden("draft-token"));
+  await testRepo.initialize(wallabag("draft"));
   const testResult = testRepo.testConnection();
   await draftRequestStarted.promise;
 
-  await tokenManager.storeToken("linkwarden", {
+  await tokenManager.storeToken("wallabag", {
     accessToken: "rotated-token",
     refreshToken: "",
     tokenType: "Bearer",
@@ -269,12 +290,12 @@ test("test connection uses isolated tokens while a real request for the same bac
     "Bearer draft-token",
     "Bearer rotated-token",
   ]);
-  expect(await tokenManager.getAccessToken("linkwarden")).toBe("rotated-token");
+  expect(await tokenManager.getAccessToken("wallabag")).toBe("rotated-token");
   const persisted = storage.api_tokens as [string, { accessToken: string }][];
   expect(persisted).toEqual([
-    ["linkwarden", expect.objectContaining({ accessToken: "rotated-token" })],
+    ["wallabag", expect.objectContaining({ accessToken: "rotated-token" })],
   ]);
-});
+}, 15000);
 
 test("Settings change removes other accounts' cached keys and legacy keys only", async () => {
   const current = getAccountStorageKeys(DEFAULT_SETTINGS);

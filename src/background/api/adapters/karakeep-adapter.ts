@@ -129,6 +129,7 @@ export const createKarakeepAdapter = Effect.fn("karakeep.acquire")(function* (
      */
     sync: Effect.fn("karakeep.sync")(function* (_options?: SyncOptions) {
       const query = new URLSearchParams({ limit: "100" });
+      const seen = new Set<string>();
       const articles: Article[] = [];
       for (let page = 0; ; page++) {
         // Keeps the one-request-per-second pacing of the shared client this replaces.
@@ -140,9 +141,10 @@ export const createKarakeepAdapter = Effect.fn("karakeep.acquire")(function* (
           if (url) articles.push(toArticle(item, url));
         }
         if (result.nextCursor === null) break;
-        // A repeated cursor would never end; overwriting from a partial listing would drop articles.
-        if (result.nextCursor === query.get("cursor"))
+        // A revisited cursor would never end; overwriting from a partial listing would drop articles.
+        if (seen.has(result.nextCursor))
           return yield* Effect.fail(new IncompleteSnapshotFailure("karakeep.sync"));
+        seen.add(result.nextCursor);
         query.set("cursor", result.nextCursor);
       }
       return {

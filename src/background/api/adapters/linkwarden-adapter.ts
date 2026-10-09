@@ -1,210 +1,194 @@
+import { Effect } from "effect";
 import * as v from "valibot";
 import { linkwardenConfigSchema, linkwardenSettingsSchema } from "../../../utils/settings-schemas";
 export { linkwardenConfigSchema, linkwardenSettingsSchema };
 import type { Article } from "../../../types/common";
-import { logger } from "../../../utils/logger";
-import { type TokenManager, type TokenRefreshConfig, tokenManager } from "../../token-manager";
-import { type ApiClient, createApiClient } from "../api-client";
+import { requestJson, validate } from "../effect-api-client";
+import {
+  ConfigurationFailure,
+  IncompleteSnapshotFailure,
+  ProviderFailure,
+  runOperation,
+  storageHealthy,
+  type AcquisitionError,
+  type EffectAdapter,
+} from "../effect-adapter";
 import type {
   ReadItLaterAPI,
   SavingArticle,
   SyncOptions,
   SyncResult,
 } from "../read-it-later-adapter";
-import type { TokenizedAdapter } from "../tokenized-adapter";
 
 export type LinkwardenSettings = v.InferInput<typeof linkwardenSettingsSchema>;
 export type LinkwardenConfig = v.InferInput<typeof linkwardenConfigSchema>;
 
-const linkwardenItemSchema = v.object({
+const formConfig = [
+  { name: "url", label: "API URL" },
+  { name: "token", label: "API Token" },
+];
+
+/** Linkwarden's Prisma `Link`: uploaded PDFs and images have no `url`. */
+const linkwardenLinkSchema = v.object({
   id: v.number(),
   name: v.string(),
-  url: v.string(),
+  url: v.nullable(v.string()),
   createdAt: v.string(),
-  image: v.optional(v.nullable(v.string())),
-  description: v.optional(v.nullable(v.string())),
-  collectionId: v.optional(v.number()),
-  tags: v.optional(
-    v.array(
-      v.object({
-        id: v.number(),
-        name: v.string(),
-      }),
-    ),
-  ),
-  status: v.optional(v.nullable(v.string())),
-  archived: v.optional(v.union([v.boolean(), v.number()])),
 });
-
-const linkwardenErrorSchema = v.object({
-  error: v.string(),
-  message: v.optional(v.string()),
-  status: v.optional(v.number()),
-});
-
-// Type guard for Linkwarden error responses
-function isLinkwardenError(
-  data: unknown,
-): data is { error: string; message?: string; status?: number } {
-  return typeof data === "object" && data !== null && "error" in data;
-}
-
-const linkwardenSaveResponseSchema = v.union([
-  v.object({
-    response: linkwardenItemSchema,
+/** POST /api/v1/links and DELETE /api/v1/links/:id answer `{response: Link}`. */
+const linkwardenLinkResponseSchema = v.object({ response: linkwardenLinkSchema });
+/** GET /api/v1/search; `nextCursor` is the last link id of a full page, or null. */
+const linkwardenPageSchema = v.object({
+  data: v.object({
+    links: v.array(linkwardenLinkSchema),
+    nextCursor: v.nullable(v.number()),
   }),
-  linkwardenErrorSchema,
-]);
+});
+/** Every Linkwarden route rejects with `{response: "<message>"}`. */
+const linkwardenErrorSchema = v.object({ response: v.string() });
 
-const linkwardenSyncResponseSchema = v.union([
-  v.object({
-    response: v.object({
-      data: v.array(linkwardenItemSchema),
+type LinkwardenLink = v.InferOutput<typeof linkwardenLinkSchema>;
+
+/** Error messages may echo request data, so only the rejection itself is kept. */
+const providerFailure = (operation: string) => (data: unknown) =>
+  v.is(linkwardenErrorSchema, data) ? new ProviderFailure(operation) : undefined;
+
+const toArticle = (item: LinkwardenLink, url: string): Article => ({
+  id: item.id,
+  title: item.name,
+  url,
+  created_at: item.createdAt,
+});
+
+/** The static API token never enters TokenManager, so it cannot reach refresh or token removal. */
+export const createLinkwardenAdapter = Effect.fn("linkwarden.acquire")(function* (
+  settings: LinkwardenSettings,
+) {
+  const parsed = v.safeParse(linkwardenSettingsSchema, settings);
+  const token = parsed.success ? parsed.output.apiConfig.token.trim() : "";
+  // A missing token must not degrade into an unauthenticated request.
+  if (!parsed.success || !token || /[\r\n]/.test(token))
+    return yield* Effect.fail(new ConfigurationFailure("linkwarden.acquire"));
+  // The configured URL is the instance root, for example https://host.
+  const apiUrl = `${parsed.output.apiConfig.url.replace(/\/+$/, "")}/api/v1`;
+  const authorization = Effect.succeed(`Bearer ${token}`);
+
+  const request = (
+    operation: string,
+    endpoint: string,
+    options: {
+      init?: RequestInit;
+      mutation?: "save" | "delete";
+      timeoutMs?: number;
+      confirms?: v.GenericSchema;
+    } = {},
+  ) => {
+    const { confirms } = options;
+    return requestJson({
+      operation,
+      url: `${apiUrl}${endpoint}`,
+      init: options.init,
+      mutation: options.mutation,
+      timeoutMs: options.timeoutMs,
+      authorization,
+      providerFailure: providerFailure(operation),
+      confirms: confirms && ((data) => v.is(confirms, data)),
+    });
+  };
+
+  const adapter: EffectAdapter = {
+    displayName: "Linkwarden",
+    formConfig,
+    saveArticle: Effect.fn("linkwarden.save")(function* (article: SavingArticle) {
+      // A duplicate URL is a 409 rejection when the user prevents duplicate links.
+      const data = yield* request("linkwarden.save", "/links", {
+        mutation: "save",
+        confirms: linkwardenLinkResponseSchema,
+        init: {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: article.url, name: article.title }),
+        },
+      });
+      const saved = yield* validate(linkwardenLinkResponseSchema, data, "linkwarden.save");
+      return toArticle(saved.response, saved.response.url ?? article.url);
     }),
-  }),
-  linkwardenErrorSchema,
-]);
+    deleteArticle: Effect.fn("linkwarden.delete")(function* (id: number | string) {
+      yield* request("linkwarden.delete", `/links/${encodeURIComponent(String(id))}`, {
+        mutation: "delete",
+        confirms: linkwardenLinkResponseSchema,
+        init: { method: "DELETE" },
+      });
+    }),
+    /**
+     * Linkwarden's search has no created-since or modified-since filter
+     * (https://docs.linkwarden.app/api/search-links), so every sync walks the whole
+     * cursor-paginated listing and returns overwrite mode regardless of the requested mode.
+     * Uploaded files without a URL are not articles.
+     */
+    sync: Effect.fn("linkwarden.sync")(function* (_options?: SyncOptions) {
+      const query = new URLSearchParams();
+      const seen = new Set<number>();
+      const articles: Article[] = [];
+      for (let page = 0; ; page++) {
+        // Keeps the one-request-per-second pacing of the shared client this replaces.
+        if (page > 0) yield* Effect.sleep(1000);
+        const data = yield* request("linkwarden.sync", `/search?${query.toString()}`);
+        const result = yield* validate(linkwardenPageSchema, data, "linkwarden.sync");
+        for (const item of result.data.links)
+          if (item.url) articles.push(toArticle(item, item.url));
+        const cursor = result.data.nextCursor;
+        if (cursor === null) break;
+        // A revisited cursor would never end; overwriting from a partial listing would drop articles.
+        if (seen.has(cursor))
+          return yield* Effect.fail(new IncompleteSnapshotFailure("linkwarden.sync"));
+        seen.add(cursor);
+        query.set("cursor", String(cursor));
+      }
+      return {
+        articles,
+        mode: "overwrite" as const,
+        metadata: {
+          totalFetched: articles.length,
+          totalProcessed: articles.length,
+          lastSyncTimestamp: new Date().toISOString(),
+          apiVersion: "1.0",
+        },
+      };
+    }),
+    testConnection: Effect.gen(function* () {
+      const data = yield* request("linkwarden.testConnection", "/search", { timeoutMs: 10000 });
+      yield* validate(linkwardenPageSchema, data, "linkwarden.testConnection");
+      yield* storageHealthy;
+      return true as const;
+    }),
+  };
+  yield* storageHealthy;
+  return adapter;
+}) satisfies (settings: LinkwardenSettings) => Effect.Effect<EffectAdapter, AcquisitionError>;
 
-interface LinkwardenItem {
-  id: number;
-  name: string;
-  url: string;
-  createdAt: string;
-  image?: string | null;
-  description?: string | null;
-  collectionId?: number;
-  tags?: { id: number; name: string }[];
-  status?: string | null;
-  archived?: boolean | number;
-}
-
-export class LinkwardenAdapter implements ReadItLaterAPI<LinkwardenSettings>, TokenizedAdapter {
-  constructor(public readonly tokens: TokenManager = tokenManager) {}
-
-  public readonly displayName = "Linkwarden";
-  private apiUrl: string = "";
-  private token: string = "";
-  private apiClient!: ApiClient;
-  formConfig = [
-    { name: "url", label: "API URL" },
-    { name: "token", label: "API Token" },
-  ];
-
-  getServiceName(): string {
-    return "linkwarden";
-  }
-
-  getTokenRefreshConfig(): TokenRefreshConfig | null {
-    // Linkwarden uses static API tokens that don't expire/refresh
-    return null;
-  }
-
-  createTokenMetadata(_tokenData: Record<string, unknown>) {
-    const now = Date.now();
-    return {
-      accessToken: this.token,
-      refreshToken: "", // No refresh token for static API keys
-      tokenType: "Bearer",
-      expiresAt: now + 365 * 24 * 60 * 60 * 1000, // 1 year from now (effectively never expires)
-      issuedAt: now,
-      scope: undefined,
-      refreshCount: 0,
-    };
-  }
-
-  getBaseUrl(): string {
-    return this.apiUrl;
-  }
-
-  getAuthEndpoint(): string {
-    return "";
-  }
-
+/** Legacy entry point removed with the remaining Promise callers in #81. */
+export class LinkwardenAdapter implements ReadItLaterAPI<LinkwardenSettings> {
+  readonly displayName = "Linkwarden";
+  readonly formConfig = formConfig;
+  private ready: EffectAdapter | undefined;
   async initialize(settings: LinkwardenSettings): Promise<void> {
-    this.apiUrl = settings.apiConfig.url;
-    this.token = settings.apiConfig.token;
-
-    const tokenMetadata = this.createTokenMetadata({});
-    await this.tokens.storeToken(this.getServiceName(), tokenMetadata);
-
-    this.apiClient = createApiClient(this, {
-      baseUrl: this.apiUrl,
-      rateLimit: {
-        delayMs: 1000,
-        maxRetries: 3,
-        lowLimitThreshold: 10,
-      },
-    });
+    this.ready = await runOperation(createLinkwardenAdapter(settings));
   }
-  async testConnection(): Promise<boolean> {
-    try {
-      return await this.apiClient.testConnection("/api/v1/links");
-    } catch (error) {
-      logger.error("Linkwarden connection test failed:", error);
-      return false;
-    }
+  private api(): EffectAdapter {
+    if (!this.ready) throw new ConfigurationFailure("linkwarden.acquire");
+    return this.ready;
   }
-  async saveArticle(article: SavingArticle): Promise<Article> {
-    const response = await this.apiClient.post("/api/v1/links", {
-      url: article.url,
-      name: article.title,
-    });
-    const validatedData = v.parse(linkwardenSaveResponseSchema, response.data);
-
-    if (isLinkwardenError(validatedData)) {
-      throw new Error(`Failed to save article: ${validatedData.message || validatedData.error}`);
-    }
-
-    return this.mapArticle(validatedData.response);
+  testConnection(): Promise<boolean> {
+    return runOperation(this.api().testConnection);
   }
-  async deleteArticle(id: number): Promise<void> {
-    await this.apiClient.delete(`/api/v1/links/${id}`);
+  saveArticle(article: SavingArticle): Promise<Article> {
+    return runOperation(this.api().saveArticle(article));
   }
-  async sync(_options?: SyncOptions): Promise<SyncResult> {
-    // Linkwarden's link search has no created-since or modified-since filter
-    // (https://docs.linkwarden.app/api/search-links), so every sync fetches
-    // all links and returns overwrite mode regardless of the requested mode.
-    const response = await this.apiClient.get("/api/v1/links");
-    const validatedData = v.parse(linkwardenSyncResponseSchema, response.data);
-
-    if (isLinkwardenError(validatedData)) {
-      throw new Error(`Failed to sync articles: ${validatedData.message || validatedData.error}`);
-    }
-
-    const articles = (validatedData as { response: { data: LinkwardenItem[] } }).response.data.map(
-      (item) => this.mapArticle(item),
-    );
-
-    return {
-      articles,
-      mode: "overwrite",
-      metadata: {
-        totalFetched: articles.length,
-        totalProcessed: articles.length,
-        lastSyncTimestamp: new Date().toISOString(),
-        apiVersion: "1.0",
-      },
-    };
+  deleteArticle(id: number | string): Promise<void> {
+    return runOperation(this.api().deleteArticle(id));
   }
-
-  public async cleanup(): Promise<void> {
-    await this.apiClient.clearToken();
-  }
-
-  public getTokenHealth(): {
-    isValid: boolean;
-    expiresAt?: string;
-    refreshCount?: number;
-  } {
-    return this.apiClient.getTokenHealth();
-  }
-
-  private mapArticle(item: LinkwardenItem): Article {
-    return {
-      id: item.id,
-      title: item.name,
-      url: item.url,
-      created_at: item.createdAt,
-    };
+  sync(options?: SyncOptions): Promise<SyncResult> {
+    return runOperation(this.api().sync(options));
   }
 }
