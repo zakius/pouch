@@ -1,10 +1,12 @@
 // The Chromium build is two extensions: Pouch itself and Pouch Quick Actions,
 // whose page action saves the current page. Chromium allows one action per
-// extension, so they talk over runtime messages. Their IDs come from the
-// public keys in build.ts.
+// extension, so they talk over runtime messages. The keys in their manifests
+// fix their IDs.
+import { extensionId } from "./extension-id" with { type: "macro" };
+
 export const IS_CHROMIUM = process.env.POUCH_TARGET === "chromium";
-export const POUCH_ID = "hekmnhcdhmakfhnjhklpopfbaecdhkga";
-export const QUICK_ACTIONS_ID = "bllnfamgbjpkdhihpmgoapkempmgpnlg";
+export const POUCH_ID = extensionId("chromium/manifest.json");
+export const QUICK_ACTIONS_ID = extensionId("quick-actions/manifest.json");
 
 /** Pouch to Quick Actions: show a tab's save state. */
 export interface PageStateMessage {
