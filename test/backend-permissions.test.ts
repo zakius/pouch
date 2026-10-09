@@ -149,6 +149,13 @@ test("pruneBackendPermissions revokes origins the backend no longer needs", asyn
   expect(permissionState["https://k3s.local/*"]).toBe(true);
 });
 
+test("pruneBackendPermissions keeps the user's all-sites grant", async () => {
+  permissionState["*://*/*"] = true;
+  await pruneBackendPermissions(selfHostedSettings);
+  expect(removedOrigins).toEqual([]);
+  expect(permissionState["*://*/*"]).toBe(true);
+});
+
 test("missingPermissionMessage names the origin and points at settings", () => {
   const message = missingPermissionMessage(selfHostedSettings);
   expect(message).toContain("https://k3s.local");

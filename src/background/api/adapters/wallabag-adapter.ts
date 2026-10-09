@@ -12,7 +12,6 @@ import {
 import {
   ConfigurationFailure,
   CredentialsFailure,
-  InvalidResponseFailure,
   HttpFailure,
   storageHealthy,
   type EffectAdapter,
@@ -148,11 +147,7 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
     Effect.gen(function* () {
       yield* owned;
       const token = tokens.getTokenMetadata("wallabag");
-      if (
-        token &&
-        !token.refreshToken &&
-        authorization === `${token.tokenType} ${token.accessToken}`
-      )
+      if (token && !token.refreshToken && authorization === `Bearer ${token.accessToken}`)
         yield* tokens.discardRejectedToken("wallabag", token);
     });
   const recoverAuth = Effect.gen(function* () {
@@ -169,10 +164,8 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
     const access = yield* tokens.getAccessToken("wallabag");
     yield* owned;
     if (!access) return yield* Effect.fail(new CredentialsFailure("wallabag.request"));
-    const type = tokens.getTokenMetadata("wallabag")?.tokenType ?? "Bearer";
-    if (!/^[a-zA-Z]+$/.test(type))
-      return yield* Effect.fail(new InvalidResponseFailure("wallabag.request", "token"));
-    return `${type} ${access}`;
+    // Wallabag issues token_type "bearer" but its OAuth server only matches "Bearer".
+    return `Bearer ${access}`;
   });
   const pacing = yield* Semaphore.make(1);
   let lastRequestTime = 0;
