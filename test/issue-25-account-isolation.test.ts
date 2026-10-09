@@ -363,3 +363,37 @@ test("Settings change removes other accounts' cached keys and legacy keys only",
     [...Object.values(current), "api_tokens", "filterListCache"].sort(),
   );
 });
+
+test("stale key removal waits for a retired account's in-flight sync commit", async () => {
+  const { storage } = makeBrowserMock();
+  const repository = await makeRepository({ account: "a" });
+  const keysA = getAccountStorageKeys(makeSettings({ account: "a" }));
+  const settingsB = makeSettings({ account: "b" });
+
+  // The old account's commit has passed its retired check and is writing its articles.
+  const writing = deferred();
+  const releaseWrite = deferred();
+  const set = browser.storage.local.set;
+  spyOn(browser.storage.local, "set").mockImplementation(async (values) => {
+    if (keysA.articles in values) {
+      writing.resolve();
+      await releaseWrite.promise;
+    }
+    return set(values);
+  });
+  spyOn(bookmarks, "sync").mockResolvedValue({
+    articles: [article("old-1", "https://old.example/a")],
+    mode: "overwrite" as const,
+  });
+  const sync = runOperation(repository.syncWithAPI({ mode: "overwrite" }));
+  await writing.promise;
+
+  repository.initialize(settingsB);
+  const removal = runOperation(repository.removeStaleKeys(settingsB));
+  await Bun.sleep(0);
+  releaseWrite.resolve();
+  await sync;
+  await removal;
+
+  expect(Object.keys(storage).filter((key) => Object.values(keysA).includes(key))).toEqual([]);
+});

@@ -58,8 +58,9 @@ export class BrowserFailure extends OperationError {
       | "permission-denied"
       | "unavailable"
       | "crypto"
+      | "rejected"
       | "unknown" = "unknown",
-    readonly cause?: { name: string },
+    readonly cause?: { name: string; message?: string },
   ) {
     const guidance = {
       "missing-folder":
@@ -69,8 +70,10 @@ export class BrowserFailure extends OperationError {
       unavailable: "The browser API is unavailable. Check extension availability.",
       crypto: "Browser cryptography could not sign the request. Check browser support.",
       unknown: "Check browser bookmarks access and try again.",
+      rejected: "Fix the reported cause and try again.",
     };
-    super(`Browser ${operation} failed. ${guidance[reason]}`);
+    const reported = cause?.message ? `${cause.message}. ` : "";
+    super(`Browser ${operation} failed. ${reported}${guidance[reason]}`);
   }
 }
 export class CredentialsFailure extends OperationError {
@@ -216,6 +219,22 @@ export function storagePromise<A>(run: () => Promise<A>): Effect.Effect<A, Fatal
       throw error;
     },
   });
+}
+
+/**
+ * Forks work that nobody joins. Effect does not report a detached fiber that dies, so this logs
+ * every failure except interruption.
+ */
+export function forkDetachLogged<A, E>(label: string, effect: Effect.Effect<A, E>) {
+  return Effect.forkDetach(
+    effect.pipe(
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.void
+          : Effect.sync(() => logger.error(`${label} failed:`, Cause.pretty(cause))),
+      ),
+    ),
+  );
 }
 
 export function localRead(

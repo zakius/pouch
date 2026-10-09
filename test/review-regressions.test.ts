@@ -1,4 +1,6 @@
-import { runOperation } from "../src/background/api/effect-adapter";
+import { Effect, Fiber } from "effect";
+import { forkDetachLogged, runOperation } from "../src/background/api/effect-adapter";
+import { logger } from "../src/utils/logger";
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
 import * as v from "valibot";
 import { requestJson } from "../src/background/api/effect-api-client";
@@ -131,4 +133,21 @@ test("failed remote deletion preserves cached articles", async () => {
   await runOperation(repository.deleteArticle(1));
   expect(await runOperation(repository.getAllArticles)).toEqual([]);
   expect(storage[keys.articles]).toEqual([]);
+});
+
+test("a detached fiber that dies is logged, and an interrupted one is not", async () => {
+  const error = spyOn(logger, "error").mockImplementation(() => {});
+  await Effect.runPromise(
+    forkDetachLogged("Background work", Effect.die(new Error("boom"))).pipe(
+      Effect.flatMap(Fiber.await),
+    ),
+  );
+  expect(error).toHaveBeenCalledTimes(1);
+  expect(error.mock.calls[0]?.[0]).toBe("Background work failed:");
+  expect(String(error.mock.calls[0]?.[1])).toContain("boom");
+
+  await Effect.runPromise(
+    forkDetachLogged("Interrupted work", Effect.interrupt).pipe(Effect.flatMap(Fiber.await)),
+  );
+  expect(error).toHaveBeenCalledTimes(1);
 });

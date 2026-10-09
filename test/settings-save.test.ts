@@ -19,6 +19,7 @@ function deferred<T = void>() {
 let createStarted = deferred();
 let releaseCreate = deferred();
 let afterRemove: (() => Promise<void>) | undefined;
+let rejectSyncSet: Error | undefined;
 
 const pick = (store: Record<string, unknown>, keys: string | string[] | null) =>
   keys === null
@@ -41,7 +42,10 @@ Object.assign(globalThis, {
     storage: {
       sync: {
         get: async (keys: string | string[]) => pick(syncStore, keys),
-        set: async (values: Record<string, unknown>) => Object.assign(syncStore, values),
+        set: async (values: Record<string, unknown>) => {
+          if (rejectSyncSet) throw rejectSyncSet;
+          Object.assign(syncStore, values);
+        },
       },
       local: {
         get: async (keys: string | string[] | null) => pick(localStore, keys),
@@ -120,13 +124,28 @@ test("an account change retires the old account before removing its keys", async
   afterRemove = async () => {
     afterRemove = undefined;
     releaseCreate.resolve();
-    await save;
   };
   const raindrop = { ...DEFAULT_SETTINGS, backend: "raindrop", apiConfig: { apiKey: "key" } };
   expect(await sendMessage({ type: "saveSettings", payload: { settings: raindrop } })).toEqual({
     success: true,
   });
+  await save;
   expect(Object.keys(localStore).filter((key) => key.endsWith(oldKeys.articles.slice(9)))).toEqual(
     [],
   );
+});
+
+test("a rejected settings write reports the browser's reason", async () => {
+  rejectSyncSet = new Error("QUOTA_BYTES_PER_ITEM quota exceeded.");
+  const response = await sendMessage({
+    type: "saveSettings",
+    payload: { settings: bookmarksSettings },
+  });
+  rejectSyncSet = undefined;
+  expect(response).toMatchObject({
+    code: "BrowserFailure",
+    error:
+      "Browser save settings failed. Browser reported: quota_bytes. Fix the reported cause and try again.",
+    details: { reason: "rejected", cause: { name: "Error", message: "Browser reported: quota_bytes" } },
+  });
 });

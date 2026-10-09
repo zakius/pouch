@@ -1,4 +1,4 @@
-import { Effect, Exit, Fiber, Semaphore } from "effect";
+import { Cause, Effect, Exit, Fiber, Semaphore } from "effect";
 import {
   localRead,
   storageHealthy,
@@ -62,6 +62,9 @@ class Shared<A, E> {
           // Runs at once if the fiber already exited.
           fiber.addObserver((exit) => {
             shutdown.removeEventListener("abort", stop);
+            // Callers may all have left; Effect does not report a detached fiber that dies.
+            if (Exit.isFailure(exit) && Cause.hasDies(exit.cause))
+              logger.error("Shared background work died:", Cause.pretty(exit.cause));
             if (this.fiber === fiber && !(this.keepSuccess && Exit.isSuccess(exit)))
               this.fiber = undefined;
           });
@@ -150,6 +153,14 @@ export class ArticlesRepository {
       sync: new Shared(false),
       pending: [],
     };
+  }
+
+  /**
+   * Removes other accounts' keys after in-flight commits finish, so a retired account's commit
+   * that already passed its retired check cannot write its keys back.
+   */
+  removeStaleKeys(settings: Settings): Effect.Effect<void, LocalError> {
+    return Semaphore.withPermit(this.commits, removeStaleAccountKeys(settings));
   }
 
   private active(): Effect.Effect<Account> {

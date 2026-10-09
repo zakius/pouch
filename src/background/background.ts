@@ -5,12 +5,20 @@ import {
   invalidRequest,
   InvalidRequest,
 } from "./runtime-message";
-import { BrowserFailure, runOperation, storageHealthy, storagePromise } from "./api/effect-adapter";
+import {
+  BrowserFailure,
+  forkDetachLogged,
+  runOperation,
+  storageHealthy,
+  storagePromise,
+} from "./api/effect-adapter";
 import {
   FatalStorageError,
+  browserReportedReason,
   checkStorageOnStartup,
   getStorageDiagnostic,
   onFatalStorage,
+  safeCause,
 } from "../utils/fatal-storage";
 import {
   IS_CHROMIUM,
@@ -23,11 +31,7 @@ import { logger } from "../utils/logger";
 import { getMissingOrigins, messageForOrigins } from "../utils/backend-permissions";
 import { getSettings, saveSettings } from "../utils/settings";
 import { clearCanonicalUrlCache, initializeUrlCanonizer } from "../utils/url-helpers";
-import {
-  ArticlesRepository,
-  getAccountIdentity,
-  removeStaleAccountKeys,
-} from "./articles-repository";
+import { ArticlesRepository, getAccountIdentity } from "./articles-repository";
 import { TOKEN_CHECK_ALARM_NAME, TokenManager, tokenManager } from "./token-manager";
 
 /**
@@ -67,7 +71,13 @@ const REFRESH_INTERVAL = 30;
 
 /** A browser API call; its rejection is an operational failure of that call. */
 const browserCall = <A>(operation: string, call: () => Promise<A>) =>
-  Effect.tryPromise({ try: call, catch: () => new BrowserFailure(operation, "unavailable") });
+  Effect.tryPromise({
+    try: call,
+    catch: (error) =>
+      browserReportedReason(error)
+        ? new BrowserFailure(operation, "rejected", safeCause(error))
+        : new BrowserFailure(operation, "unavailable"),
+  });
 
 /**
  * The boundary of every listener: runs its Effect, then logs and optionally presents the
@@ -107,7 +117,7 @@ const startup = Effect.runSync(
       yield* storagePromise(checkStorageOnStartup);
       yield* Effect.promise(() => logger.initialize());
       yield* storageHealthy;
-      yield* Effect.forkDetach(urlCanonizer);
+      yield* forkDetachLogged("URL initialization", urlCanonizer);
       yield* tokenManager.loadTokens;
       yield* storageHealthy;
       logger.info("Token manager initialized");
@@ -165,10 +175,13 @@ const saveSettingsMessage = Effect.fn("background.saveSettings")(function* (
   // The same account keeps its in-flight work and only takes the new settings.
   articlesRepository.initialize(settings);
   repositoryInitialized = true;
-  yield* removeStaleAccountKeys(settings);
+  yield* articlesRepository.removeStaleKeys(settings);
   clearCanonicalUrlCache();
   yield* Effect.promise(() => logger.initialize());
-  yield* Effect.forkDetach(syncInBackground("Sync after settings change"));
+  yield* forkDetachLogged(
+    "Sync after settings change",
+    syncInBackground("Sync after settings change"),
+  );
   logger.info("Settings saved and API re-initialized.");
   return { success: true };
 });

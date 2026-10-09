@@ -46,19 +46,22 @@ export function storageShutdownSignal(): AbortSignal {
   return shutdown.signal;
 }
 
-function safeCause(error: unknown): StorageDiagnostic["cause"] {
-  const name = error instanceof Error ? error.name : "StorageError";
+/** The known storage reason in a browser rejection, or undefined if it names none. */
+export function browserReportedReason(error: unknown): string | undefined {
   // Browser errors can contain URLs or serialized values. Only expose known storage reasons.
   const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
   const reason =
     /QUOTA_BYTES|quota(?: exceeded)?|max(?:imum)? write|disk|space|denied|permission|unavailable|disabled/i.exec(
       message,
     );
+  return reason ? `Browser reported: ${reason[0].toLowerCase()}` : undefined;
+}
+
+export function safeCause(error: unknown): StorageDiagnostic["cause"] {
+  const name = error instanceof Error ? error.name : "StorageError";
   return {
     name: /^[a-zA-Z]{1,64}$/.test(name) ? name : "StorageError",
-    message: reason
-      ? `Browser reported: ${reason[0].toLowerCase()}`
-      : "Browser rejected the local storage operation",
+    message: browserReportedReason(error) ?? "Browser rejected the local storage operation",
   };
 }
 
