@@ -4,6 +4,10 @@ import { logger } from "./logger";
 let filterRules: FilterRule[] = [];
 let isInitialized = false;
 
+export function filterRuleCount(): number {
+  return filterRules.length;
+}
+
 export function initializeWithFilterRules(rules: FilterRule[]): void {
   filterRules = rules;
   isInitialized = true;

@@ -216,6 +216,14 @@ test("Saving honors normalizeOnSave independently", async () => {
   expect(normalizedSaved.url).toBe("https://www.youtube.com/watch?v=abc123");
 });
 
+test("URLs canonicalized before filter rules load are not cached", async () => {
+  const target = "https://late.test/page?track=1&keep=1";
+  await initializeWithRawFilterLists([]);
+  expect(await canonicalizeUrl(target)).toBe(target);
+  await initializeWithRawFilterLists([{ name: "rules", content: "$removeparam=track" }]);
+  expect(await canonicalizeUrl(target)).toBe("https://late.test/page?keep=1");
+});
+
 test("Filter refresh invalidates canonical results", async () => {
   const { storage } = withStorage();
   const target = "https://cache.test/page?track=1&keep=1";
