@@ -3,6 +3,7 @@
   "name": "Pouch Quick Actions",
   "description": "Saves the current page to Pouch with one click. Needs Pouch.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAhe6WGTbF4a0Oy/UMt/fDEGvxoMIS0nEeQhOIJSMT+0GOVxXQMyn6xpZUiOONCdGU6UtaQ09+oFKuM1x1B6IdxXXMVG0fFcx1RK9jrDkoFY7Tcil81xhYRJWgm8VoyE9EY7F7K4bQbgsvr8Tv6AiwHi7vcJhyIYryVqIvmsmfN4z7nkRPWYNo2TUqMpS6hHC8/X0exm12/3LmoTPa5fBA7EaKiH4vcJJHCuaQqTvqzVytrVVn1a49QR/P1BREMxHEsm8UkownSoXLqwiTe9AjHTXaUT72zUqTyeaHkCB9QprltMJpkP+4+KtXqaq3Qkrsk3l12nvGZVl4h6fgj8336QIDAQAB",
+  "update_url": "https://github.com/zakius/pouch/releases/latest/download/updates-quick.xml",
   "background": {
     "service_worker": "background.js",
     "type": "module"

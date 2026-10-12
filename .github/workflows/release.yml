@@ -24,30 +24,35 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Build the Chromium packages
         run: bun run build.ts --bump --chromium
-      # The key is the one behind the manifest's `key`, so the crx keeps Pouch's ID.
-      # updates.xml is what the manifest's update_url fetches from the latest release.
-      # Quick Actions stays a zip: it has no signing key in CI.
-      - name: Pack Pouch as a signed crx
+      # Each key is the one behind its manifest's `key`, so each crx keeps its ID.
+      # Each update XML is what that manifest's update_url fetches from the latest release.
+      - name: Pack Pouch and Quick Actions as signed crx files
         env:
           CRX_PRIVATE_KEY: ${{ secrets.CRX_PRIVATE_KEY }}
+          CRX_QUICK_PRIVATE_KEY: ${{ secrets.CRX_QUICK_PRIVATE_KEY }}
         run: |
-          : "${CRX_PRIVATE_KEY:?CRX_PRIVATE_KEY is not set}"
           version=$(jq -r .version package.json)
-          crx="pouch-chromium-$version.crx"
-          key="$RUNNER_TEMP/pouch.pem"
-          (umask 077 && printf '%s\n' "$CRX_PRIVATE_KEY" > "$key")
-          bunx crx3 -p "$key" -o "dist/packages/$crx" -x dist/packages/updates.xml \
-            --appVersion "$version" \
-            --crxURL "https://github.com/zakius/pouch/releases/download/v$version/$crx" \
-            -- dist/chromium/pouch
-          rm "$key"
+          key="$RUNNER_TEMP/key.pem"
+          # pack <private key> <unpacked dir> <package name> <update XML>
+          pack() {
+            [ -n "$1" ] || { echo "Missing a CRX signing key secret" >&2; exit 1; }
+            crx="$3-chromium-$version.crx"
+            (umask 077 && printf '%s\n' "$1" > "$key")
+            bunx crx3 -p "$key" -o "dist/packages/$crx" -x "dist/packages/$4" \
+              --appVersion "$version" \
+              --crxURL "https://github.com/zakius/pouch/releases/download/v$version/$crx" \
+              -- "$2"
+            rm "$key"
+          }
+          pack "$CRX_PRIVATE_KEY" dist/chromium/pouch pouch updates.xml
+          pack "$CRX_QUICK_PRIVATE_KEY" dist/chromium/quick-actions pouch-quick-actions updates-quick.xml
       - uses: actions/upload-artifact@v4
         with:
           name: chromium
           path: |
             dist/packages/*-chromium-*.zip
             dist/packages/*-chromium-*.crx
-            dist/packages/updates.xml
+            dist/packages/updates*.xml
           if-no-files-found: error
 
   firefox:
@@ -118,5 +123,6 @@ jobs:
             artifacts/*-chromium-*.zip \
             artifacts/*-chromium-*.crx \
             artifacts/updates.xml \
+            artifacts/updates-quick.xml \
             --title "v${{ needs.firefox.outputs.version }}" \
             --generate-notes
