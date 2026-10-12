@@ -59,6 +59,14 @@ builds the same source for Chromium as two MV3 extensions in `dist/packages`:
 
 Load both unpacked (`chrome://extensions`, developer mode, "Load unpacked" on each folder). The `key`s in their manifests fix their IDs, which the two use to find each other (`src/utils/chromium.ts`). Code that differs between the builds checks `IS_CHROMIUM`. The Chromium build has its own extension ID, so its settings start empty. Releases attach both packages.
 
+Releases also attach Pouch as a signed `pouch-chromium-<version>.crx` that updates itself. To install it in an ungoogled-chromium-based browser such as Helium:
+
+1. Download the `.crx` from the [latest release](https://github.com/zakius/pouch/releases/latest).
+2. Set `chrome://flags/#extension-mime-request-handling` to "Always prompt for install".
+3. Open the file in the browser, or drag it onto `chrome://extensions`.
+
+After that, the browser updates Pouch from the release's `updates.xml`. Pouch Quick Actions has no `.crx`; load it unpacked.
+
 ## Development
 
 - `bun run watch` - Start development server and watch for changes.
