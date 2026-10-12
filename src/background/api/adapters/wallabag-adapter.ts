@@ -227,18 +227,22 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
       const elapsed = options?.lastFullSyncTimestamp
         ? Date.now() - options.lastFullSyncTimestamp
         : undefined;
+      // Full syncs wait for idle, but not past 48h: an always-active browser would never reconcile deletions.
+      const overdue = elapsed !== undefined && elapsed >= 2 * 86400000;
       const mode =
         options?.mode ??
-        (elapsed === undefined || (elapsed >= 86400000 && options?.isBrowserIdle)
+        (elapsed === undefined || overdue || (elapsed >= 86400000 && options?.isBrowserIdle)
           ? "overwrite"
           : "update");
       const reason = options?.mode
         ? "explicit_mode"
         : elapsed === undefined
           ? "first_sync"
-          : mode === "overwrite"
-            ? "24h_idle"
-            : "incremental";
+          : overdue
+            ? "48h_overdue"
+            : mode === "overwrite"
+              ? "24h_idle"
+              : "incremental";
       logger.info("Wallabag sync mode decision", {
         mode,
         reason,

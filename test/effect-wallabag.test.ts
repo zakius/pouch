@@ -305,6 +305,15 @@ test("ready Wallabag saves, deletes, tests, and paginates full and incremental s
   );
   expect(idle.mode).toBe("overwrite");
   expect(urls.at(-1)).not.toContain("since=");
+  const active = await runOperation(
+    api.sync({ lastFullSyncTimestamp: Date.now() - 86400001, isBrowserIdle: false }),
+  );
+  expect(active.mode).toBe("update");
+  const overdue = await runOperation(
+    api.sync({ lastFullSyncTimestamp: Date.now() - 2 * 86400001, isBrowserIdle: false }),
+  );
+  expect(overdue.mode).toBe("overwrite");
+  expect(overdue.metadata.syncDecision?.reason).toBe("48h_overdue");
 }, 15000);
 for (const operation of ["save", "delete"] as const) {
   test(`confirmed ${operation} survives post-mutation local-read failure with safe runtime advice`, async () => {

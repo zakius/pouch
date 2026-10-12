@@ -1,11 +1,15 @@
 import { assertStorageHealthy } from "./fatal-storage";
 import { initializeUrlCleanerWithRemoteLists } from "./filter-list-manager";
-import { cleanUrl as filterListCleanUrl } from "./filter-list-url-cleaner";
+import { cleanUrl as filterListCleanUrl, filterRuleCount } from "./filter-list-url-cleaner";
 
+// Offline starts load zero rules without throwing, so retry until rules arrive, at most every 5 minutes.
+const INIT_RETRY_MS = 5 * 60_000;
 let urlCanonizerInitialized = false;
+let lastInitAttempt = -Infinity;
 
 export async function initializeUrlCanonizer(): Promise<void> {
-  if (urlCanonizerInitialized) return;
+  if (urlCanonizerInitialized || Date.now() - lastInitAttempt < INIT_RETRY_MS) return;
+  lastInitAttempt = Date.now();
 
   try {
     await initializeUrlCleanerWithRemoteLists();
@@ -14,7 +18,7 @@ export async function initializeUrlCanonizer(): Promise<void> {
     console.warn("Failed to initialize filter list cleaner:", error);
   }
 
-  urlCanonizerInitialized = true;
+  urlCanonizerInitialized = filterRuleCount() > 0;
 }
 const redirectTargets: { host: string; paths: string[]; params: string[] }[] = [
   {
@@ -165,10 +169,13 @@ export async function canonicalizeUrl(urlString: string): Promise<string> {
     url = canonicalizeYoutubeUrl(url);
     url = canonicalizeAmazonUrl(url);
 
-    if (canonicalUrlCache.size >= CANONICAL_CACHE_LIMIT) {
-      canonicalUrlCache.clear();
+    // A result computed without filter rules would outlive the rules' arrival.
+    if (urlCanonizerInitialized) {
+      if (canonicalUrlCache.size >= CANONICAL_CACHE_LIMIT) {
+        canonicalUrlCache.clear();
+      }
+      canonicalUrlCache.set(urlString, url.toString());
     }
-    canonicalUrlCache.set(urlString, url.toString());
 
     return url.toString();
   } catch {
