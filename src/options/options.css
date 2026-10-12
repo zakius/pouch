@@ -32,7 +32,6 @@ body {
 
 .container {
   width: 100%;
-  min-width: 100%;
   box-sizing: border-box;
   max-width: 960px;
   margin: 0 auto;
