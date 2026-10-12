@@ -108,6 +108,7 @@ async function loadBackend(backend: Settings["backend"]): Promise<void> {
     }
   }
   const { formConfig } = backendForms[backend];
+  dom.testConnectionButton.hidden = backend === "bookmarks";
   dom.configContainer.innerHTML = "";
   const form = document.createElement("form");
   form.id = `${backend}-config`;
