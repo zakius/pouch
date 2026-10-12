@@ -26,22 +26,29 @@ jobs:
         run: bun run build.ts --bump --chromium
       # Each key is the one behind its manifest's `key`, so each crx keeps its ID.
       # Each update XML is what that manifest's update_url fetches from the latest release.
+      # While the repository is private, browsers can't download release assets, so
+      # the CHROMIUM_UPDATE_BASE variable points the update_url and crx URLs at a
+      # public mirror of the release assets instead. Unset, they point at GitHub.
       - name: Pack Pouch and Quick Actions as signed crx files
         env:
           CRX_PRIVATE_KEY: ${{ secrets.CRX_PRIVATE_KEY }}
           CRX_QUICK_PRIVATE_KEY: ${{ secrets.CRX_QUICK_PRIVATE_KEY }}
+          CHROMIUM_UPDATE_BASE: ${{ vars.CHROMIUM_UPDATE_BASE }}
         run: |
           version=$(jq -r .version package.json)
           key="$RUNNER_TEMP/key.pem"
+          base="${CHROMIUM_UPDATE_BASE:-https://github.com/zakius/pouch/releases/download/v$version}"
           # pack <private key> <unpacked dir> <package name> <update XML>
           pack() {
             [ -n "$1" ] || { echo "Missing a CRX signing key secret" >&2; exit 1; }
             crx="$3-chromium-$version.crx"
+            if [ -n "$CHROMIUM_UPDATE_BASE" ]; then
+              jq --arg url "$CHROMIUM_UPDATE_BASE/$4" '.update_url = $url' "$2/manifest.json" > "$RUNNER_TEMP/manifest.json"
+              mv "$RUNNER_TEMP/manifest.json" "$2/manifest.json"
+            fi
             (umask 077 && printf '%s\n' "$1" > "$key")
             bunx crx3 -p "$key" -o "dist/packages/$crx" -x "dist/packages/$4" \
-              --appVersion "$version" \
-              --crxURL "https://github.com/zakius/pouch/releases/download/v$version/$crx" \
-              -- "$2"
+              --appVersion "$version" --crxURL "$base/$crx" -- "$2"
             rm "$key"
           }
           pack "$CRX_PRIVATE_KEY" dist/chromium/pouch pouch updates.xml
