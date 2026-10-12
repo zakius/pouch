@@ -3,6 +3,7 @@
   "name": "Pouch",
   "description": "Save and manage articles with Pouch",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsCO2bl5K9BfklQbp+7CH5MLJJnz1WAthVRBpe4z7Xqkhx5WKuonhXkxK/xAOVOBMg14my8wpI+JffkQ+CVl+jD1EcSnorNGTwhJ4Ud/k6mFadQ+bkhltOSEIbmFqERyKA82lHGCRl60u4WpTUqeYPAiV1Fyh695TNwXifpHr1IXtPvYrL5XnPYYotxnjUWI7AdH7MM9vNo9S3SynAhqn92GN9O5eeLMuaDC4czUAxQiYabxhuzjdx5DPG5JfbZj32tgruCDkFAjmTVeoy6dDShxvJN4M1pE+pb1UTRvSmJhR8zl8sSTVq+/8cE7BfA82PTpA2hDCiPzdfLNi2u6amwIDAQAB",
+  "update_url": "https://github.com/zakius/pouch/releases/latest/download/updates.xml",
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",
