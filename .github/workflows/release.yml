@@ -24,10 +24,30 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Build the Chromium packages
         run: bun run build.ts --bump --chromium
+      # The key is the one behind the manifest's `key`, so the crx keeps Pouch's ID.
+      # updates.xml is what the manifest's update_url fetches from the latest release.
+      # Quick Actions stays a zip: it has no signing key in CI.
+      - name: Pack Pouch as a signed crx
+        env:
+          CRX_PRIVATE_KEY: ${{ secrets.CRX_PRIVATE_KEY }}
+        run: |
+          : "${CRX_PRIVATE_KEY:?CRX_PRIVATE_KEY is not set}"
+          version=$(jq -r .version package.json)
+          crx="pouch-chromium-$version.crx"
+          key="$RUNNER_TEMP/pouch.pem"
+          (umask 077 && printf '%s\n' "$CRX_PRIVATE_KEY" > "$key")
+          bunx crx3 -p "$key" -o "dist/packages/$crx" -x dist/packages/updates.xml \
+            --appVersion "$version" \
+            --crxURL "https://github.com/zakius/pouch/releases/download/v$version/$crx" \
+            -- dist/chromium/pouch
+          rm "$key"
       - uses: actions/upload-artifact@v4
         with:
           name: chromium
-          path: dist/packages/*-chromium-*.zip
+          path: |
+            dist/packages/*-chromium-*.zip
+            dist/packages/*-chromium-*.crx
+            dist/packages/updates.xml
           if-no-files-found: error
 
   firefox:
@@ -96,5 +116,7 @@ jobs:
           gh release create "v${{ needs.firefox.outputs.version }}" \
             artifacts/*.xpi \
             artifacts/*-chromium-*.zip \
+            artifacts/*-chromium-*.crx \
+            artifacts/updates.xml \
             --title "v${{ needs.firefox.outputs.version }}" \
             --generate-notes
