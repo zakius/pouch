@@ -258,16 +258,19 @@ function getSettingsFromForm(): Settings | null {
   return result.output;
 }
 type StatusType = "info" | "success" | "error";
+let statusHideTimer: ReturnType<typeof setTimeout> | undefined;
 function showStatus(message: string, type: StatusType = "info"): void {
   if (isStorageStopped() && !message.startsWith("Pouch stopped:")) return;
   assertDom(dom);
+  clearTimeout(statusHideTimer);
   dom.statusDiv.textContent = message;
   dom.statusDiv.className = `status ${type}`;
   setTimeout(() => {
     dom.statusDiv.classList.add("show");
   }, 10);
-  if (isStorageStopped()) return;
-  setTimeout(() => {
+  // Errors stay until the next status so they can be read at any pace.
+  if (isStorageStopped() || type === "error") return;
+  statusHideTimer = setTimeout(() => {
     if (isStorageStopped()) return;
     dom.statusDiv.classList.remove("show");
     setTimeout(() => {
