@@ -26,9 +26,12 @@ interface FakeElement {
   appendChild(child: FakeElement): FakeElement;
   addEventListener(): void;
   closest(): null;
+  focus(): void;
+  querySelectorAll(selector: string): FakeElement[];
 }
 
 const elementClasses = new WeakMap<FakeElement, Set<string>>();
+let focusedElement: FakeElement | undefined;
 
 function makeElement(id = ""): FakeElement {
   const el: FakeElement = {
@@ -36,7 +39,13 @@ function makeElement(id = ""): FakeElement {
     className: "",
     title: "",
     textContent: "",
-    innerHTML: "",
+    // Like the DOM, assigning markup replaces the rendered children.
+    get innerHTML() {
+      return "";
+    },
+    set innerHTML(_markup: string) {
+      el.children = [];
+    },
     href: "",
     target: "",
     rel: "",
@@ -69,6 +78,18 @@ function makeElement(id = ""): FakeElement {
     },
     addEventListener() {},
     closest: () => null,
+    focus() {
+      focusedElement = el;
+    },
+    querySelectorAll(selector: string) {
+      const className = selector.replace(/^\./, "");
+      const walk = (node: FakeElement): FakeElement[] =>
+        node.children.flatMap((child) => [
+          ...(child.className?.split(" ").includes(className) ? [child] : []),
+          ...(child.children ? walk(child) : []),
+        ]);
+      return walk(el);
+    },
   };
   elementClasses.set(el, new Set());
   return el;
@@ -191,6 +212,7 @@ function makeDeleteButton(articleId: number | string): FakeElement {
 }
 
 beforeEach(() => {
+  focusedElement = undefined;
   for (const element of elements.values()) {
     element.title = "";
     element.textContent = "";
@@ -317,7 +339,7 @@ test("slow status refresh keeps the save button busy and consecutive clicks are 
   await until(() => !saveButton.disabled, "save button re-enabled");
   expect(saveButton.classList.contains("saved")).toBe(true);
   expect(saveButton.textContent).toBe("✓");
-  expect(saveButton.getAttribute("aria-pressed")).toBe("true");
+  expect(saveButton.getAttribute("aria-label")).toBe("Remove current page");
 });
 
 test("initialization failure surfaces error content even when the list was empty", async () => {
@@ -374,6 +396,43 @@ test("article rows link only http(s) URLs from the server", async () => {
   await initializePopup();
   await until(() => articles().children.length === urls.length, "articles rendered");
   expect(articles().children.map((row) => row.children[0]?.href)).toEqual(["", "", ""]);
+});
+
+test("deleting a row moves keyboard focus to the next row, then to search when the list empties", async () => {
+  const second: Article = { ...exampleArticle, id: 8, url: "https://example.com/2" };
+  let remaining = [exampleArticle, second];
+  handleMessage = async (message) => {
+    if (message.type === "getArticles") return listResponse(remaining);
+    if (message.type === "checkArticle") return undefined;
+    if (message.type === "deleteArticle") {
+      remaining = remaining.filter((article) => String(article.id) !== message.payload?.articleId);
+      return {};
+    }
+    return {};
+  };
+  await initializePopup();
+  await until(() => articles().children.length === 2, "two rows rendered");
+
+  const deleteRow = async (index: number, remainingRows: number): Promise<void> => {
+    const button = articles().querySelectorAll(".delete-button")[index];
+    if (!button) throw new Error(`Missing delete button ${index}`);
+    button.classList.add("delete-button");
+    // Enter/Space on a native <button> dispatches click, so this is the keyboard path.
+    click(button);
+    click(button);
+    await until(
+      () => articles().children.length === remainingRows && el("sr-live").textContent !== "",
+      `row ${index} deleted`,
+    );
+  };
+
+  await deleteRow(0, 1);
+  expect(focusedElement).toBe(articles().querySelectorAll(".article-content")[0]);
+  expect(el("sr-live").textContent).toBe("Article deleted.");
+
+  el("sr-live").textContent = "";
+  await deleteRow(0, 0);
+  expect(focusedElement).toBe(el("search"));
 });
 
 test("fatal storage response shows confirmed remote success and blocks another save", async () => {
