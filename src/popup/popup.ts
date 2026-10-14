@@ -278,10 +278,10 @@ function errorMessageFor(
 ): { text: string; needsSettings: boolean } {
   const message = error instanceof Error && error.message ? error.message : "";
   if (isStorageStopped()) return { text: message, needsSettings: false };
-  if (/permission/i.test(message)) {
-    return { text: message, needsSettings: true };
-  }
-  return { text: fallback, needsSettings: false };
+  // Background errors are written for the user (wrong credentials, server down, "Do not repeat
+  // it"); a generic retry hint would hide the cause and the next step.
+  const text = error instanceof BackgroundError && message ? message : fallback;
+  return { text, needsSettings: /permission|settings/i.test(text) };
 }
 
 async function handleDeleteArticle(button: HTMLButtonElement): Promise<void> {
@@ -442,11 +442,13 @@ function createArticleElement(article: Article): HTMLElement {
 interface ErrorResponse {
   error?: string;
 }
+/** An error the background reported in its response, as opposed to a messaging failure. */
+class BackgroundError extends Error {}
 async function sendBackgroundMessage<T>(message: Record<string, unknown>): Promise<T> {
   const response = (await browser.runtime.sendMessage(message)) as ErrorResponse | undefined;
   showStorageDiagnostic(response);
   if (response?.error) {
-    throw new Error(response.error);
+    throw new BackgroundError(response.error);
   }
   return response as T;
 }
