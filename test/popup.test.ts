@@ -363,6 +363,19 @@ test("articles with native string IDs render and delete passes the exact ID", as
   expect(deletePayloads[0]).toBe("12abcDEF_-xy");
 });
 
+test("article rows link only http(s) URLs from the server", async () => {
+  const urls = ["javascript:alert(1)", "data:text/html,<h1>phish</h1>", "file:///etc/passwd"];
+  handleMessage = async (message) => {
+    if (message.type === "getArticles")
+      return listResponse(urls.map((url, id) => ({ ...exampleArticle, id, url })));
+    if (message.type === "checkArticle") return undefined;
+    return {};
+  };
+  await initializePopup();
+  await until(() => articles().children.length === urls.length, "articles rendered");
+  expect(articles().children.map((row) => row.children[0]?.href)).toEqual(["", "", ""]);
+});
+
 test("fatal storage response shows confirmed remote success and blocks another save", async () => {
   let saves = 0;
   const diagnostic = {

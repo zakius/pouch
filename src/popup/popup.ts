@@ -401,12 +401,12 @@ function createArticleElement(article: Article): HTMLElement {
   articleElement.className = "article";
   const contentWrapper = document.createElement("a");
   contentWrapper.className = "article-content";
-  try {
-    const urlObj = new URL(article.url);
-    contentWrapper.href = urlObj.toString();
-  } catch {
-    logger.warn("Invalid URL format, using as-is:", article.url);
+  // The server controls this url. Linked from an extension page, a data: url would
+  // escape the browser's block on pages opening them as top-level documents.
+  if (URL.canParse(article.url) && /^https?:$/.test(new URL(article.url).protocol)) {
     contentWrapper.href = article.url;
+  } else {
+    logger.warn("Not linking non-http(s) article URL:", article.url);
   }
   contentWrapper.target = "_blank";
   contentWrapper.rel = "noopener noreferrer";
