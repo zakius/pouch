@@ -264,3 +264,55 @@ test("Existing stored articles are compared against recomputed canonical values"
     staleCanonical,
   );
 });
+
+test("The same article with and without tracking params shows as saved", async () => {
+  const { storage } = withStorage();
+  await initializeWithRawFilterLists([{ name: "rules", content: "$removeparam=utm_source" }]);
+  const saved: Article = {
+    id: 1,
+    url: "https://news.example/story?q=a%20b&flag",
+    title: "Story",
+    created_at: "2026-01-01",
+  };
+  storage[keys.articles] = [saved];
+  const repository = new ArticlesRepository();
+  await repository.initialize({ ...DEFAULT_SETTINGS, normalizeOnCompare: true });
+  expect(
+    await runOperation(
+      repository.findSaved("https://news.example/story?q=a%20b&utm_source=feed&flag"),
+    ),
+  ).toEqual(saved);
+});
+
+test("Removing tracking params leaves the other params byte-for-byte", async () => {
+  await initializeWithRawFilterLists([{ name: "rules", content: "$removeparam=utm_source" }]);
+  expect(
+    await canonicalizeUrl("https://e.example/p?utm_source=x&q=a+b%2Bc&x=%E2%9C%93&flag#top"),
+  ).toBe("https://e.example/p?q=a+b%2Bc&x=%E2%9C%93&flag#top");
+  expect(await canonicalizeUrl("https://e.example/p?utm_source=x")).toBe("https://e.example/p");
+  expect(await canonicalizeUrl("https://e.example/p?utm%5Fsource=x&k=1")).toBe(
+    "https://e.example/p?k=1",
+  );
+});
+
+test("AMP URLs without the s/ segment unwrap to the http article", async () => {
+  expect(await canonicalizeUrl("https://www.google.com/amp/www.example.com/page")).toBe(
+    "http://www.example.com/page",
+  );
+});
+
+test("YouTube Shorts and youtu.be links with a trailing slash identify the video", async () => {
+  for (const url of ["https://www.youtube.com/shorts/abc123/", "https://youtu.be/abc123/"]) {
+    expect(await canonicalizeUrl(url)).toBe("https://www.youtube.com/watch?v=abc123");
+  }
+});
+
+test("Twitter and X subdomains canonicalize to x.com", async () => {
+  for (const url of [
+    "https://mobile.twitter.com/a/status/1",
+    "https://www.twitter.com/a/status/1",
+    "https://mobile.x.com/a/status/1",
+  ]) {
+    expect(await canonicalizeUrl(url)).toBe("https://x.com/a/status/1");
+  }
+});
