@@ -79,7 +79,7 @@ export class BrowserFailure extends OperationError {
 export class CredentialsFailure extends OperationError {
   readonly _tag = "CredentialsFailure";
   constructor(readonly operation: string) {
-    super("The server rejected the credentials. Check account settings and authenticate again.");
+    super("The server did not accept your login details. Check them in Pouch settings.");
   }
 }
 export class NetworkFailure extends OperationError {

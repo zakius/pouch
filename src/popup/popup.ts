@@ -278,10 +278,10 @@ function errorMessageFor(
 ): { text: string; needsSettings: boolean } {
   const message = error instanceof Error && error.message ? error.message : "";
   if (isStorageStopped()) return { text: message, needsSettings: false };
-  if (/permission/i.test(message)) {
-    return { text: message, needsSettings: true };
-  }
-  return { text: fallback, needsSettings: false };
+  // Background errors are written for the user (wrong credentials, server down, "Do not repeat
+  // it"); a generic retry hint would hide the cause and the next step.
+  const text = error instanceof BackgroundError && message ? message : fallback;
+  return { text, needsSettings: /permission|settings/i.test(text) };
 }
 
 async function handleDeleteArticle(button: HTMLButtonElement): Promise<void> {
@@ -305,6 +305,9 @@ async function handleDeleteArticle(button: HTMLButtonElement): Promise<void> {
   // on Chromium). Coercing digit-looking Chromium ids to numbers made the
   // repository's strict id comparison silently miss the cached entry.
   const articleId = articleIdStr;
+  const rowIndex = Array.from(articlesContainer?.querySelectorAll(".delete-button") ?? []).indexOf(
+    button,
+  );
   isSavingOrDeleting = true;
   button.disabled = true;
   button.classList.add("is-busy");
@@ -317,8 +320,10 @@ async function handleDeleteArticle(button: HTMLButtonElement): Promise<void> {
     logger.debug("Article deleted, reloading list");
     await updateSavePageButtonState();
     await loadRecentArticles();
-    const liveRegion = document.getElementById("sr-live");
-    if (liveRegion) liveRegion.textContent = "Article deleted.";
+    // The re-render dropped the focused row; keep keyboard users in the list.
+    const links = articlesContainer?.querySelectorAll<HTMLElement>(".article-content");
+    (links?.[Math.min(rowIndex, links.length - 1)] ?? searchInput)?.focus();
+    announce("Article deleted.");
   } catch (error) {
     logger.error("Error deleting article:", error);
     const { text, needsSettings } = errorMessageFor(
@@ -354,10 +359,13 @@ function handlePageSelect(event: Event): void {
   currentPage = newPage;
   void loadRecentArticles();
 }
-function showError(message: string, showSettingsLink = false): void {
-  if (!articlesContainer || !articleListContainer) return;
+function announce(message: string): void {
   const liveRegion = document.getElementById("sr-live");
   if (liveRegion) liveRegion.textContent = message;
+}
+function showError(message: string, showSettingsLink = false): void {
+  if (!articlesContainer || !articleListContainer) return;
+  announce(message);
   articlesContainer.innerHTML = "";
   const errorDiv = document.createElement("div");
   errorDiv.className = "error-message";
@@ -401,12 +409,12 @@ function createArticleElement(article: Article): HTMLElement {
   articleElement.className = "article";
   const contentWrapper = document.createElement("a");
   contentWrapper.className = "article-content";
-  try {
-    const urlObj = new URL(article.url);
-    contentWrapper.href = urlObj.toString();
-  } catch {
-    logger.warn("Invalid URL format, using as-is:", article.url);
+  // The server controls this url. Linked from an extension page, a data: url would
+  // escape the browser's block on pages opening them as top-level documents.
+  if (URL.canParse(article.url) && /^https?:$/.test(new URL(article.url).protocol)) {
     contentWrapper.href = article.url;
+  } else {
+    logger.warn("Not linking non-http(s) article URL:", article.url);
   }
   contentWrapper.target = "_blank";
   contentWrapper.rel = "noopener noreferrer";
@@ -434,11 +442,13 @@ function createArticleElement(article: Article): HTMLElement {
 interface ErrorResponse {
   error?: string;
 }
+/** An error the background reported in its response, as opposed to a messaging failure. */
+class BackgroundError extends Error {}
 async function sendBackgroundMessage<T>(message: Record<string, unknown>): Promise<T> {
   const response = (await browser.runtime.sendMessage(message)) as ErrorResponse | undefined;
   showStorageDiagnostic(response);
   if (response?.error) {
-    throw new Error(response.error);
+    throw new BackgroundError(response.error);
   }
   return response as T;
 }
@@ -460,13 +470,11 @@ async function updateSavePageButtonState(): Promise<void> {
       savePageButton.textContent = "✓";
       savePageButton.title = "Remove current page";
       savePageButton.setAttribute("aria-label", "Remove current page");
-      savePageButton.setAttribute("aria-pressed", "true");
       savePageButton.classList.add("saved");
     } else {
       savePageButton.textContent = "+";
       savePageButton.title = "Save current page";
       savePageButton.setAttribute("aria-label", "Save current page");
-      savePageButton.setAttribute("aria-pressed", "false");
       savePageButton.classList.remove("saved");
     }
     savePageButton.style.display = "block";
@@ -504,6 +512,7 @@ async function handleSavePageClick(): Promise<void> {
       logger.debug("Article deleted, reloading list and button state");
       await updateSavePageButtonState();
       await loadRecentArticles();
+      announce("Page removed.");
     } else {
       await sendBackgroundMessage({
         type: "saveArticle",
@@ -512,6 +521,7 @@ async function handleSavePageClick(): Promise<void> {
       logger.debug("Article saved, reloading list and button state");
       await updateSavePageButtonState();
       await loadRecentArticles();
+      announce("Page saved.");
     }
   } catch (error) {
     logger.error("Error saving/deleting article:", error);

@@ -17,3 +17,17 @@ jobs:
       - run: bun run typecheck
       - run: bun run format:check
       - run: bun test --isolate
+      # release.yml builds and signs on merge, so a broken package must fail here.
+      - run: bun run package
+      # The same linter AMO runs when signing.
+      - run: bunx web-ext lint --source-dir dist/unpackaged
+      - run: bun run package:chromium
+      - name: Check each file a manifest names is in its build
+        run: |
+          status=0
+          for dir in dist/unpackaged dist/chromium/pouch dist/chromium/quick-actions; do
+            for file in $(jq -r '.. | strings | select(test("\\.(js|html|png|svg)$"))' "$dir/manifest.json"); do
+              [ -f "$dir/$file" ] || { echo "$dir/manifest.json names missing $file" >&2; status=1; }
+            done
+          done
+          exit $status

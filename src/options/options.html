@@ -30,7 +30,12 @@
           <input type="checkbox" id="normalize-on-save" />
           <label for="normalize-on-save">Normalize URLs when saving</label>
           <div class="tooltip-container">
-            <button type="button" class="tooltip-icon" aria-describedby="tooltip-normalize-on-save">
+            <button
+              type="button"
+              class="tooltip-icon"
+              aria-label="About URL normalization when saving"
+              aria-describedby="tooltip-normalize-on-save"
+            >
               ?
             </button>
             <span id="tooltip-normalize-on-save" class="tooltip-text">
@@ -46,6 +51,7 @@
             <button
               type="button"
               class="tooltip-icon"
+              aria-label="About URL normalization on comparison"
               aria-describedby="tooltip-normalize-on-compare"
             >
               ?

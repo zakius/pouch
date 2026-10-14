@@ -464,7 +464,7 @@ test("draft connection test reports an actionable failure and stores no credenti
     code: "CredentialsFailure",
     details: { operation: "linkwarden.testConnection" },
   });
-  expect(result.error).toContain("Check account settings");
+  expect(result.error).toContain("Check them in Pouch settings");
   expect(storage.api_tokens).toBeUndefined();
 });
 

@@ -111,12 +111,13 @@ label {
 }
 
 .button.primary {
-  background-color: var(--primary-color);
+  /* Darker than --primary-color: white on #3498db is only 3.15:1. */
+  background-color: #2471a3;
   color: white;
 }
 
 .button.primary:hover:not(:disabled) {
-  background-color: #2980b9;
+  background-color: #1a5a85;
 }
 
 .button:focus {
@@ -160,7 +161,7 @@ label {
 
 .status.error {
   background-color: #fde8e8;
-  color: var(--error-color);
+  color: #c0392b;
   border: 1px solid var(--error-color);
 }
 
@@ -171,7 +172,7 @@ label {
 
 .status.success {
   background-color: #e8f8e8;
-  color: var(--success-color);
+  color: #1e7e34;
   border: 1px solid var(--success-color);
 }
 
@@ -327,4 +328,12 @@ label {
 .tooltip-container:hover .tooltip-text {
   visibility: visible;
   opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    transition: none !important;
+  }
 }
