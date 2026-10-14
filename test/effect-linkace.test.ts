@@ -378,6 +378,16 @@ test("a page total overrides a full page", async () => {
   expect(fetchMock).toHaveBeenCalledTimes(1);
 });
 
+test("a server that ignores the page parameter fails as an incomplete snapshot instead of looping", async () => {
+  const fetchMock = api(() => json({ data: range(1, 30).map(link) }));
+  const result = await failure(await run("sync"));
+  expect(result).toMatchObject({
+    code: "IncompleteSnapshotFailure",
+    details: { operation: "linkace.sync" },
+  });
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+});
+
 test("update sync sends created_after verbatim; overwrite sync ignores the timestamp", async () => {
   const fetchMock = api(() => json({ data: [link(3)] }));
   const adapter = await acquire();

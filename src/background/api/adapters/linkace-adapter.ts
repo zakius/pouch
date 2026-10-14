@@ -7,6 +7,7 @@ import { logger } from "../../../utils/logger";
 import { requestJson, validate } from "../effect-api-client";
 import {
   ConfigurationFailure,
+  IncompleteSnapshotFailure,
   ProviderFailure,
   storageHealthy,
   type AcquisitionError,
@@ -128,7 +129,8 @@ export const createLinkaceAdapter = Effect.fn("linkace.acquire")(function* (
      * Update sync sends `created_after`, but LinkAce's link list does not honour it and
      * returns every link; the repository merges the full listing either way.
      *
-     * Without a page total, a short page ends the listing.
+     * Without a page total, a short page ends the listing. A non-empty page of only
+     * already-seen links means the server ignored `page`, so sync fails instead of looping.
      */
     sync: Effect.fn("linkace.sync")(function* (options?: SyncOptions) {
       const perPage = 30;
@@ -140,12 +142,16 @@ export const createLinkaceAdapter = Effect.fn("linkace.acquire")(function* (
         });
       }
       const articles: Article[] = [];
+      const seen = new Set<number>();
       for (let page = 1; ; page++) {
         // Keeps the one-request-per-second pacing of the shared client this replaces.
         if (page > 1) yield* Effect.sleep(1000);
         query.set("page", String(page));
         const data = yield* request("linkace.sync", `/api/v2/links?${query.toString()}`);
         const result = yield* validate(linkacePageSchema, data, "linkace.sync");
+        if (result.data.length > 0 && result.data.every((item) => seen.has(item.id)))
+          return yield* Effect.fail(new IncompleteSnapshotFailure("linkace.sync"));
+        for (const item of result.data) seen.add(item.id);
         articles.push(...result.data.map(toArticle));
         const lastPage = result.meta?.last_page ?? result.last_page;
         if (lastPage === undefined ? result.data.length !== perPage : page >= lastPage) break;
