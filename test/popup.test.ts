@@ -1,5 +1,7 @@
 import { beforeEach, expect, test } from "bun:test";
 import type { Article } from "../src/types/common";
+import { CredentialsFailure } from "../src/background/api/effect-adapter";
+import { errorResponse } from "../src/background/runtime-message";
 
 interface FakeElement {
   id: string;
@@ -210,11 +212,11 @@ beforeEach(() => {
   };
 });
 
-test("failed save shows an error instead of announcing success", async () => {
+test("failed save shows the background's reason and a settings link", async () => {
   handleMessage = async (message) => {
     if (message.type === "getArticles") return listResponse([]);
     if (message.type === "checkArticle") return undefined;
-    if (message.type === "saveArticle") return { error: "backend rejected the save" };
+    if (message.type === "saveArticle") return errorResponse(new CredentialsFailure("save"));
     return {};
   };
   await initializePopup();
@@ -224,10 +226,28 @@ test("failed save shows an error instead of announcing success", async () => {
   await until(() => !el("save-page-button").disabled, "save button re-enabled");
 
   const error = errorMessageText();
-  expect(error).toContain("Failed to save article");
+  expect(error).toBe(
+    "The server did not accept your login details. Check them in Pouch settings. Check Settings",
+  );
   expect(el("articles").style.display).toBe("block");
-  expect(el("sr-live").textContent).toContain("Failed to save article");
+  expect(el("sr-live").textContent).toContain("did not accept your login details");
   expect(el("save-page-button").classList.contains("saved")).toBe(false);
+});
+
+test("failed save without a background reason falls back to a retry hint", async () => {
+  handleMessage = async (message) => {
+    if (message.type === "getArticles") return listResponse([]);
+    if (message.type === "checkArticle") return undefined;
+    if (message.type === "saveArticle") throw new Error("Receiving end does not exist.");
+    return {};
+  };
+  await initializePopup();
+  await until(() => el("save-page-button").style.display === "block", "save button visible");
+
+  click(el("save-page-button"));
+  await until(() => !el("save-page-button").disabled, "save button re-enabled");
+
+  expect(errorMessageText()).toBe("Failed to save article. Please try again.");
 });
 
 test("failed row deletion shows an error instead of announcing success", async () => {
@@ -247,7 +267,7 @@ test("failed row deletion shows an error instead of announcing success", async (
 
   expect(el("sr-live").textContent).not.toBe("Article deleted.");
   const error = errorMessageText();
-  expect(error).toContain("Failed to delete article");
+  expect(error).toBe("backend rejected the delete");
   expect(el("articles").style.display).toBe("block");
 });
 
