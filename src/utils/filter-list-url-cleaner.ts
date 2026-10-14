@@ -93,13 +93,15 @@ function applyFilterRules(urlString: string): string {
       }
     }
 
-    for (const param of paramsToRemove) {
-      url.searchParams.delete(param);
-    }
-
-    if (url.searchParams.size === 0) {
-      url.search = "";
-    }
+    // Filter the raw pairs: searchParams would re-encode kept ones (%20 -> +, flag -> flag=).
+    const kept = url.search
+      .slice(1)
+      .split("&")
+      .filter((pair) => {
+        const [name] = new URLSearchParams(pair).keys();
+        return name === undefined || !paramsToRemove.has(name);
+      });
+    url.search = kept.join("&");
 
     return url.toString();
   } catch (error) {

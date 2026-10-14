@@ -52,12 +52,13 @@ function handleOpenRedirects(url: URL): URL {
 function deAmpUrl(url: URL): URL {
   const host = url.hostname;
   if ((host === "google.com" || host.endsWith(".google.com")) && url.pathname.startsWith("/amp/")) {
-    const pathParts = url.pathname.split("/");
-    if (pathParts.length > 3) {
-      const originalHostAndPath = pathParts.slice(3).join("/");
+    // Google AMP viewer paths: /amp/s/<host>/<path> for https, /amp/<host>/<path> for http.
+    const pathParts = url.pathname.slice("/amp/".length).split("/");
+    const secure = pathParts[0] === "s";
+    if (secure) pathParts.shift();
+    if (pathParts[0]) {
       try {
-        const newUrlString = `https://${originalHostAndPath}`;
-        const newUrl = new URL(newUrlString);
+        const newUrl = new URL(`${secure ? "https" : "http"}://${pathParts.join("/")}`);
         newUrl.search = url.search;
         return newUrl;
       } catch {}
@@ -67,7 +68,7 @@ function deAmpUrl(url: URL): URL {
 }
 function canonicalizeTwitterUrl(url: URL): URL {
   const twitterDomains = ["twitter.com", "x.com", "fxtwitter.com", "vxtwitter.com", "fixvx.com"];
-  if (twitterDomains.includes(url.hostname.toLowerCase())) {
+  if (twitterDomains.includes(url.hostname.replace(/^(?:www|mobile)\./, ""))) {
     url.hostname = "x.com";
   }
   return url;
@@ -77,9 +78,9 @@ function canonicalizeYoutubeUrl(url: URL): URL {
   if (youtubeDomains.includes(url.hostname.toLowerCase())) {
     let videoId: string | null = null;
     if (url.pathname.startsWith("/shorts/")) {
-      videoId = url.pathname.substring("/shorts/".length);
+      videoId = url.pathname.split("/")[2];
     } else if (url.hostname.endsWith("youtu.be")) {
-      videoId = url.pathname.substring(1);
+      videoId = url.pathname.split("/")[1];
     } else {
       videoId = url.searchParams.get("v");
     }
