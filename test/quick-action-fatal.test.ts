@@ -6,6 +6,7 @@ const disabled: (number | undefined)[] = [];
 const enabled: number[] = [];
 const badges: string[] = [];
 const titles: string[] = [];
+const closedTab = 999;
 let diagnostic: unknown = { code: "FATAL_LOCAL_STORAGE" };
 let holdBadge = false;
 let releaseBadge!: () => void;
@@ -32,7 +33,9 @@ Object.assign(globalThis, {
       setTitle: async ({ title }: { title: string }) => {
         titles.push(title);
       },
-      setIcon: async () => {},
+      setIcon: async ({ tabId }: { tabId: number }) => {
+        if (tabId === closedTab) throw new Error(`No tab with id: ${tabId}.`);
+      },
       onClicked: { addListener: () => {} },
     },
     tabs: { query: async () => [{ id: 1 }, { id: 2 }], onRemoved: { addListener: () => {} } },
@@ -87,4 +90,11 @@ test("Chromium Quick Actions shows fatal diagnostics and disables each tab until
   await listener({ type: "pageState", tabId: 1, saved: true }, { id: POUCH_ID });
   expect(badges.at(-1)).toBe("");
   expect(enabled).toEqual([1, 1]);
+});
+
+test("Quick Actions updates only the reported tab, even after a state for a closed tab", async () => {
+  enabled.length = 0;
+  await listener({ type: "pageState", tabId: closedTab, saved: true }, { id: POUCH_ID });
+  await listener({ type: "pageState", tabId: 3, saved: true }, { id: POUCH_ID });
+  expect(enabled).toEqual([closedTab, 3]);
 });

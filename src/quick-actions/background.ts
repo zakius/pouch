@@ -7,12 +7,20 @@ const pageStates = new Map<number, { saved: boolean; title?: string }>();
 // Like Firefox's page action: off until Pouch reports a page it can save.
 const initiallyDisabled = browser.action.disable();
 
-async function render(): Promise<void> {
+/**
+ * Applies `tabId`'s state, or the fatal state and then every state reported since. Chromium
+ * clears a tab's action on navigation, so reapplying other tabs' states would revive stale ones;
+ * only a fatal stop, which clears them, needs its late per-tab calls undone.
+ */
+async function render(tabId?: number): Promise<void> {
   await initiallyDisabled;
   for (;;) {
     const currentGeneration = generation;
     const error = fatalError;
-    const states = new Map(pageStates);
+    const states =
+      tabId === undefined
+        ? new Map(pageStates)
+        : new Map(pageStates.has(tabId) ? [[tabId, pageStates.get(tabId)!]] : []);
     const updates: (() => Promise<void>)[] = [
       () => browser.action.disable(),
       () => browser.action.setBadgeText({ text: error ? "!" : "" }),
@@ -44,7 +52,8 @@ async function render(): Promise<void> {
     }
     for (const update of updates) {
       if (generation !== currentGeneration) break;
-      await update();
+      // A tab can close before its update lands; that must not skip the remaining updates.
+      await update().catch(() => {});
     }
     // Browser calls already dispatched can finish after a state change in either direction.
     if (generation === currentGeneration) return;
@@ -60,7 +69,7 @@ browser.action.onClicked.addListener((tab) => {
       if (fatalError || generation !== currentGeneration) return;
       pageStates.set(tabId, { saved: false, title: "Pouch isn't installed" });
       generation++;
-      void render();
+      void render(tabId);
     });
   }
 });
@@ -86,7 +95,7 @@ browser.runtime.onMessageExternal.addListener(async (message: QuickActionStateMe
   }
   pageStates.set(message.tabId, { saved: message.saved });
   generation++;
-  await render();
+  await render(message.tabId);
 });
 browser.tabs.onRemoved.addListener((tabId) => {
   pageStates.delete(tabId);
