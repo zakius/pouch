@@ -2,6 +2,7 @@
   "name": "pouch-extension",
   "version": "1.0.56",
   "description": "Browser extension for Pouch",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "lint": "oxlint --type-aware --type-check src && bun run diagnostics:effect",
