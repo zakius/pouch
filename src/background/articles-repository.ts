@@ -399,8 +399,8 @@ export class ArticlesRepository {
 
   readonly getRecentArticles = Effect.fn("repository.recent")(function* (
     this: ArticlesRepository,
-    page = 1,
-    perPage = 30,
+    page: number = 1,
+    perPage: number = 30,
     search?: string,
   ) {
     const articles = this.filterBySearch(yield* this.getAllArticles, search).sort((a, b) =>

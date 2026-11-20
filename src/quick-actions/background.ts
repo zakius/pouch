@@ -17,10 +17,9 @@ async function render(tabId?: number): Promise<void> {
   for (;;) {
     const currentGeneration = generation;
     const error = fatalError;
+    const tabState = tabId === undefined ? undefined : pageStates.get(tabId);
     const states =
-      tabId === undefined
-        ? new Map(pageStates)
-        : new Map(pageStates.has(tabId) ? [[tabId, pageStates.get(tabId)!]] : []);
+      tabId === undefined ? new Map(pageStates) : new Map(tabState ? [[tabId, tabState]] : []);
     const updates: (() => Promise<void>)[] = [
       () => browser.action.disable(),
       () => browser.action.setBadgeText({ text: error ? "!" : "" }),
@@ -87,7 +86,7 @@ browser.runtime.onMessageExternal.addListener(async (message: QuickActionStateMe
   const currentGeneration = generation;
   if (fatalError) {
     // A new Pouch worker health-checks storage before returning a null diagnostic.
-    const diagnostic = await browser.runtime
+    const diagnostic: unknown = await browser.runtime
       .sendMessage(POUCH_ID, { type: "getStorageDiagnostic" })
       .catch(() => undefined);
     if (diagnostic !== null || generation !== currentGeneration) return;

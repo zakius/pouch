@@ -2,7 +2,8 @@ import { logger } from "../../../utils/logger";
 import { Effect, Semaphore } from "effect";
 import * as v from "valibot";
 import { wallabagConfigSchema, wallabagSettingsSchema } from "../../../utils/settings-schemas";
-import { TokenManager, parseOAuthToken, tokenManager } from "../../token-manager";
+import type { TokenManager } from "../../token-manager";
+import { parseOAuthToken, tokenManager } from "../../token-manager";
 import {
   checkHostPermission,
   requestJson,

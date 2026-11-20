@@ -1,3 +1,4 @@
+import * as v from "valibot";
 import {
   assertStorageHealthy,
   setLocal,
@@ -42,6 +43,17 @@ export interface FilterListResult {
 const CACHE_KEY = "filter_list_url_cleaning_rules";
 const CACHE_VERSION = "1.1";
 const CACHE_EXPIRY_KEY = "filter_list_cache_expiry";
+
+const cachedRulesSchema = v.array(
+  v.object({
+    pattern: v.string(),
+    params: v.array(v.string()),
+    domain: v.optional(v.string()),
+    isRegex: v.optional(v.boolean()),
+    isException: v.optional(v.boolean()),
+    scope: v.optional(v.picklist(["domain", "url"])),
+  }),
+);
 const CACHE_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 let filterListSources: FilterListSource[] = [];
@@ -135,16 +147,22 @@ export async function loadCachedFilterLists(): Promise<FilterRule[] | null> {
       `${CACHE_KEY}_version`,
       CACHE_EXPIRY_KEY,
     ]);
-    const cachedRules = result[CACHE_KEY];
-    const cachedVersion = result[`${CACHE_KEY}_version`];
-    const cacheExpiry = result[CACHE_EXPIRY_KEY];
+    const cachedRules = v.safeParse(cachedRulesSchema, result[CACHE_KEY]);
+    const cachedVersion: unknown = result[`${CACHE_KEY}_version`];
+    const storedExpiry: unknown = result[CACHE_EXPIRY_KEY];
+    const cacheExpiry = typeof storedExpiry === "number" ? storedExpiry : undefined;
 
-    if (cachedRules && cachedVersion === CACHE_VERSION && cacheExpiry && Date.now() < cacheExpiry) {
-      logger.info(`Loaded ${cachedRules.length} cached URL cleaning rules`);
-      return cachedRules;
+    if (
+      cachedRules.success &&
+      cachedVersion === CACHE_VERSION &&
+      cacheExpiry !== undefined &&
+      Date.now() < cacheExpiry
+    ) {
+      logger.info(`Loaded ${cachedRules.output.length} cached URL cleaning rules`);
+      return cachedRules.output;
     }
 
-    if (cacheExpiry && Date.now() >= cacheExpiry) {
+    if (cacheExpiry !== undefined && Date.now() >= cacheExpiry) {
       logger.info("Cache expired, will refresh filter lists");
     }
 

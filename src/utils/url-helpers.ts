@@ -1,6 +1,7 @@
 import { assertStorageHealthy } from "./fatal-storage";
 import { initializeUrlCleanerWithRemoteLists } from "./filter-list-manager";
 import { cleanUrl as filterListCleanUrl, filterRuleCount } from "./filter-list-url-cleaner";
+import { logger } from "./logger";
 
 // Offline starts load zero rules without throwing, so retry until rules arrive, at most every 5 minutes.
 const INIT_RETRY_MS = 5 * 60_000;
@@ -15,7 +16,7 @@ export async function initializeUrlCanonizer(): Promise<void> {
     await initializeUrlCleanerWithRemoteLists();
   } catch (error) {
     assertStorageHealthy();
-    console.warn("Failed to initialize filter list cleaner:", error);
+    logger.warn("Failed to initialize filter list cleaner:", error);
   }
 
   urlCanonizerInitialized = filterRuleCount() > 0;
@@ -44,7 +45,9 @@ function handleOpenRedirects(url: URL): URL {
         if (newUrl.protocol === "http:" || newUrl.protocol === "https:") {
           return newUrl;
         }
-      } catch {}
+      } catch {
+        // Not a URL: try the next parameter.
+      }
     }
   }
   return url;
@@ -61,7 +64,9 @@ function deAmpUrl(url: URL): URL {
         const newUrl = new URL(`${secure ? "https" : "http"}://${pathParts.join("/")}`);
         newUrl.search = url.search;
         return newUrl;
-      } catch {}
+      } catch {
+        // Not a valid AMP target: keep the original URL.
+      }
     }
   }
   return url;
@@ -76,7 +81,7 @@ function canonicalizeTwitterUrl(url: URL): URL {
 function canonicalizeYoutubeUrl(url: URL): URL {
   const youtubeDomains = ["youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"];
   if (youtubeDomains.includes(url.hostname.toLowerCase())) {
-    let videoId: string | null = null;
+    let videoId: string | null;
     if (url.pathname.startsWith("/shorts/")) {
       videoId = url.pathname.split("/")[2];
     } else if (url.hostname.endsWith("youtu.be")) {

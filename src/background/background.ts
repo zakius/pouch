@@ -83,14 +83,14 @@ const browserCall = <A>(operation: string, call: () => Promise<A>) =>
  * The boundary of every listener: runs its Effect, then logs and optionally presents the
  * classified failure (operational, fatal storage, interruption or defect).
  */
-function run<A, E>(
+function run<A, E extends Error>(
   label: string,
   effect: Effect.Effect<A, E>,
   present?: (error: Error) => void,
 ): Promise<A | undefined> {
-  return runOperation(effect).catch((error: Error) => {
+  return runOperation(effect).catch((error: unknown) => {
     logger.error(`${label} failed:`, error);
-    present?.(error);
+    present?.(error instanceof Error ? error : new Error(String(error)));
     return undefined;
   });
 }
