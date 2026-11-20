@@ -21,7 +21,8 @@ class OperationError extends Error {
   withMutation(mutation?: MutationOutcome): this {
     if (!mutation) return this;
     // Effects can reuse failures; invocation outcomes must not change the supplied error.
-    const failure: this = Object.setPrototypeOf(new Error(), Object.getPrototypeOf(this));
+    const failure = new Error() as this;
+    Object.setPrototypeOf(failure, Object.getPrototypeOf(this) as object);
     Object.defineProperties(failure, Object.getOwnPropertyDescriptors(this));
     failure.mutation = { ...mutation };
     failure.message =
@@ -280,7 +281,7 @@ export class OperationInterrupted extends Error {
 }
 
 /** The browser boundary: classifies the Exit into a typed failure, fatal storage, interruption or defect. */
-export async function runOperation<A, E>(
+export async function runOperation<A, E extends Error>(
   operation: Effect.Effect<A, E>,
   signal?: AbortSignal,
 ): Promise<A> {

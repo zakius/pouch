@@ -8,7 +8,7 @@ import {
   raindropSettingsSchema,
   wallabagSettingsSchema,
 } from "./settings-schemas";
-import { baseSettingsSchema } from "./base-settings-schema";
+import type { baseSettingsSchema } from "./base-settings-schema";
 import { LogLevel } from "./log-levels";
 import { logger } from "./logger";
 export const settingsSchema = v.variant("backend", [

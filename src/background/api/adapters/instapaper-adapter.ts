@@ -3,7 +3,8 @@ import * as v from "valibot";
 import { instapaperConfigSchema, instapaperSettingsSchema } from "../../../utils/settings-schemas";
 export { instapaperConfigSchema, instapaperSettingsSchema };
 import type { Article } from "../../../types/common";
-import { TokenManager, tokenManager } from "../../token-manager";
+import type { TokenManager } from "../../token-manager";
+import { tokenManager } from "../../token-manager";
 import { requestJson, validate } from "../effect-api-client";
 import {
   BrowserFailure,

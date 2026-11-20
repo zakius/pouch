@@ -1,7 +1,63 @@
 {
 	"$schema": "./node_modules/oxlint/configuration_schema.json",
+	"plugins": ["typescript", "unicorn", "oxc", "import", "promise"],
 	"categories": {
 		"correctness": "error"
-	}
-}
+	},
+	"rules": {
+		"typescript/no-unsafe-argument": "error",
+		"typescript/no-unsafe-assignment": "error",
+		"typescript/no-unsafe-call": "error",
+		"typescript/no-unsafe-member-access": "error",
+		"typescript/no-unsafe-return": "error",
+		"typescript/no-explicit-any": "error",
+		"typescript/no-unnecessary-type-assertion": "error",
+		"typescript/no-non-null-assertion": "error",
+		"typescript/no-confusing-non-null-assertion": "error",
+		"typescript/ban-ts-comment": "error",
+		"typescript/switch-exhaustiveness-check": [
+			"error",
+			{ "allowDefaultCaseForExhaustiveSwitch": true, "considerDefaultExhaustiveForUnions": true }
+		],
+		"typescript/consistent-type-imports": "error",
+		"typescript/no-import-type-side-effects": "error",
 
+		"typescript/no-misused-promises": [
+			"error",
+			{ "checksVoidReturn": { "arguments": false } }
+		],
+		"typescript/return-await": ["error", "error-handling-correctness-only"],
+		"typescript/only-throw-error": "error",
+		"typescript/use-unknown-in-catch-callback-variable": "error",
+		"no-promise-executor-return": "error",
+		"prefer-promise-reject-errors": "error",
+		"promise/no-multiple-resolved": "error",
+		"promise/no-return-in-finally": "error",
+		"unicorn/no-useless-promise-resolve-reject": "error",
+		"preserve-caught-error": "error",
+		"no-empty": "error",
+
+		"eqeqeq": "error",
+		"array-callback-return": "error",
+		"no-fallthrough": "error",
+		"no-case-declarations": "error",
+		"no-self-compare": "error",
+		"no-useless-assignment": "error",
+		"no-prototype-builtins": "error",
+		"no-eval": "error",
+		"no-implied-eval": "error",
+		"no-var": "error",
+		"prefer-const": "error",
+		"import/no-self-import": "error",
+		"oxc/bad-bitwise-operator": "error",
+		"oxc/misrefactored-assign-op": "error",
+		"unicorn/no-array-fill-with-reference-type": "error",
+		"no-console": "error"
+	},
+	"overrides": [
+		{
+			"files": ["src/utils/logger.ts"],
+			"rules": { "no-console": "off" }
+		}
+	]
+}

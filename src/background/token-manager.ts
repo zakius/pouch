@@ -447,9 +447,9 @@ export class TokenManager {
     function* () {
       const result = yield* localRead("load tokens", this.config.storageKey).pipe(
         Effect.catchTag("BrowserFailure", (error) =>
-          Effect.sync(() => {
+          Effect.sync((): Record<string, unknown> => {
             logger.error("Failed to load tokens from storage:", error);
-            return {} as Record<string, unknown>;
+            return {};
           }),
         ),
       );

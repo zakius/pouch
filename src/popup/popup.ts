@@ -8,10 +8,10 @@ import type { Article } from "../types/common";
 import { logger } from "../utils/logger";
 
 const searchInput = document.getElementById("search") as HTMLInputElement | null;
-const articlesContainer = document.getElementById("articles") as HTMLElement | null;
+const articlesContainer = document.getElementById("articles");
 const prevButton = document.getElementById("prev-page") as HTMLButtonElement | null;
 const nextButton = document.getElementById("next-page") as HTMLButtonElement | null;
-const pageInfo = document.getElementById("page-info") as HTMLElement | null;
+const pageInfo = document.getElementById("page-info");
 const pageSelect = document.getElementById("page-select") as HTMLSelectElement | null;
 const savePageButton = document.getElementById("save-page-button") as HTMLButtonElement | null;
 const articleListContainer = document.getElementById("article-list");
@@ -123,7 +123,7 @@ async function loadRecentArticles(): Promise<void> {
     logger.error("Runtime error:", error);
     if (isStorageStopped()) return;
     showError("Could not connect to the background service.", false);
-    throw new Error("Could not connect to the background service.");
+    throw new Error("Could not connect to the background service.", { cause: error });
   } finally {
     isLoadingArticles = false;
     if (articleListContainer) {
@@ -211,7 +211,7 @@ function handleBodyClick(event: MouseEvent): void {
 
   const deleteButton = target.classList.contains("delete-button")
     ? (target as HTMLButtonElement)
-    : (target.closest(".delete-button") as HTMLButtonElement | null);
+    : target.closest<HTMLButtonElement>(".delete-button");
   if (deleteButton) {
     event.preventDefault();
     event.stopPropagation();
@@ -264,7 +264,7 @@ function handleBodyClick(event: MouseEvent): void {
 function disarmDeleteButton(): void {
   clearTimeout(deleteArmTimer);
   deleteArmTimer = undefined;
-  const armed = document.querySelector(".delete-button.is-arming") as HTMLButtonElement | null;
+  const armed = document.querySelector<HTMLButtonElement>(".delete-button.is-arming");
   if (!armed) return;
   armed.classList.remove("is-arming");
   armed.textContent = "×";

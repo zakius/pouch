@@ -116,15 +116,15 @@ async function loadBackend(backend: Settings["backend"]): Promise<void> {
     const fieldContainer = document.createElement("div");
     fieldContainer.className = "form-group";
     const label = document.createElement("label");
-    label.htmlFor = field.name as string;
+    label.htmlFor = field.name;
     label.textContent = field.label;
     const input = document.createElement("input");
-    input.type = (field.name as string).toLowerCase().includes("password") ? "password" : "text";
-    input.id = field.name as string;
-    input.name = field.name as string;
+    input.type = field.name.toLowerCase().includes("password") ? "password" : "text";
+    input.id = field.name;
+    input.name = field.name;
     input.className = "form-control";
     const config = configDrafts[backend] || configCache[backend] || {};
-    input.value = (config as Record<string, string>)[field.name as string] || "";
+    input.value = config[field.name] || "";
     fieldContainer.appendChild(label);
     fieldContainer.appendChild(input);
     form.appendChild(fieldContainer);
@@ -170,16 +170,17 @@ async function handleSaveSettings(): Promise<void> {
       showStatus(missingPermissionMessage(settings), "error");
       return;
     }
-    const response = await browser.runtime.sendMessage({
+    const response: unknown = await browser.runtime.sendMessage({
       type: "saveSettings",
       payload: { settings },
     });
     if (showStorageDiagnostic(response) || isStorageStopped()) return;
-    if (response?.success) {
+    const outcome = parseOutcome(response);
+    if (outcome.success) {
       await pruneBackendPermissions(settings);
       showStatus("Settings saved successfully", "success");
     } else {
-      showStatus(`Error saving settings: ${response?.error || "Unknown error"}`, "error");
+      showStatus(`Error saving settings: ${outcome.error}`, "error");
     }
   } catch (error: unknown) {
     logger.warn("Failed to notify background script about settings update:", error);
@@ -188,6 +189,17 @@ async function handleSaveSettings(): Promise<void> {
   } finally {
     dom.saveButton.disabled = isStorageStopped();
   }
+}
+const outcomeSchema = v.object({
+  success: v.optional(v.boolean()),
+  error: v.optional(v.string()),
+});
+
+/** Reads a background reply to saveSettings or testConnection. */
+function parseOutcome(response: unknown): { success: boolean; error: string } {
+  const parsed = v.safeParse(outcomeSchema, response);
+  const error = (parsed.success && parsed.output.error) || "Unknown error";
+  return { success: parsed.success && parsed.output.success === true, error };
 }
 async function handleTestConnection(): Promise<void> {
   if (isStorageStopped()) return;
@@ -203,15 +215,16 @@ async function handleTestConnection(): Promise<void> {
       showStatus(missingPermissionMessage(settings), "error");
       return;
     }
-    const response = await browser.runtime.sendMessage({
+    const response: unknown = await browser.runtime.sendMessage({
       type: "testConnection",
       payload: { settings },
     });
     if (showStorageDiagnostic(response) || isStorageStopped()) return;
-    if (response.success) {
+    const outcome = parseOutcome(response);
+    if (outcome.success) {
       showStatus("Connection successful! Remember to save your settings.", "success");
     } else {
-      showStatus(`Connection failed: ${response.error}`, "error");
+      showStatus(`Connection failed: ${outcome.error}`, "error");
     }
   } catch (error) {
     logger.error("Error testing connection:", error);
@@ -229,7 +242,7 @@ function getSettingsFromForm(): Settings | null {
   };
   const apiConfig: Record<string, string> = {};
   for (const field of backendForms[dom.backendSelect.value as Settings["backend"]].formConfig) {
-    apiConfig[field.name as string] = getInputValue(field.name as string);
+    apiConfig[field.name] = getInputValue(field.name);
   }
   const rawSettings = {
     backend: dom.backendSelect.value,
