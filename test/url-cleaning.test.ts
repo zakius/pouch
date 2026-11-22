@@ -1,4 +1,5 @@
-import { test, expect, describe, afterEach } from "bun:test";
+import { test, expect, describe, afterEach, mock, spyOn } from "bun:test";
+import * as filterListCleaner from "../src/utils/filter-list-url-cleaner";
 import {
 	cleanUrl,
 	filterRuleCount,
@@ -14,8 +15,13 @@ import {
 	saveCachedFilterLists,
 	setFilterListSources,
 } from "../src/utils/filter-list-manager";
+import * as filterListParser from "../src/utils/filter-list-parser";
 import { matchesPattern, parseCompleteFilterList } from "../src/utils/filter-list-parser";
-import { canonicalizeUrl, clearCanonicalUrlCache } from "../src/utils/url-helpers";
+import {
+	CANONICAL_CACHE_LIMIT,
+	canonicalizeUrl,
+	clearCanonicalUrlCache,
+} from "../src/utils/url-helpers";
 import testFilterContent from "./test-data/test-filters.txt";
 
 await initializeWithRawFilterLists([
@@ -547,5 +553,98 @@ describe("Issue #111: $removeparam modifiers, regexes, path tails, and post-unwr
 				"https://www.google.com/amp/s/example.com/article?utm_medium=amp&ref=top&keep=1",
 			),
 		).toBe("https://example.com/article?keep=1");
+	});
+});
+
+describe("Issue #112: filter short-circuit and canonicalUrlCache LRU eviction", () => {
+	const originalBrowser = Object.getOwnPropertyDescriptor(globalThis, "browser");
+
+	function withLocalStorage() {
+		const storage: Record<string, unknown> = {};
+		Object.assign(globalThis, {
+			browser: {
+				storage: {
+					local: {
+						get: async (keys?: string | string[] | null) => {
+							if (!keys) return { ...storage };
+							const names = typeof keys === "string" ? [keys] : keys;
+							return Object.fromEntries(
+								names.filter((k) => k in storage).map((k) => [k, storage[k]]),
+							);
+						},
+						set: async (values: Record<string, unknown>) => {
+							Object.assign(storage, values);
+						},
+						remove: async (keys: string | string[]) => {
+							for (const key of typeof keys === "string" ? [keys] : keys) delete storage[key];
+						},
+					},
+				},
+			},
+		});
+		return storage;
+	}
+
+	afterEach(async () => {
+		mock.restore();
+		if (originalBrowser) Object.defineProperty(globalThis, "browser", originalBrowser);
+		else Reflect.deleteProperty(globalThis, "browser");
+		resetFilterListSources();
+		clearCanonicalUrlCache();
+		await initializeWithRawFilterLists([{ name: "TestFilters", content: testFilterContent }]);
+	});
+
+	test("applyFilterRules short-circuits on query-less URLs without scanning filter rules", async () => {
+		await initializeWithRawFilterLists([{ name: "TestFilters", content: testFilterContent }]);
+		expect(filterRuleCount()).toBeGreaterThan(0);
+
+		const matchSpy = spyOn(filterListParser, "matchesPattern");
+
+		for (const url of [
+			"https://example.com/article",
+			"https://example.com/article#section?utm_source=1",
+			"https://example.com/article?",
+		]) {
+			expect(await cleanUrl(url)).toBe(url);
+		}
+		expect(matchSpy).toHaveBeenCalledTimes(0);
+
+		expect(await cleanUrl("https://example.com/article?utm_source=feed&keep=1")).toBe(
+			"https://example.com/article?keep=1",
+		);
+		expect(matchSpy).toHaveBeenCalled();
+	});
+
+	test("canonicalUrlCache uses bounded LRU eviction instead of wiping all entries past capacity", async () => {
+		withLocalStorage();
+		await initializeWithRawFilterLists([
+			{ name: "SimpleRules", content: "$removeparam=utm_source" },
+		]);
+		clearCanonicalUrlCache();
+
+		const cleanSpy = spyOn(filterListCleaner, "cleanUrl");
+
+		// Fill cache to capacity.
+		for (let i = 0; i < CANONICAL_CACHE_LIMIT; i++) {
+			await canonicalizeUrl(`https://example.com/item-${i}`);
+		}
+		expect(cleanSpy).toHaveBeenCalledTimes(CANONICAL_CACHE_LIMIT);
+
+		// Touch the oldest entry so it becomes most-recently-used.
+		await canonicalizeUrl("https://example.com/item-0");
+		expect(cleanSpy).toHaveBeenCalledTimes(CANONICAL_CACHE_LIMIT);
+
+		// Insert one more entry beyond capacity: only the least-recently-used entry (item-1) is evicted.
+		await canonicalizeUrl(`https://example.com/item-${CANONICAL_CACHE_LIMIT}`);
+		expect(cleanSpy).toHaveBeenCalledTimes(CANONICAL_CACHE_LIMIT + 1);
+
+		// Hot entry (item-0) and recent entry (item-{LIMIT-1}) must still be cached.
+		await canonicalizeUrl("https://example.com/item-0");
+		await canonicalizeUrl(`https://example.com/item-${CANONICAL_CACHE_LIMIT - 1}`);
+		expect(cleanSpy).toHaveBeenCalledTimes(CANONICAL_CACHE_LIMIT + 1);
+
+		// Evicted LRU entry (item-1) must miss and recompute.
+		await canonicalizeUrl("https://example.com/item-1");
+		expect(cleanSpy).toHaveBeenCalledTimes(CANONICAL_CACHE_LIMIT + 2);
 	});
 });

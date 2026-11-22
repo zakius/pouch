@@ -7,6 +7,9 @@ import {
 import { logger } from "./logger";
 
 let filterRules: FilterRule[] = [];
+let regularFilterRules: FilterRule[] = [];
+let exceptionFilterRules: FilterRule[] = [];
+let rulesGeneration = 0;
 let isInitialized = false;
 const compiledRegexCache = new Map<string, RegExp | null>();
 
@@ -31,9 +34,16 @@ export function filterRuleCount(): number {
   return filterRules.length;
 }
 
+export function filterRulesGeneration(): number {
+  return rulesGeneration;
+}
+
 export function initializeWithFilterRules(rules: FilterRule[]): void {
   filterRules = rules;
+  regularFilterRules = rules.filter((rule) => !rule.isException);
+  exceptionFilterRules = rules.filter((rule) => rule.isException);
   compiledRegexCache.clear();
+  rulesGeneration++;
   isInitialized = true;
 }
 
@@ -62,6 +72,9 @@ export async function initializeWithRawFilterLists(
   } catch (error) {
     logger.error("Failed to initialize URL cleaning with raw content:", error);
     filterRules = [];
+    regularFilterRules = [];
+    exceptionFilterRules = [];
+    rulesGeneration++;
     isInitialized = false;
   }
 }
@@ -69,25 +82,13 @@ export async function initializeWithRawFilterLists(
 function applyFilterRules(urlString: string): string {
   try {
     const url = new URL(urlString);
+    if (!url.search) {
+      return urlString;
+    }
+
     const hostname = url.hostname;
 
-    const regularRules = filterRules.filter((rule) => !rule.isException);
-    const exceptionRules = filterRules.filter((rule) => rule.isException);
-
-    const applicableRegularRules = regularRules.filter((rule) => {
-      if (rule.pattern.startsWith("?")) {
-        const paramMatch = rule.pattern.match(/\?([^=]+)=([^$^]+)/);
-        if (paramMatch) {
-          const paramName = paramMatch[1];
-          const paramValue = paramMatch[2];
-          return url.searchParams.get(paramName) === paramValue;
-        }
-        return false;
-      }
-      return matchesPattern(hostname, rule.pattern, url.href);
-    });
-
-    const applicableExceptionRules = exceptionRules.filter((rule) => {
+    const applicableRegularRules = regularFilterRules.filter((rule) => {
       if (rule.pattern.startsWith("?")) {
         const paramMatch = rule.pattern.match(/\?([^=]+)=([^$^]+)/);
         if (paramMatch) {
@@ -104,9 +105,18 @@ function applyFilterRules(urlString: string): string {
       return urlString;
     }
 
-    if (!url.search) {
-      return urlString;
-    }
+    const applicableExceptionRules = exceptionFilterRules.filter((rule) => {
+      if (rule.pattern.startsWith("?")) {
+        const paramMatch = rule.pattern.match(/\?([^=]+)=([^$^]+)/);
+        if (paramMatch) {
+          const paramName = paramMatch[1];
+          const paramValue = paramMatch[2];
+          return url.searchParams.get(paramName) === paramValue;
+        }
+        return false;
+      }
+      return matchesPattern(hostname, rule.pattern, url.href);
+    });
 
     const paramsToRemove = new Set<string>();
     const regexesToRemove: RegExp[] = [];

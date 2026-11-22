@@ -1,6 +1,10 @@
 import { FatalStorageError, assertStorageHealthy } from "./fatal-storage";
 import { fetchAndApplyRemoteFilterLists, hydrateFilterRulesFromCache } from "./filter-list-manager";
-import { cleanUrl as filterListCleanUrl, filterRuleCount } from "./filter-list-url-cleaner";
+import {
+  cleanUrl as filterListCleanUrl,
+  filterRuleCount,
+  filterRulesGeneration,
+} from "./filter-list-url-cleaner";
 import { logger } from "./logger";
 
 // Offline starts load zero rules without throwing, so retry until rules arrive, at most every 5 minutes.
@@ -204,23 +208,50 @@ function canonicalizeAmazonUrl(url: URL): URL {
   return url;
 }
 
-// ponytail: crude cap, swap for an LRU if 1000 entries ever turns out to be too few
+export const CANONICAL_CACHE_LIMIT = 5000;
 const canonicalUrlCache = new Map<string, string>();
-const CANONICAL_CACHE_LIMIT = 1000;
+let canonicalCacheGeneration = 0;
+let cachedRulesGeneration = filterRulesGeneration();
+
+function syncCacheWithFilterRules(): void {
+  const currentRulesGeneration = filterRulesGeneration();
+  if (cachedRulesGeneration !== currentRulesGeneration) {
+    canonicalUrlCache.clear();
+    cachedRulesGeneration = currentRulesGeneration;
+  }
+}
+
+export function getCanonicalCacheGeneration(): number {
+  return canonicalCacheGeneration + filterRulesGeneration();
+}
 
 export function clearCanonicalUrlCache(): void {
   canonicalUrlCache.clear();
+  cachedRulesGeneration = filterRulesGeneration();
+  canonicalCacheGeneration++;
 }
 
 export async function canonicalizeUrl(urlString: string): Promise<string> {
   assertStorageHealthy();
+  syncCacheWithFilterRules();
   const cached = canonicalUrlCache.get(urlString);
   if (cached !== undefined) {
+    canonicalUrlCache.delete(urlString);
+    canonicalUrlCache.set(urlString, cached);
     return cached;
   }
   try {
     await initializeUrlCanonizer();
+    syncCacheWithFilterRules();
 
+    const cachedAfterInit = canonicalUrlCache.get(urlString);
+    if (cachedAfterInit !== undefined) {
+      canonicalUrlCache.delete(urlString);
+      canonicalUrlCache.set(urlString, cachedAfterInit);
+      return cachedAfterInit;
+    }
+
+    const rulesGenBeforeClean = filterRulesGeneration();
     let url = new URL(urlString);
 
     const maxRedirects = 5;
@@ -238,15 +269,23 @@ export async function canonicalizeUrl(urlString: string): Promise<string> {
     url = canonicalizeYoutubeUrl(url);
     url = canonicalizeAmazonUrl(url);
 
-    // A result computed without filter rules would outlive the rules' arrival.
-    if (filterRuleCount() > 0) {
-      if (canonicalUrlCache.size >= CANONICAL_CACHE_LIMIT) {
-        canonicalUrlCache.clear();
+    const canonicalString = url.toString();
+
+    // A result computed without filter rules (or before a concurrent rule update) would outlive the rules' arrival.
+    if (filterRuleCount() > 0 && filterRulesGeneration() === rulesGenBeforeClean) {
+      syncCacheWithFilterRules();
+      if (canonicalUrlCache.has(urlString)) {
+        canonicalUrlCache.delete(urlString);
+      } else if (canonicalUrlCache.size >= CANONICAL_CACHE_LIMIT) {
+        const oldestKey = canonicalUrlCache.keys().next().value;
+        if (oldestKey !== undefined) {
+          canonicalUrlCache.delete(oldestKey);
+        }
       }
-      canonicalUrlCache.set(urlString, url.toString());
+      canonicalUrlCache.set(urlString, canonicalString);
     }
 
-    return url.toString();
+    return canonicalString;
   } catch {
     assertStorageHealthy();
     return urlString;
