@@ -979,3 +979,101 @@ test("cold-start Wallabag evicts legacy persisted token without accountIdentityH
   expect(fetchMock).toHaveBeenCalledTimes(2);
   expect(tokens.getTokenMetadata("wallabag")?.accountIdentityHash).toBe(settingsIdentityHash);
 });
+
+test("Wallabag accepts v2 tagged entries and nullable fields across sync, testConnection, and saveArticle", async () => {
+  const tokens = new TokenManager({ persist: false });
+  await runOperation(tokens.storeToken("wallabag", oldToken));
+  const taggedEntry = {
+    id: 101,
+    title: null,
+    url: "https://tagged.example/post",
+    created_at: "2026-02-01T10:00:00Z",
+    domain_name: null,
+    reading_time: 5,
+    tags: [{ id: 1, label: "reading", slug: "reading" }],
+  };
+  const missingUrlEntry = {
+    id: 102,
+    title: "Orphan entry",
+    url: null,
+    created_at: "2026-02-01T11:00:00Z",
+    domain_name: null,
+    tags: [{ id: 2, label: "later", slug: "later" }],
+  };
+  const savedEntryWithNullFields = {
+    id: 103,
+    title: null,
+    url: null,
+    created_at: "2026-02-01T12:00:00Z",
+    domain_name: null,
+    tags: [{ id: 1, label: "reading", slug: "reading" }],
+  };
+
+  spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+    if (init?.method === "POST") return json(savedEntryWithNullFields);
+    return json(snapshot([taggedEntry, missingUrlEntry], 2));
+  });
+
+  const api = await runOperation(createWallabagAdapter(settings, tokens));
+  expect(await runOperation(api.testConnection)).toBe(true);
+
+  const synced = await runOperation(api.sync());
+  expect(synced.articles).toEqual([
+    {
+      id: "101",
+      title: "https://tagged.example/post",
+      url: "https://tagged.example/post",
+      created_at: "2026-02-01T10:00:00Z",
+    },
+  ]);
+
+  const saved = await runOperation(
+    api.saveArticle({ url: "https://saved.example/page", title: "Saved Page" }),
+  );
+  expect(saved).toEqual({
+    id: "103",
+    title: "https://saved.example/page",
+    url: "https://saved.example/page",
+    created_at: "2026-02-01T12:00:00Z",
+  });
+});
+
+test("Wallabag saveArticle omits empty title and includes non-empty title in POST body", async () => {
+  const tokens = new TokenManager({ persist: false });
+  await runOperation(tokens.storeToken("wallabag", oldToken));
+  const bodies: Record<string, unknown>[] = [];
+  spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+    bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    return json(item);
+  });
+
+  const api = await runOperation(createWallabagAdapter(settings, tokens));
+  await runOperation(api.saveArticle({ url: "https://article.example/1", title: "" }));
+  await runOperation(api.saveArticle({ url: "https://article.example/2", title: "   " }));
+  await runOperation(api.saveArticle({ url: "https://article.example/3", title: "Explicit Title" }));
+
+  expect(bodies).toEqual([
+    { url: "https://article.example/1" },
+    { url: "https://article.example/2" },
+    { url: "https://article.example/3", title: "Explicit Title" },
+  ]);
+  expect("title" in bodies[0]!).toBe(false);
+  expect("title" in bodies[1]!).toBe(false);
+});
+
+test("Wallabag saveArticle treats unexpected 200 OK JSON as InvalidResponseFailure with unknown outcome", async () => {
+  const tokens = new TokenManager({ persist: false });
+  await runOperation(tokens.storeToken("wallabag", oldToken));
+  const fetchMock = spyOn(globalThis, "fetch").mockResolvedValue(json({ ok: true }));
+
+  const api = await runOperation(createWallabagAdapter(settings, tokens));
+  const result = await failure(api.saveArticle({ url: item.url, title: item.title }));
+
+  expect(result.code).toBe("InvalidResponseFailure");
+  expect(result.details).toMatchObject({
+    remoteOperation: "save",
+    remoteOutcome: "unknown",
+  });
+  expect(result.details).not.toMatchObject({ remoteOutcome: "succeeded" });
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});

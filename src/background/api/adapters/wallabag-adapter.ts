@@ -23,31 +23,14 @@ import type { SavingArticle, SyncOptions } from "../read-it-later-adapter";
 export { wallabagConfigSchema, wallabagSettingsSchema };
 export type WallabagSettings = v.InferInput<typeof wallabagSettingsSchema>;
 export type WallabagConfig = v.InferInput<typeof wallabagConfigSchema>;
-const wallabagTagSchema = v.object({
-  id: v.number(),
-  name: v.string(),
-});
-
 const wallabagItemSchema = v.object({
   id: v.union([
     v.pipe(v.number(), v.safeInteger(), v.minValue(1)),
     v.pipe(v.string(), v.regex(/^\d+$/)),
   ]),
-  title: v.string(),
-  url: v.string(),
+  title: v.nullish(v.string()),
+  url: v.nullish(v.string()),
   created_at: v.string(),
-  tags: v.optional(v.array(wallabagTagSchema)),
-  content: v.optional(v.nullable(v.string())),
-  excerpt: v.optional(v.string()),
-  domain_name: v.optional(v.string()),
-  is_archived: v.optional(v.union([v.boolean(), v.number()])),
-  is_starred: v.optional(v.union([v.boolean(), v.number()])),
-  language: v.optional(v.nullable(v.string())),
-  reading_time: v.optional(v.number()),
-  preview_picture: v.optional(v.nullable(v.string())),
-  user_name: v.optional(v.string()),
-  user_email: v.optional(v.string()),
-  user_id: v.optional(v.number()),
 });
 
 const wallabagErrorSchema = v.object({
@@ -55,8 +38,6 @@ const wallabagErrorSchema = v.object({
   error_description: v.optional(v.string()),
   message: v.optional(v.string()),
 });
-
-const wallabagSaveResponseSchema = v.union([wallabagItemSchema, wallabagErrorSchema]);
 
 const wallabagSyncResponseSchema = v.union([
   v.object({
@@ -190,12 +171,20 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
       beforeAttempt,
       authRetries: 2,
     });
-  const toArticle = (item: v.InferOutput<typeof wallabagItemSchema>): Article => ({
+  const toArticle = (item: v.InferOutput<typeof wallabagItemSchema>, url: string): Article => ({
     id: String(item.id),
-    title: item.title,
-    url: item.url,
+    title: item.title?.trim() || url,
+    url,
     created_at: item.created_at,
   });
+  const toArticles = (items: readonly v.InferOutput<typeof wallabagItemSchema>[]) => {
+    const result: Article[] = [];
+    for (const item of items) {
+      const url = item.url?.trim();
+      if (url) result.push(toArticle(item, url));
+    }
+    return result;
+  };
   const page = Effect.fn("wallabag.page")(function* (params: URLSearchParams) {
     const data = yield* request(`/api/entries.json?${params}`, { operation: "wallabag.sync" });
     const parsed = yield* validate(wallabagSyncResponseSchema, data, "wallabag.sync");
@@ -204,18 +193,23 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
   });
   const adapter: EffectAdapter = {
     saveArticle: Effect.fn("wallabag.save")(function* (article: SavingArticle) {
+      // Wallabag 2.7+ treats an empty title as null, overwriting the scraped title.
+      const body = article.title.trim()
+        ? { url: article.url, title: article.title }
+        : { url: article.url };
       const data = yield* request("/api/entries.json", {
         operation: "wallabag.save",
         mutation: "save",
+        timeoutMs: 60_000,
+        confirms: (payload) => v.is(wallabagItemSchema, payload),
         init: {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url: article.url, title: article.title }),
+          body: JSON.stringify(body),
         },
       });
-      const parsed = yield* validate(wallabagSaveResponseSchema, data, "wallabag.save");
-      if ("error" in parsed) return yield* Effect.fail(new HttpFailure("wallabag.save", 200));
-      return toArticle(parsed);
+      const parsed = yield* validate(wallabagItemSchema, data, "wallabag.save");
+      return toArticle(parsed, parsed.url?.trim() || article.url);
     }),
     deleteArticle: Effect.fn("wallabag.delete")(function* (id: number | string) {
       yield* request(`/api/entries/${encodeURIComponent(String(id))}.json`, {
@@ -255,12 +249,12 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
       if (mode === "update" && options?.lastSyncTimestamp)
         params.set("since", String(Math.floor(Date.parse(options.lastSyncTimestamp) / 1000)));
       const first = yield* page(params);
-      const articles = first._embedded.items.map(toArticle);
+      const articles = toArticles(first._embedded.items);
       const totalPages = Math.ceil(first.total / 30);
       for (let index = 2; index <= totalPages; index++) {
         params.set("page", String(index));
         const next = yield* page(params);
-        articles.push(...next._embedded.items.map(toArticle));
+        articles.push(...toArticles(next._embedded.items));
       }
       return {
         articles,
