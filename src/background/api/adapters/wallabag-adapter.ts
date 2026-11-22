@@ -36,6 +36,7 @@ const wallabagItemSchema = v.object({
   ]),
   title: v.nullish(v.string()),
   url: v.nullish(v.string()),
+  given_url: v.nullish(v.string()),
   created_at: v.string(),
 });
 
@@ -216,16 +217,31 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
         authRetries: 2,
       });
     });
-  const toArticle = (item: v.InferOutput<typeof wallabagItemSchema>, url: string): Article => ({
-    id: String(item.id),
-    title: item.title?.trim() || url,
-    url,
-    created_at: item.created_at,
-  });
+  const toArticle = (
+    item: v.InferOutput<typeof wallabagItemSchema>,
+    url: string,
+    fallbackGivenUrl?: string,
+  ): Article => {
+    const candidateGivenUrl = item.given_url?.trim();
+    const fallback = fallbackGivenUrl?.trim();
+    const givenUrl =
+      candidateGivenUrl && candidateGivenUrl !== url
+        ? candidateGivenUrl
+        : fallback && fallback !== url
+          ? fallback
+          : undefined;
+    return {
+      id: String(item.id),
+      title: item.title?.trim() || url,
+      url,
+      ...(givenUrl ? { givenUrl } : {}),
+      created_at: item.created_at,
+    };
+  };
   const toArticles = (items: readonly v.InferOutput<typeof wallabagItemSchema>[]) => {
     const result: Article[] = [];
     for (const item of items) {
-      const url = item.url?.trim();
+      const url = item.url?.trim() || item.given_url?.trim();
       if (url) result.push(toArticle(item, url));
     }
     return result;
@@ -254,7 +270,8 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
         },
       });
       const parsed = yield* validate(wallabagItemSchema, data, "wallabag.save");
-      return toArticle(parsed, parsed.url?.trim() || article.url);
+      const url = parsed.url?.trim() || parsed.given_url?.trim() || article.url;
+      return toArticle(parsed, url, article.url);
     }),
     deleteArticle: Effect.fn("wallabag.delete")(function* (id: number | string) {
       yield* request(`/api/entries/${encodeURIComponent(String(id))}.json`, {

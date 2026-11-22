@@ -487,3 +487,103 @@ test("findSaved with normalizeOnCompare false skips canonicalizeUrl completely",
   expect(await runOperation(repository.findSaved("https://example.com/raw-missing"))).toBeUndefined();
   expect(canonicalizeSpy).toHaveBeenCalledTimes(0);
 });
+
+test("givenUrl index never shadows a primary url match, cleans up on merge, and invalidates on filter refresh", async () => {
+  const { storage } = withStorage();
+  const redirected: Article = {
+    id: "1",
+    url: "https://dest.example/post?track=1",
+    givenUrl: "https://shared.example/page?track=1",
+    title: "Redirected",
+    created_at: "2026-01-01",
+  };
+  const primary: Article = {
+    id: "2",
+    url: "https://shared.example/page?track=1",
+    title: "Primary",
+    created_at: "2026-01-02",
+  };
+  storage[keys.articles] = [redirected, primary];
+
+  // Primary URL takes precedence over another article's givenUrl in raw mode.
+  const rawRepo = new ArticlesRepository();
+  rawRepo.initialize({ ...DEFAULT_SETTINGS, normalizeOnCompare: false });
+  expect(
+    (await runOperation(rawRepo.findSaved("https://shared.example/page?track=1")))?.id,
+  ).toBe("2");
+  expect(
+    (await runOperation(rawRepo.findSaved("https://dest.example/post?track=1")))?.id,
+  ).toBe("1");
+
+  // Primary URL also takes precedence in canonical mode.
+  setFilterListSources([{ name: "rules", url: dataUrl("$removeparam=track\n$removeparam=other") }]);
+  await initializeWithRawFilterLists([
+    { name: "rules", content: "$removeparam=track\n$removeparam=other" },
+  ]);
+  clearCanonicalUrlCache();
+
+  const canonicalRepo = new ArticlesRepository();
+  canonicalRepo.initialize({ ...DEFAULT_SETTINGS, normalizeOnCompare: true });
+  expect((await runOperation(canonicalRepo.findSaved("https://shared.example/page")))?.id).toBe(
+    "2",
+  );
+  expect((await runOperation(canonicalRepo.findSaved("https://dest.example/post")))?.id).toBe("1");
+
+  // Updating an entry via incremental sync removes stale givenUrl keys.
+  const trackedRedirected: Article = {
+    id: "10",
+    url: "https://dest.example/updated",
+    givenUrl: "https://cache.test/old-given?track=1&keep=1",
+    title: "Tracked Redirect",
+    created_at: "2026-01-03",
+  };
+  storage[keys.articles] = [trackedRedirected];
+  const syncRepo = new ArticlesRepository();
+  syncRepo.initialize({ ...DEFAULT_SETTINGS, normalizeOnCompare: true });
+  expect(
+    (await runOperation(syncRepo.findSaved("https://cache.test/old-given?keep=1")))?.id,
+  ).toBe("10");
+
+  // Filter refresh invalidates cached canonical givenUrl.
+  setFilterListSources([
+    { name: "rules", url: dataUrl("$removeparam=other\n@@||cache.test^$removeparam=track") },
+  ]);
+  await refreshFilterLists();
+  expect(
+    await runOperation(syncRepo.findSaved("https://cache.test/old-given?keep=1")),
+  ).toBeUndefined();
+  expect(
+    (await runOperation(syncRepo.findSaved("https://cache.test/old-given?track=1&keep=1")))?.id,
+  ).toBe("10");
+
+  // Incremental sync replacing id "10" with a new givenUrl cleans up the old givenUrl key.
+  spyOn(factory, "getReadyAdapter").mockReturnValue(
+    Effect.succeed({
+      sync: () =>
+        Effect.succeed({
+          articles: [
+            {
+              id: "10",
+              url: "https://dest.example/updated",
+              givenUrl: "https://new-given.example/entry",
+              title: "Tracked Redirect",
+              created_at: "2026-01-03",
+            },
+          ],
+          mode: "update",
+          metadata: {
+            totalFetched: 1,
+            totalProcessed: 1,
+            lastSyncTimestamp: "2026-01-04T00:00:00Z",
+          },
+        }),
+    }) as never,
+  );
+  await runOperation(syncRepo.syncWithAPI({ mode: "update" }));
+  expect(
+    await runOperation(syncRepo.findSaved("https://cache.test/old-given?track=1&keep=1")),
+  ).toBeUndefined();
+  expect(
+    (await runOperation(syncRepo.findSaved("https://new-given.example/entry")))?.id,
+  ).toBe("10");
+});

@@ -11,7 +11,8 @@ import { errorResponse } from "../src/background/runtime-message";
 import { hashAccountIdentity, TokenManager } from "../src/background/token-manager";
 import { DEFAULT_SETTINGS } from "../src/utils/settings";
 import { ArticlesRepository, getAccountStorageKeys } from "../src/background/articles-repository";
-import { initializeUrlCanonizer } from "../src/utils/url-helpers";
+import { clearCanonicalUrlCache, initializeUrlCanonizer } from "../src/utils/url-helpers";
+import { initializeWithRawFilterLists } from "../src/utils/filter-list-url-cleaner";
 import { resetFilterListSources, setFilterListSources } from "../src/utils/filter-list-manager";
 import type { WallabagSettings } from "../src/utils/settings-schemas";
 
@@ -1442,5 +1443,168 @@ for (const [inputUrl, expectedBase] of [
       `${expectedBase}/oauth/v2/token`,
       `${expectedBase}/api/entries.json?page=1&perPage=1&detail=metadata`,
     ]);
+  });
+}
+
+test("Wallabag sync preserves given_url and matches both original and redirected URLs", async () => {
+  await initializeWithRawFilterLists([{ name: "rules", content: "$removeparam=utm_source" }]);
+  clearCanonicalUrlCache();
+
+  const syncedItems = [
+    {
+      id: 201,
+      title: "Redirected Article",
+      url: "https://dest.example/full-article?utm_source=wallabag",
+      given_url: "https://short.example/abc?utm_source=feed",
+      created_at: "2026-03-01T00:00:00Z",
+    },
+    {
+      id: 202,
+      title: "Given Only",
+      url: null,
+      given_url: "https://given-only.example/post",
+      created_at: "2026-03-01T01:00:00Z",
+    },
+    {
+      id: 203,
+      title: "Same URL",
+      url: "https://same.example/post",
+      given_url: "https://same.example/post",
+      created_at: "2026-03-01T02:00:00Z",
+    },
+    {
+      id: 204,
+      title: "Null given_url",
+      url: "https://legacy-null.example/post",
+      given_url: null,
+      created_at: "2026-03-01T03:00:00Z",
+    },
+    {
+      id: 205,
+      title: "Absent given_url",
+      url: "https://legacy-absent.example/post",
+      created_at: "2026-03-01T04:00:00Z",
+    },
+  ];
+
+  spyOn(globalThis, "fetch").mockImplementation(async () => json(snapshot(syncedItems)));
+
+  for (const normalizeOnCompare of [false, true]) {
+    storage = {};
+    const tokens = new TokenManager({ persist: false });
+    await runOperation(tokens.storeToken("wallabag", oldToken));
+    const repo = new ArticlesRepository(tokens);
+    repo.initialize({ ...settings, normalizeOnCompare });
+
+    const synced = await runOperation(repo.syncWithAPI({ mode: "overwrite" }));
+    expect(synced.items).toHaveLength(5);
+
+    const redirected = synced.items.find((a) => a.id === "201");
+    expect(redirected?.url).toBe("https://dest.example/full-article?utm_source=wallabag");
+    expect(redirected?.givenUrl).toBe("https://short.example/abc?utm_source=feed");
+
+    const givenOnly = synced.items.find((a) => a.id === "202");
+    expect(givenOnly?.url).toBe("https://given-only.example/post");
+    expect(givenOnly?.givenUrl).toBeUndefined();
+
+    for (const id of ["203", "204", "205"]) {
+      expect(synced.items.find((a) => a.id === id)?.givenUrl).toBeUndefined();
+    }
+
+    // Both original given_url and resolved url match in both comparison modes.
+    expect(
+      (await runOperation(repo.findSaved("https://short.example/abc?utm_source=feed")))?.id,
+    ).toBe("201");
+    expect(
+      (await runOperation(repo.findSaved("https://dest.example/full-article?utm_source=wallabag")))
+        ?.id,
+    ).toBe("201");
+    expect((await runOperation(repo.findSaved("https://given-only.example/post")))?.id).toBe("202");
+    expect((await runOperation(repo.findSaved("https://legacy-null.example/post")))?.id).toBe(
+      "204",
+    );
+    expect((await runOperation(repo.findSaved("https://legacy-absent.example/post")))?.id).toBe(
+      "205",
+    );
+
+    if (normalizeOnCompare) {
+      expect(
+        (await runOperation(repo.findSaved("https://short.example/abc?utm_source=other")))?.id,
+      ).toBe("201");
+      expect((await runOperation(repo.findSaved("https://short.example/abc")))?.id).toBe("201");
+      expect((await runOperation(repo.findSaved("https://dest.example/full-article")))?.id).toBe(
+        "201",
+      );
+      expect(
+        (await runOperation(repo.findSaved("https://dest.example/full-article?utm_source=other")))
+          ?.id,
+      ).toBe("201");
+    } else {
+      expect(await runOperation(repo.findSaved("https://short.example/abc"))).toBeUndefined();
+      expect(
+        await runOperation(repo.findSaved("https://dest.example/full-article")),
+      ).toBeUndefined();
+    }
+  }
+});
+
+for (const responseGivenUrl of ["https://short.example/go", null, undefined] as const) {
+  test(`Wallabag saveArticle matches redirected URL immediately and toggles off (given_url=${String(responseGivenUrl)})`, async () => {
+    setFilterListSources([{ name: "empty", url: "data:text/plain,! empty" }]);
+    await initializeUrlCanonizer();
+    const tokens = new TokenManager({ persist: false });
+    await runOperation(tokens.storeToken("wallabag", oldToken));
+
+    let postCalls = 0;
+    let deleteCalls = 0;
+    spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      if (init?.method === "POST") {
+        postCalls++;
+        const payload: Record<string, unknown> = {
+          id: 301,
+          title: "Redirected Target",
+          url: "https://target.example/canonical-path/",
+          created_at: "2026-03-02T00:00:00Z",
+        };
+        if (responseGivenUrl !== undefined) payload.given_url = responseGivenUrl;
+        return json(payload);
+      }
+      if (init?.method === "DELETE") {
+        deleteCalls++;
+        return new Response(null, { status: 204 });
+      }
+      return json(snapshot([]));
+    });
+
+    const repo = new ArticlesRepository(tokens);
+    repo.initialize({ ...settings, normalizeOnCompare: false });
+
+    const originalUrl = "https://short.example/go";
+    const redirectedUrl = "https://target.example/canonical-path/";
+    const saved = await runOperation(
+      repo.saveArticle({ url: originalUrl, title: "Short Link" }),
+    );
+    expect(saved.id).toBe("301");
+    expect(saved.url).toBe(redirectedUrl);
+    expect(saved.givenUrl).toBe(originalUrl);
+    expect(postCalls).toBe(1);
+
+    // Matches both the submitted tab URL and the redirected URL immediately.
+    const foundByOriginal = await runOperation(repo.findSaved(originalUrl));
+    expect(foundByOriginal?.id).toBe("301");
+    expect((await runOperation(repo.findSaved(redirectedUrl)))?.id).toBe("301");
+
+    // Re-saving the original URL hits local cache without another POST.
+    const duplicate = await runOperation(
+      repo.saveArticle({ url: originalUrl, title: "Short Link" }),
+    );
+    expect(duplicate.id).toBe("301");
+    expect(postCalls).toBe(1);
+
+    // Toggling off via the original tab URL deletes the entry and clears both keys.
+    await runOperation(repo.deleteArticle(foundByOriginal!.id));
+    expect(deleteCalls).toBe(1);
+    expect(await runOperation(repo.findSaved(originalUrl))).toBeUndefined();
+    expect(await runOperation(repo.findSaved(redirectedUrl))).toBeUndefined();
   });
 }
