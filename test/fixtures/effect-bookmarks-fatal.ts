@@ -1,5 +1,8 @@
 import { expect } from "bun:test";
-import { ArticlesRepository } from "../../src/background/articles-repository";
+import {
+  ArticlesRepository,
+  getAccountStorageKeys,
+} from "../../src/background/articles-repository";
 import { FatalStorageFailure, runOperation } from "../../src/background/api/effect-adapter";
 import { getStorageDiagnostic, FatalStorageError } from "../../src/utils/fatal-storage";
 import { DEFAULT_SETTINGS } from "../../src/utils/settings";
@@ -7,6 +10,8 @@ import { setFilterListSources } from "../../src/utils/filter-list-manager";
 import { initializeUrlCanonizer } from "../../src/utils/url-helpers";
 import { errorResponse } from "../../src/background/runtime-message";
 
+const operation = process.argv[2];
+const key = getAccountStorageKeys(DEFAULT_SETTINGS).articles;
 let mutations = 0;
 let failWrites = false;
 Object.assign(globalThis, {
@@ -24,7 +29,19 @@ Object.assign(globalThis, {
     },
     storage: {
       local: {
-        get: async () => ({}),
+        get: async () =>
+          operation === "delete"
+            ? {
+                [key]: [
+                  {
+                    id: "12abcDEF_-xy",
+                    title: "Saved",
+                    url: "https://example.com",
+                    created_at: "2023-11-14T22:13:20.000Z",
+                  },
+                ],
+              }
+            : {},
         set: async () => {
           if (failWrites) throw new Error("quota exceeded secret=credentials");
         },
@@ -38,7 +55,6 @@ await initializeUrlCanonizer();
 failWrites = true;
 const repo = new ArticlesRepository();
 await repo.initialize(DEFAULT_SETTINGS);
-const operation = process.argv[2];
 const effect =
   operation === "save"
     ? repo.saveArticle({ url: "https://example.com", title: "Saved" })

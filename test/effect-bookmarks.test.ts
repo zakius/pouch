@@ -85,7 +85,7 @@ for (const id of ["12abcDEF_-xy", "18446744073709551616"]) {
 test("acquisition creates its folder before returning ready operations", async () => {
   tree = [];
   const api = await runOperation(createBookmarksAdapter(settings));
-  expect(created).toEqual([{ title: "Pouch", parentId: "unfiled_____" }]);
+  expect(created).toEqual([{ title: "Pouch" }]);
   await runOperation(api.saveArticle({ title: "Saved", url: "https://example.com" }));
   expect(created[1].parentId).toBe(bookmarkId);
 });
@@ -497,4 +497,282 @@ test("concurrent runners sharing a failure keep independent save and delete outc
     remoteOutcome: "succeeded",
   });
   expect(JSON.stringify(errorResponse(deleted))).toBe(deleteResponse);
+});
+
+test("acquisition uses bookmarks.search, skips managed/non-folder nodes, and prefers syncing folders", async () => {
+  const searchQueries: unknown[] = [];
+  let getTreeCalls = 0;
+  browser.bookmarks.getTree = async () => {
+    getTreeCalls++;
+    return [];
+  };
+  browser.bookmarks.search = async (query) => {
+    searchQueries.push(query);
+    return [
+      { id: "managed-folder", title: "Pouch", unmodifiable: "managed" as const },
+      { id: "bookmark-item", title: "Pouch", url: "https://pouch.example" },
+      { id: "separator-item", title: "Pouch", type: "separator" as const, url: "data:" },
+      { id: "local-folder", title: "Pouch", syncing: false } as browser.bookmarks.BookmarkTreeNode,
+      { id: "account-folder", title: "Pouch", syncing: true } as browser.bookmarks.BookmarkTreeNode,
+    ];
+  };
+
+  const api = await runOperation(createBookmarksAdapter(settings));
+  expect(searchQueries).toEqual([{ title: "Pouch" }]);
+  expect(getTreeCalls).toBe(0);
+  expect(created).toEqual([]);
+
+  await runOperation(api.saveArticle({ title: "Saved", url: "https://example.com" }));
+  expect(created).toEqual([
+    { parentId: "account-folder", title: "Saved", url: "https://example.com" },
+  ]);
+});
+
+test("acquisition creates Pouch folder without parentId when search finds only unmodifiable folders", async () => {
+  browser.bookmarks.search = async () => [
+    { id: "managed-folder", title: "Pouch", unmodifiable: "managed" as const },
+  ];
+
+  const api = await runOperation(createBookmarksAdapter(settings));
+  expect(created).toEqual([{ title: "Pouch" }]);
+  expect("parentId" in created[0]).toBe(false);
+  await runOperation(api.saveArticle({ title: "Saved", url: "https://example.com" }));
+  expect(created[1].parentId).toBe(bookmarkId);
+});
+
+test("mid-session folder deletion recovers automatically on saveArticle, sync, and testConnection", async () => {
+  let activeFolderId: string | undefined = "folder-v1";
+  let nextFolderSeq = 2;
+  const folderChildren = new Map<string, browser.bookmarks.BookmarkTreeNode[]>([["folder-v1", []]]);
+
+  browser.bookmarks.search = async () =>
+    activeFolderId ? [{ id: activeFolderId, title: "Pouch", type: "folder" }] : [];
+  browser.bookmarks.get = async (id) => {
+    const key = Array.isArray(id) ? id[0] : id;
+    if (key !== activeFolderId) throw new Error("No bookmarks found for the provided GUID.");
+    return [{ id: key, title: "Pouch", type: "folder" }];
+  };
+  browser.bookmarks.getChildren = async (id) => {
+    if (id !== activeFolderId) throw new Error("Can't find bookmark for id.");
+    return folderChildren.get(id) ?? [];
+  };
+  browser.bookmarks.create = async (details) => {
+    created.push(details);
+    if (!details.url) {
+      activeFolderId = `folder-v${nextFolderSeq++}`;
+      folderChildren.set(activeFolderId, []);
+      return { id: activeFolderId, title: details.title ?? "Pouch", type: "folder" };
+    }
+    if (details.parentId !== activeFolderId) {
+      throw new Error("Can't find parent bookmark for id.");
+    }
+    const item = {
+      id: `bm-${created.length}`,
+      parentId: details.parentId,
+      title: details.title ?? "",
+      url: details.url,
+      dateAdded: 1700000000000,
+    };
+    folderChildren.get(activeFolderId)!.push(item);
+    return item;
+  };
+
+  const api = await runOperation(createBookmarksAdapter(settings));
+
+  // Delete folder mid-session -> saveArticle recreates Pouch folder without parentId and retries once
+  activeFolderId = undefined;
+  const saved = await runOperation(api.saveArticle({ title: "After Delete", url: "https://example.com/1" }));
+  expect(saved.url).toBe("https://example.com/1");
+  expect(activeFolderId).toBe("folder-v2");
+  expect(created).toEqual([
+    { parentId: "folder-v1", title: "After Delete", url: "https://example.com/1" },
+    { title: "Pouch" },
+    { parentId: "folder-v2", title: "After Delete", url: "https://example.com/1" },
+  ]);
+
+  // Replace folder (e.g. Firefox Sync replaces folder GUID) -> sync re-locates new folderId and reads it
+  activeFolderId = "folder-synced";
+  folderChildren.set("folder-synced", [
+    {
+      id: "synced-bm",
+      title: "Synced",
+      url: "https://example.com/synced",
+      dateAdded: 1700000005000,
+    },
+  ]);
+  const synced = await runOperation(api.sync());
+  expect(synced.articles.map((a) => a.id)).toEqual(["synced-bm"]);
+
+  // Delete folder again -> testConnection recovers and returns true
+  activeFolderId = undefined;
+  expect(await runOperation(api.testConnection)).toBe(true);
+  expect(activeFolderId).toBe("folder-v3");
+});
+
+test("Chromium and Firefox missing-node error strings classify as missing-folder", async () => {
+  const api = await runOperation(createBookmarksAdapter(settings));
+  const messages = [
+    "Can't find bookmark for id.",
+    "Can't find parent bookmark for id.",
+    "No bookmarks found for the provided GUID.",
+    "parentGuid must be valid",
+    "root is null",
+  ];
+  for (const message of messages) {
+    browser.bookmarks.getChildren = () => Promise.reject(new Error(message));
+    const error = await runOperation(api.sync()).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(BrowserFailure);
+    expect(errorResponse(error).details).toMatchObject({ reason: "missing-folder" });
+  }
+});
+
+for (const missingMessage of [
+  "Can't find bookmark for id.",
+  "No bookmarks found for the provided GUID.",
+]) {
+  test(`deleteArticle treats already-removed bookmark (${missingMessage}) as idempotent success when folder exists`, async () => {
+    const key = getAccountStorageKeys(settings).articles;
+    const stored: Record<string, unknown> = {
+      [key]: [
+        {
+          id: "ghost-id",
+          title: "Ghost",
+          url: "https://example.com/ghost",
+          canonicalUrl: "https://example.com/ghost",
+          created_at: "2023-11-14T22:13:20.000Z",
+        },
+      ],
+    };
+    let folderExists = true;
+    let getCalls = 0;
+    Object.assign(browser, {
+      storage: {
+        local: {
+          get: async (keys: string[]) =>
+            Object.fromEntries(keys.filter((k) => k in stored).map((k) => [k, stored[k]])),
+          set: async (values: Record<string, unknown>) => {
+            Object.assign(stored, values);
+          },
+        },
+      },
+      idle: { queryState: async () => "active" },
+    });
+    browser.bookmarks.get = async (id) => {
+      getCalls++;
+      if (!folderExists) throw new Error(missingMessage);
+      return [{ id: Array.isArray(id) ? id[0] : id, title: "Pouch", type: "folder" }];
+    };
+    browser.bookmarks.remove = async () => {
+      throw new Error(missingMessage);
+    };
+
+    setFilterListSources([{ name: "empty", url: "data:text/plain;base64,IQ==" }]);
+    await initializeUrlCanonizer();
+    const repo = new ArticlesRepository();
+    repo.initialize(settings);
+
+    await expect(runOperation(repo.deleteArticle("ghost-id"))).resolves.toEqual({
+      success: true,
+      id: "ghost-id",
+    });
+    expect(getCalls).toBe(1);
+    expect(await runOperation(repo.getAllArticles)).toEqual([]);
+    expect(stored[key]).toEqual([]);
+
+    // When the Pouch folder itself is missing, deleteArticle still reports missing-folder.
+    folderExists = false;
+    const error = await runOperation(repo.deleteArticle("ghost-id")).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(BrowserFailure);
+    expect(errorResponse(error).details).toMatchObject({ reason: "missing-folder" });
+  });
+}
+
+test("sync filters Firefox separators, stabilizes missing dateAdded, and always uses overwrite mode", async () => {
+  browser.bookmarks.getChildren = async () => [
+    { id: "sep1", type: "separator", url: "data:", title: "" },
+    { id: "sub1", type: "folder", title: "Subfolder" },
+    { id: "bm-no-date", type: "bookmark", title: "No Date", url: "https://example.com/no-date" },
+    {
+      id: "bm-dated",
+      type: "bookmark",
+      title: "Dated",
+      url: "https://example.com/dated",
+      dateAdded: 1700000000000,
+    },
+  ];
+  const api = await runOperation(createBookmarksAdapter(settings));
+  const result = await runOperation(api.sync({ mode: "update" }));
+  expect(result.mode).toBe("overwrite");
+  expect(result.articles).toEqual([
+    {
+      id: "bm-no-date",
+      title: "No Date",
+      url: "https://example.com/no-date",
+      created_at: "1970-01-01T00:00:00.000Z",
+    },
+    {
+      id: "bm-dated",
+      title: "Dated",
+      url: "https://example.com/dated",
+      created_at: new Date(1700000000000).toISOString(),
+    },
+  ]);
+});
+
+test("ArticlesRepository skips redundant storage.local writes on unchanged syncs", async () => {
+  const keys = getAccountStorageKeys(settings);
+  const stored: Record<string, unknown> = {};
+  const writtenKeys: string[] = [];
+  let remoteBookmarks: browser.bookmarks.BookmarkTreeNode[] = [
+    {
+      id: "bm-1",
+      title: "Stable",
+      url: "https://example.com/stable",
+      dateAdded: 1700000000000,
+    },
+  ];
+  Object.assign(browser, {
+    storage: {
+      local: {
+        get: async (names: string[]) =>
+          Object.fromEntries(names.filter((k) => k in stored).map((k) => [k, stored[k]])),
+        set: async (values: Record<string, unknown>) => {
+          writtenKeys.push(...Object.keys(values));
+          Object.assign(stored, values);
+        },
+      },
+    },
+    idle: { queryState: async () => "active" },
+  });
+  browser.bookmarks.getChildren = async () => remoteBookmarks;
+
+  setFilterListSources([{ name: "empty", url: "data:text/plain;base64,IQ==" }]);
+  await initializeUrlCanonizer();
+  const repo = new ArticlesRepository();
+  repo.initialize(settings);
+
+  // First sync writes articles + timestamps.
+  await runOperation(repo.syncWithAPI());
+  expect(writtenKeys.filter((k) => k === keys.articles)).toHaveLength(1);
+  expect(writtenKeys).toContain(keys.lastSyncTimestamp);
+
+  // Second unchanged sync skips writing articles, but still updates sync timestamps.
+  writtenKeys.length = 0;
+  await runOperation(repo.syncWithAPI());
+  expect(writtenKeys.filter((k) => k === keys.articles)).toHaveLength(0);
+  expect(writtenKeys).toContain(keys.lastSyncTimestamp);
+
+  // Third sync with a changed title writes articles again.
+  writtenKeys.length = 0;
+  remoteBookmarks = [
+    {
+      id: "bm-1",
+      title: "Renamed",
+      url: "https://example.com/stable",
+      dateAdded: 1700000000000,
+    },
+  ];
+  await runOperation(repo.syncWithAPI());
+  expect(writtenKeys.filter((k) => k === keys.articles)).toHaveLength(1);
+  expect((await runOperation(repo.getAllArticles))[0]?.title).toBe("Renamed");
 });

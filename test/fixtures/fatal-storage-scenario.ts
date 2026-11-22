@@ -517,14 +517,15 @@ switch (scenario) {
         return respond(backend === "linkace" ? {} : { result: true });
       }
       remoteReads++;
+      const current = remoteReads === 1 ? listed : { ...listed, title: "Updated" };
       return respond(
         backend === "linkace"
-          ? { data: [linkOf(listed)] }
+          ? { data: [linkOf(current)] }
           : backend === "karakeep"
-            ? { bookmarks: [bookmarkOf(listed)], nextCursor: null }
+            ? { bookmarks: [bookmarkOf(current)], nextCursor: null }
             : backend === "linkwarden"
-              ? { data: { links: [wardenOf(listed)], nextCursor: null } }
-              : { result: true, items: [listed], count: 1 },
+              ? { data: { links: [wardenOf(current)], nextCursor: null } }
+              : { result: true, items: [current], count: 1 },
       );
     }) as typeof fetch;
     await import("../../src/background/background");

@@ -326,7 +326,7 @@ export class ArticlesRepository {
         typeof change === "function"
           ? yield* change(articles)
           : yield* this.apply(account, articles, change);
-      if (next !== articles) {
+      if (!articlesEqual(articles, next)) {
         yield* storagePromise(() =>
           setLocal("persist articles", { [account.keys.articles]: next }, outcome, operation),
         );
@@ -718,6 +718,27 @@ export class ArticlesRepository {
       Effect.tap(() => Effect.sync(() => (account.timestamps = timestamps))),
     );
   }
+}
+
+function articlesEqual(a: readonly Article[], b: readonly Article[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i];
+    const y = b[i];
+    if (
+      x.id !== y.id ||
+      x.url !== y.url ||
+      x.givenUrl !== y.givenUrl ||
+      x.canonicalUrl !== y.canonicalUrl ||
+      x.canonicalGivenUrl !== y.canonicalGivenUrl ||
+      x.title !== y.title ||
+      x.created_at !== y.created_at
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function maxNumericIdOf(articles: readonly Article[]): number | undefined {

@@ -1,7 +1,6 @@
 import { Effect } from "effect";
 import { reportRemoteOutcome } from "../../../utils/fatal-storage";
 import * as v from "valibot";
-import { IS_CHROMIUM } from "../../../utils/chromium";
 import { bookmarksSettingsSchema, type BookmarksSettings } from "../../../utils/settings-schemas";
 import type { Article } from "../../../types/common";
 import {
@@ -12,20 +11,39 @@ import {
   storageHealthy,
   type AcquisitionError,
   type EffectAdapter,
+  type FatalStorageFailure,
 } from "../effect-adapter";
-import type { SavingArticle, SyncOptions } from "../read-it-later-adapter";
+import type { SavingArticle } from "../read-it-later-adapter";
 export { bookmarksSettingsSchema };
 export type { BookmarksSettings };
 
-type BookmarkNode = browser.bookmarks.BookmarkTreeNode;
+type BookmarkNode = browser.bookmarks.BookmarkTreeNode & { syncing?: boolean };
 
-function findFolder(nodes: BookmarkNode[]): BookmarkNode | undefined {
+const MISSING_NODE_PATTERN =
+  /(?:bookmark|folder|parent).*not found|no (?:bookmarks?|folder|parent)|can't find (?:parent )?bookmark for id|parentguid must be valid|root is null/i;
+
+function isModifiablePouchFolder(node: BookmarkNode): boolean {
+  if (node.title !== "Pouch") return false;
+  if (node.unmodifiable) return false;
+  return node.type ? node.type === "folder" : !node.url;
+}
+
+function pickPreferredFolder(nodes: readonly BookmarkNode[]): BookmarkNode | undefined {
+  let fallback: BookmarkNode | undefined;
   for (const node of nodes) {
-    if (node.title === "Pouch" && !node.url) return node;
-    const found = node.children && findFolder(node.children);
-    if (found) return found;
+    if (!isModifiablePouchFolder(node)) continue;
+    if (node.syncing === true) return node;
+    fallback ??= node;
   }
-  return undefined;
+  return fallback;
+}
+
+function collectFolders(nodes: readonly BookmarkNode[], out: BookmarkNode[] = []): BookmarkNode[] {
+  for (const node of nodes) {
+    if (isModifiablePouchFolder(node)) out.push(node);
+    if (node.children) collectFolders(node.children, out);
+  }
+  return out;
 }
 
 function toArticle(bookmark: BookmarkNode): Article {
@@ -33,7 +51,7 @@ function toArticle(bookmark: BookmarkNode): Article {
     id: bookmark.id,
     title: bookmark.title,
     url: bookmark.url || "",
-    created_at: new Date(bookmark.dateAdded || Date.now()).toISOString(),
+    created_at: new Date(bookmark.dateAdded ?? 0).toISOString(),
   };
 }
 
@@ -71,8 +89,7 @@ export const createBookmarksAdapter = Effect.fn("bookmarks.acquire")(function* (
               ? error.name
               : undefined;
           const reason =
-            name === "NotFoundError" ||
-            /(?:bookmark|folder|parent).*not found|no (?:bookmark|folder|parent)/i.test(message)
+            name === "NotFoundError" || MISSING_NODE_PATTERN.test(message)
               ? "missing-folder"
               : name === "NotAllowedError" ||
                   name === "SecurityError" ||
@@ -99,19 +116,55 @@ export const createBookmarksAdapter = Effect.fn("bookmarks.acquire")(function* (
   yield* permissionHealthy;
   yield* storageHealthy;
 
-  const tree = yield* call("read bookmarks tree", () => bookmarks.getTree());
-  let folder = findFolder(tree);
-  if (!folder) {
+  const findExistingFolder = Effect.gen(function* () {
+    if (typeof bookmarks.search === "function") {
+      const matches = yield* call("search Pouch folder", () =>
+        bookmarks.search({ title: "Pouch" }),
+      );
+      return pickPreferredFolder(matches);
+    }
+    const tree = yield* call("read bookmarks tree", () => bookmarks.getTree());
+    return pickPreferredFolder(collectFolders(tree));
+  });
+
+  const resolveOrCreateFolder = Effect.gen(function* () {
+    const existing = yield* findExistingFolder;
+    if (existing) return existing;
     yield* storageHealthy;
-    folder = yield* call("create Pouch folder", () =>
-      bookmarks.create({
-        title: "Pouch",
-        parentId: IS_CHROMIUM ? "2" : "unfiled_____",
-      }),
-    );
-  }
-  const folderId = folder.id;
+    return yield* call("create Pouch folder", () => bookmarks.create({ title: "Pouch" }));
+  });
+
+  let folderId = (yield* resolveOrCreateFolder).id;
   yield* storageHealthy;
+
+  const verifyFolderExists = (operation: string): Effect.Effect<void, BrowserFailure> =>
+    Effect.gen(function* () {
+      if (typeof bookmarks.get === "function") {
+        const nodes = yield* call(operation, () => bookmarks.get(folderId));
+        if (nodes.length === 0) {
+          return yield* Effect.fail(new BrowserFailure(operation, "missing-folder"));
+        }
+        return;
+      }
+      yield* call(operation, () => bookmarks.getChildren(folderId));
+    });
+
+  const withFolderRecovery = <A>(
+    run: () => Effect.Effect<A, BrowserFailure>,
+  ): Effect.Effect<A, BrowserFailure | FatalStorageFailure> =>
+    run().pipe(
+      Effect.catchIf(
+        (error) => error.reason === "missing-folder",
+        () =>
+          Effect.gen(function* () {
+            yield* storageHealthy;
+            const folder = yield* resolveOrCreateFolder;
+            folderId = folder.id;
+            yield* storageHealthy;
+            return yield* run();
+          }),
+      ),
+    );
 
   const adapter: EffectAdapter = {
     saveArticle: Effect.fn("bookmarks.save")(function* (article: SavingArticle) {
@@ -119,8 +172,10 @@ export const createBookmarksAdapter = Effect.fn("bookmarks.acquire")(function* (
       yield* permissionHealthy.pipe(Effect.interruptible);
       yield* storageHealthy;
       return yield* Effect.gen(function* () {
-        const bookmark = yield* call("save bookmark", () =>
-          bookmarks.create({ parentId: folderId, title: article.title, url: article.url }),
+        const bookmark = yield* withFolderRecovery(() =>
+          call("save bookmark", () =>
+            bookmarks.create({ parentId: folderId, title: article.title, url: article.url }),
+          ),
         );
         reportRemoteOutcome("save", "succeeded");
         yield* recordMutationSuccess("save");
@@ -132,20 +187,33 @@ export const createBookmarksAdapter = Effect.fn("bookmarks.acquire")(function* (
       yield* permissionHealthy.pipe(Effect.interruptible);
       yield* storageHealthy;
       yield* Effect.gen(function* () {
-        yield* call("delete bookmark", () => bookmarks.remove(String(id)));
+        yield* call("delete bookmark", () => bookmarks.remove(String(id))).pipe(
+          Effect.catchIf(
+            (error) => error.reason === "missing-folder",
+            () =>
+              Effect.gen(function* () {
+                yield* storageHealthy;
+                yield* verifyFolderExists("verify Pouch folder");
+              }),
+          ),
+        );
         reportRemoteOutcome("delete", "succeeded");
         yield* recordMutationSuccess("delete");
       }).pipe(Effect.uninterruptible);
     }),
-    sync: Effect.fn("bookmarks.sync")(function* (options?: SyncOptions) {
+    sync: Effect.fn("bookmarks.sync")(function* () {
       yield* storageHealthy;
       yield* permissionHealthy;
       yield* storageHealthy;
-      const children = yield* call("read Pouch bookmarks", () => bookmarks.getChildren(folderId));
-      const articles = children.filter((bookmark) => bookmark.url).map(toArticle);
+      const children = yield* withFolderRecovery(() =>
+        call("read Pouch bookmarks", () => bookmarks.getChildren(folderId)),
+      );
+      const articles = children
+        .filter((bookmark) => bookmark.type !== "separator" && Boolean(bookmark.url))
+        .map(toArticle);
       return {
         articles,
-        mode: options?.mode || "overwrite",
+        mode: "overwrite" as const,
         metadata: {
           totalFetched: articles.length,
           totalProcessed: articles.length,
@@ -158,7 +226,7 @@ export const createBookmarksAdapter = Effect.fn("bookmarks.acquire")(function* (
       yield* storageHealthy;
       yield* permissionHealthy;
       yield* storageHealthy;
-      yield* call("test bookmarks connection", () => bookmarks.getChildren(folderId));
+      yield* withFolderRecovery(() => verifyFolderExists("test bookmarks connection"));
       yield* storageHealthy;
       return true as const;
     }).pipe(Effect.withSpan("bookmarks.testConnection")),
