@@ -1200,6 +1200,45 @@ switch (scenario) {
     );
     break;
   }
+  case "show-fatal-ui-per-tab-error": {
+    await import("../../src/background/background");
+    await events.startup();
+    const updatedIcons: number[] = [];
+    const updatedTitles: { tabId: number; title: string }[] = [];
+    let finished!: () => void;
+    const allUpdated = new Promise<void>((resolve) => {
+      finished = resolve;
+    });
+    (browser.tabs.query as any) = async () => [
+      { id: 1, url: "https://a.example" },
+      { id: 2, url: "https://b.example" },
+      { id: 3, url: "https://c.example" },
+    ];
+    (browser.pageAction.setIcon as any) = async ({ tabId }: { tabId: number }) => {
+      if (tabId === 1) throw new Error("No tab with id: 1.");
+      updatedIcons.push(tabId);
+    };
+    (browser.pageAction.setTitle as any) = async ({
+      tabId,
+      title,
+    }: {
+      tabId: number;
+      title: string;
+    }) => {
+      if (tabId === 2) throw new Error("No tab with id: 2.");
+      updatedTitles.push({ tabId, title });
+      if (tabId === 3) finished();
+    };
+    rejectSet = true;
+    await rejectsFatal(() => setLocal("tab loop failure", {}));
+    await allUpdated;
+    assert.deepEqual(updatedIcons, [2, 3]);
+    assert.deepEqual(updatedTitles, [
+      { tabId: 1, title: "Pouch stopped: local storage failed" },
+      { tabId: 3, title: "Pouch stopped: local storage failed" },
+    ]);
+    break;
+  }
   case "ui-race":
   case "ui-menu-race": {
     await import("../../src/background/background");

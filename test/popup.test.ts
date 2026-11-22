@@ -135,11 +135,11 @@ const fakeDocument = {
   },
 };
 
+let activeTab: AnyRecord = { id: 1, url: "https://example.com/", title: "Example" };
+
 const fakeBrowser = {
   tabs: {
-    query: async (_options: AnyRecord): Promise<AnyRecord[]> => [
-      { id: 1, url: "https://example.com/", title: "Example" },
-    ],
+    query: async (_options: AnyRecord): Promise<AnyRecord[]> => [activeTab],
   },
   runtime: {
     onMessage: { addListener: () => {} },
@@ -214,6 +214,7 @@ function makeDeleteButton(articleId: number | string): FakeElement {
 }
 
 beforeEach(() => {
+  activeTab = { id: 1, url: "https://example.com/", title: "Example" };
   focusedElement = undefined;
   for (const element of elements.values()) {
     element.title = "";
@@ -453,6 +454,35 @@ test("deleting a row moves keyboard focus to the next row, then to search when t
   el("sr-live").textContent = "";
   await deleteRow(0, 0);
   expect(focusedElement).toBe(el("search"));
+});
+
+test("save button is hidden and disabled on non-HTTP(S) pages and ignores clicks", async () => {
+  const sentTypes: string[] = [];
+  handleMessage = async (message) => {
+    sentTypes.push(String(message.type));
+    if (message.type === "getArticles") return listResponse([]);
+    if (message.type === "checkArticle") return undefined;
+    return {};
+  };
+
+  for (const url of [
+    "chrome://extensions",
+    "about:newtab",
+    "javascript:alert(1)",
+    "mailto:test@example.com",
+    "data:text/html,hi",
+    "file:///tmp/index.html",
+  ]) {
+    sentTypes.length = 0;
+    activeTab = { id: 2, url, title: "Restricted" };
+    await initializePopup();
+    expect(el("save-page-button").style.display).toBe("none");
+    expect(el("save-page-button").disabled).toBe(true);
+    click(el("save-page-button"));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(sentTypes).not.toContain("checkArticle");
+    expect(sentTypes).not.toContain("saveArticle");
+  }
 });
 
 test("fatal storage response shows confirmed remote success and blocks another save", async () => {

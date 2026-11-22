@@ -177,16 +177,68 @@ test("Duplicate detection follows the comparison setting", async () => {
   canonicalStorage[keys.articles] = [existing];
   const canonicalRepository = new ArticlesRepository();
   await canonicalRepository.initialize({ ...DEFAULT_SETTINGS, normalizeOnCompare: true });
-  useAdapter(() => ({
-    id: 3,
-    url: "https://youtu.be/abc123",
-    title: "Video",
-    created_at: "2026-01-02",
-  }));
-  await runOperation(canonicalRepository.saveArticle({ url: "https://youtu.be/abc123", title: "Video" }));
+  let canonicalAdapterSaves = 0;
+  useAdapter(() => {
+    canonicalAdapterSaves++;
+    return {
+      id: 3,
+      url: "https://youtu.be/abc123",
+      title: "Video",
+      created_at: "2026-01-02",
+    };
+  });
+  const canonicalResult = await runOperation(
+    canonicalRepository.saveArticle({ url: "https://youtu.be/abc123", title: "Video" }),
+  );
   const articles = (await runOperation(canonicalRepository.getAllArticles)) as Article[];
+  expect(canonicalAdapterSaves).toBe(0);
+  expect(canonicalResult).toEqual(existing);
   expect(articles.length).toBe(1);
   expect(articles[0].id).toBe(1);
+});
+
+test("saveArticle returns existing cached article without duplicate API call", async () => {
+  const { storage } = withStorage();
+  const existing: Article = {
+    id: 42,
+    url: "https://www.youtube.com/watch?v=abc123",
+    title: "Existing Video",
+    created_at: "2026-01-01",
+  };
+  storage[keys.articles] = [existing];
+
+  let adapterSaveCalls = 0;
+  useAdapter((input) => {
+    adapterSaveCalls++;
+    return {
+      id: 99,
+      url: input.url,
+      title: input.title,
+      created_at: "2026-01-02",
+    };
+  });
+
+  // Exact match with normalizeOnCompare: false
+  const exactRepo = new ArticlesRepository();
+  exactRepo.initialize({ ...DEFAULT_SETTINGS, normalizeOnCompare: false, normalizeOnSave: false });
+  const exactResult = await runOperation(
+    exactRepo.saveArticle({ url: "https://www.youtube.com/watch?v=abc123", title: "Dup" }),
+  );
+  expect(exactResult).toEqual(existing);
+  expect(adapterSaveCalls).toBe(0);
+
+  // Normalized URL already cached when normalizeOnSave: true and normalizeOnCompare: false
+  const normalizeSaveRepo = new ArticlesRepository();
+  normalizeSaveRepo.initialize({
+    ...DEFAULT_SETTINGS,
+    normalizeOnCompare: false,
+    normalizeOnSave: true,
+  });
+  const normalizedSaveResult = await runOperation(
+    normalizeSaveRepo.saveArticle({ url: "https://youtu.be/abc123", title: "Dup" }),
+  );
+  expect(normalizedSaveResult).toEqual(existing);
+  expect(adapterSaveCalls).toBe(0);
 });
 
 test("Saving honors normalizeOnSave independently", async () => {

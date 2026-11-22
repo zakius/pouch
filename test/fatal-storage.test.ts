@@ -32,6 +32,7 @@ for (const scenario of [
   "firefox-icon-race",
   "firefox-title-race",
   "firefox-show-race",
+  "show-fatal-ui-per-tab-error",
   "external-health",
   "external-fatal",
   "auth-outcome",

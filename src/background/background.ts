@@ -66,6 +66,8 @@ interface Tab {
   id?: number;
   url?: string;
   title?: string;
+  active?: boolean;
+  windowId?: number;
 }
 const REFRESH_INTERVAL = 30;
 
@@ -261,6 +263,7 @@ const handleMessage = Effect.fn("background.message")(function* (rawMessage: unk
       const title = (message.payload.title || "").trim();
       if (!url) return invalidRequest("URL is required");
       if (!isValidUrl(url)) return invalidRequest("Invalid URL format");
+      if (!isValidHttpUrl(url)) return invalidRequest("Only HTTP and HTTPS URLs can be saved");
       const repository = yield* getArticlesRepository;
       const savedArticle = yield* repository.saveArticle({ url, title });
       yield* refreshActiveTabUi;
@@ -268,7 +271,7 @@ const handleMessage = Effect.fn("background.message")(function* (rawMessage: unk
     }
     case "checkArticle": {
       const url = message.payload.url?.trim();
-      if (!url || !isValidUrl(url)) return undefined;
+      if (!url || !isValidHttpUrl(url)) return undefined;
       const repository = yield* getArticlesRepository;
       return yield* repository.findSaved(url);
     }
@@ -336,13 +339,17 @@ browser.contextMenus.onClicked.addListener((info: OnClickData, tab?: Tab) =>
   run(
     "Context menu",
     Effect.gen(function* () {
-      const repository = yield* getArticlesRepository;
       if (info.menuItemId === "save-link" && info.linkUrl) {
-        yield* repository.saveArticle({ url: info.linkUrl, title: "" });
+        const linkUrl = info.linkUrl.trim();
+        if (!isValidHttpUrl(linkUrl)) {
+          logger.warn("Ignoring link with invalid URL:", info.linkUrl);
+          return;
+        }
+        const repository = yield* getArticlesRepository;
+        yield* repository.saveArticle({ url: linkUrl, title: "" });
         if (tab?.id !== undefined) yield* updateUiForTab(tab.id);
-      } else if (info.menuItemId === "save-page" && tab?.url) {
-        yield* toggle(repository, tab.url, tab.title ?? "");
-        if (tab.id) yield* updateUiForTab(tab.id);
+      } else if (info.menuItemId === "save-page" && tab) {
+        yield* togglePageSave(tab);
       }
     }),
     (error) => notifyError(info.menuItemId === "save-page" ? "toggle page" : "save link", error),
@@ -377,24 +384,26 @@ async function showFatalUi(): Promise<void> {
   await browser.contextMenus
     .update("save-link", { title: "Pouch stopped: local storage failed", enabled: false })
     .catch(() => {});
-  if (!IS_CHROMIUM) {
-    await browser.tabs
-      .query({})
-      .then(async (tabs) => {
-        for (const tab of tabs) {
-          if (tab.id === undefined) continue;
-          await browser.pageAction.setIcon({
-            tabId: tab.id,
-            path: browser.runtime.getURL("icons/icon.svg"),
-          });
-          await Promise.resolve(
-            browser.pageAction.setTitle({
-              tabId: tab.id,
-              title: "Pouch stopped: local storage failed",
-            }),
-          );
-        }
-      })
+  if (IS_CHROMIUM) return;
+  const tabs = await browser.tabs.query({}).catch(() => []);
+  for (const tab of tabs) {
+    if (tab.id === undefined) continue;
+    const tabId = tab.id;
+    await Promise.resolve()
+      .then(() =>
+        browser.pageAction.setIcon({
+          tabId,
+          path: browser.runtime.getURL("icons/icon.svg"),
+        }),
+      )
+      .catch(() => {});
+    await Promise.resolve()
+      .then(() =>
+        browser.pageAction.setTitle({
+          tabId,
+          title: "Pouch stopped: local storage failed",
+        }),
+      )
       .catch(() => {});
   }
 }
@@ -447,15 +456,39 @@ const toggle = (repository: ArticlesRepository, url: string, title: string) =>
       yield* repository.saveArticle({ url, title });
     }
   });
+const inFlightToggles = new Set<string>();
 const togglePageSave = (tab: Tab) =>
   Effect.gen(function* () {
-    if (!tab.url || !isValidHttpUrl(tab.url)) {
+    const url = tab.url?.trim();
+    if (!url || !isValidHttpUrl(url)) {
       logger.warn("Ignoring page with invalid URL:", tab.url);
       return;
     }
-    const repository = yield* getArticlesRepository;
-    yield* toggle(repository, tab.url, tab.title || "Untitled");
-    if (tab.id) yield* updateUiForTab(tab.id);
+    const keys = tab.id !== undefined ? [`tab:${tab.id}`, `url:${url}`] : [`url:${url}`];
+    yield* Effect.acquireUseRelease(
+      Effect.sync(() => {
+        if (keys.some((key) => inFlightToggles.has(key))) {
+          logger.debug("Ignoring concurrent toggle already in flight:", { tabId: tab.id, url });
+          return false;
+        }
+        for (const key of keys) inFlightToggles.add(key);
+        return true;
+      }),
+      (acquired) =>
+        acquired
+          ? Effect.gen(function* () {
+              const repository = yield* getArticlesRepository;
+              yield* toggle(repository, url, tab.title || "Untitled");
+              if (tab.id !== undefined) yield* updateUiForTab(tab.id);
+            })
+          : Effect.void,
+      (acquired) =>
+        acquired
+          ? Effect.sync(() => {
+              for (const key of keys) inFlightToggles.delete(key);
+            })
+          : Effect.void,
+    );
   });
 if (IS_CHROMIUM) {
   browser.runtime.onMessageExternal.addListener((message: QuickActionMessage, sender) => {
@@ -509,15 +542,36 @@ browser.commands.onCommand.addListener((command) =>
 function getIconPath(isSaved: boolean): string {
   return browser.runtime.getURL(`icons/page-action-${isSaved ? "saved" : "unsaved"}.svg`);
 }
+const isWindowFocused = (windowId?: number): Effect.Effect<boolean> =>
+  windowId === undefined || typeof browser.windows?.get !== "function"
+    ? Effect.succeed(true)
+    : browserCall("read window", () => browser.windows.get(windowId)).pipe(
+        Effect.map((win) => win.focused !== false),
+        Effect.orElseSucceed(() => false),
+      );
 /** Never fails: an unknown page state shows as such, and a fatal stop shows the stopped UI. */
-const updateUiForTab = (tabId: number) =>
-  Effect.gen(function* () {
+const updateUiForTab = (tabId: number, knownTab?: Tab) => {
+  let shouldUpdateContextMenu = false;
+  return Effect.gen(function* () {
     yield* storageHealthy;
-    const tab = yield* browserCall("read tab", () => browser.tabs.get(tabId));
+    const tab: Tab = knownTab ?? (yield* browserCall("read tab", () => browser.tabs.get(tabId)));
     yield* storageHealthy;
-    if (!tab.url || !isValidHttpUrl(tab.url)) return;
+    shouldUpdateContextMenu = tab.active !== false && (yield* isWindowFocused(tab.windowId));
+    const url = tab.url?.trim();
+    if (!url || !isValidHttpUrl(url)) {
+      if (shouldUpdateContextMenu) {
+        yield* browserCall("update menu", () =>
+          browser.contextMenus.update("save-page", {
+            title: "Save page",
+            enabled: false,
+          }),
+        );
+        yield* storageHealthy;
+      }
+      return;
+    }
     const repository = yield* getArticlesRepository;
-    const isSaved = !!(yield* repository.findSaved(tab.url));
+    const isSaved = !!(yield* repository.findSaved(url));
     yield* storageHealthy;
     if (IS_CHROMIUM) {
       const state: PageStateMessage = { type: "pageState", tabId, saved: isSaved };
@@ -542,21 +596,25 @@ const updateUiForTab = (tabId: number) =>
       yield* browserCall("show page action", () => browser.pageAction.show(tabId));
     }
     yield* storageHealthy;
-    yield* browserCall("update menu", () =>
-      browser.contextMenus.update("save-page", {
-        title: isSaved ? "Remove page" : "Save page",
-        enabled: true,
-      }),
-    );
-    yield* storageHealthy;
+    if (shouldUpdateContextMenu) {
+      yield* browserCall("update menu", () =>
+        browser.contextMenus.update("save-page", {
+          title: isSaved ? "Remove page" : "Save page",
+          enabled: true,
+        }),
+      );
+      yield* storageHealthy;
+    }
   }).pipe(
     Effect.catch((error) =>
       Effect.promise(async () => {
         if (!getStorageDiagnostic()) {
           logger.error("Error updating UI for tab:", error);
-          await browser.contextMenus
-            .update("save-page", { title: "Unable to determine page status", enabled: false })
-            .catch(() => {});
+          if (shouldUpdateContextMenu) {
+            await browser.contextMenus
+              .update("save-page", { title: "Unable to determine page status", enabled: false })
+              .catch(() => {});
+          }
         }
         if (getStorageDiagnostic()) await showFatalUi();
       }),
@@ -564,20 +622,23 @@ const updateUiForTab = (tabId: number) =>
     // Shutdown waits for dispatched browser calls, so the fatal UI is applied after them.
     Effect.uninterruptible,
   );
+};
 // Popup-initiated saves and deletes bypass the page-action toggle, so the
 // icon and the context-menu entry would go stale until the next navigation or
 // tab switch. Refresh the tab the popup is acting on.
-const refreshActiveTabUi = Effect.gen(function* () {
-  const tabs = yield* browserCall("query tabs", () =>
-    browser.tabs.query({ active: true, currentWindow: true }),
+const refreshActiveTabUiForWindow = (windowId?: number) =>
+  Effect.gen(function* () {
+    const queryInfo: browser.tabs._QueryQueryInfo =
+      windowId !== undefined ? { active: true, windowId } : { active: true, currentWindow: true };
+    const tabs = yield* browserCall("query tabs", () => browser.tabs.query(queryInfo));
+    const tab = tabs[0];
+    if (tab?.id !== undefined) yield* updateUiForTab(tab.id, tab);
+  }).pipe(
+    Effect.catchTag("BrowserFailure", (error) =>
+      Effect.sync(() => logger.error("Error refreshing active tab UI:", error)),
+    ),
   );
-  const tab = tabs[0];
-  if (tab?.id !== undefined) yield* updateUiForTab(tab.id);
-}).pipe(
-  Effect.catchTag("BrowserFailure", (error) =>
-    Effect.sync(() => logger.error("Error refreshing active tab UI:", error)),
-  ),
-);
+const refreshActiveTabUi = refreshActiveTabUiForWindow();
 function isValidHttpUrl(url: string) {
   try {
     const urlObj = new URL(url);
@@ -591,19 +652,25 @@ const onTabUpdated = (
   changeInfo: browser.tabs._OnUpdatedChangeInfo,
   tab: browser.tabs.Tab,
 ) => {
-  if (changeInfo.status === "complete" && tab.url && isValidHttpUrl(tab.url)) {
-    void run("Tab update", updateUiForTab(tabId));
+  if (changeInfo.status === "complete" || changeInfo.url !== undefined) {
+    const updatedTab: Tab = changeInfo.url !== undefined ? { ...tab, url: changeInfo.url } : tab;
+    void run("Tab update", updateUiForTab(tabId, updatedTab));
   }
 };
 // Chromium has no filter argument and rejects one.
 if (IS_CHROMIUM) {
   browser.tabs.onUpdated.addListener(onTabUpdated);
 } else {
-  browser.tabs.onUpdated.addListener(onTabUpdated, { properties: ["status"] });
+  browser.tabs.onUpdated.addListener(onTabUpdated, { properties: ["status", "url"] });
 }
 browser.tabs.onActivated.addListener((activeInfo) =>
   run("Tab activation", updateUiForTab(activeInfo.tabId)),
 );
+const WINDOW_ID_NONE = browser.windows?.WINDOW_ID_NONE ?? -1;
+browser.windows?.onFocusChanged?.addListener((windowId) => {
+  if (windowId === WINDOW_ID_NONE || windowId === -1) return;
+  void run("Window focus", refreshActiveTabUiForWindow(windowId));
+});
 
 // A menu or alarm created while shutdown starts is disabled or cleared before shutdown completes.
 const createMenu = (properties: browser.menus._CreateCreateProperties) =>

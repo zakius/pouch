@@ -228,7 +228,9 @@ function handleBodyClick(event: MouseEvent): void {
 
   if (target.id === "save-page-button" || target.closest("#save-page-button")) {
     event.preventDefault();
-    void handleSavePageClick();
+    if (savePageButton && !savePageButton.disabled) {
+      void handleSavePageClick();
+    }
     return;
   }
 
@@ -392,6 +394,15 @@ function forDisplay(text: string): string {
   return text.length > MAX_DISPLAY_CHARS ? `${text.slice(0, MAX_DISPLAY_CHARS)}\u2026` : text;
 }
 
+function isValidHttpUrl(url: string): boolean {
+  try {
+    const protocol = new URL(url).protocol;
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 function createArticleElement(article: Article): HTMLElement {
   logger.debug("Creating article element:", article);
   if (!article.url || typeof article.url !== "string") {
@@ -411,7 +422,7 @@ function createArticleElement(article: Article): HTMLElement {
   contentWrapper.className = "article-content";
   // The server controls this url. Linked from an extension page, a data: url would
   // escape the browser's block on pages opening them as top-level documents.
-  if (URL.canParse(article.url) && /^https?:$/.test(new URL(article.url).protocol)) {
+  if (isValidHttpUrl(article.url)) {
     contentWrapper.href = article.url;
   } else {
     logger.warn("Not linking non-http(s) article URL:", article.url);
@@ -455,14 +466,19 @@ async function sendBackgroundMessage<T>(message: Record<string, unknown>): Promi
 
 async function updateSavePageButtonState(): Promise<void> {
   if (isStorageStopped()) return;
-  if (!savePageButton || !currentTab?.url) {
-    if (savePageButton) savePageButton.style.display = "none";
+  const url = currentTab?.url?.trim();
+  if (!savePageButton || !url || !isValidHttpUrl(url)) {
+    savedArticleForCurrentPage = undefined;
+    if (savePageButton) {
+      savePageButton.disabled = true;
+      savePageButton.style.display = "none";
+    }
     return;
   }
   try {
     const response = await sendBackgroundMessage<Article | undefined>({
       type: "checkArticle",
-      payload: { url: currentTab.url },
+      payload: { url },
     });
     if (isStorageStopped()) return;
     savedArticleForCurrentPage = response;
@@ -477,6 +493,7 @@ async function updateSavePageButtonState(): Promise<void> {
       savePageButton.setAttribute("aria-label", "Save current page");
       savePageButton.classList.remove("saved");
     }
+    savePageButton.disabled = savePageButton.classList.contains("is-busy");
     savePageButton.style.display = "block";
   } catch (error) {
     logger.error("Error checking article:", error);
@@ -485,8 +502,8 @@ async function updateSavePageButtonState(): Promise<void> {
 async function handleSavePageClick(): Promise<void> {
   if (isStorageStopped() || !currentTab?.url || !savePageButton || isSavingOrDeleting) return;
   const url = currentTab.url.trim();
-  if (!url || url.length === 0) {
-    logger.warn("Cannot save article: empty URL");
+  if (!url || !isValidHttpUrl(url)) {
+    logger.warn("Cannot save article: invalid or non-HTTP(S) URL", currentTab.url);
     return;
   }
   const title = (currentTab.title || "").trim();
@@ -533,7 +550,8 @@ async function handleSavePageClick(): Promise<void> {
     showError(text, needsSettings);
   } finally {
     isSavingOrDeleting = false;
-    savePageButton.disabled = isStorageStopped();
+    const currentUrl = currentTab?.url?.trim();
+    savePageButton.disabled = isStorageStopped() || !currentUrl || !isValidHttpUrl(currentUrl);
     savePageButton.classList.remove("is-busy");
     savePageButton.setAttribute("aria-busy", "false");
   }

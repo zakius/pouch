@@ -198,8 +198,37 @@ export class ArticlesRepository {
     article: Pick<Article, "url" | "title">,
   ) {
     const account = yield* this.active();
+    const { existing, canonicalUrl: precomputedCanonical } = yield* this.findSavedInAccount(
+      account,
+      article.url,
+    ).pipe(
+      Effect.catchTag("BrowserFailure", (error) => {
+        logger.warn("Skipping pre-save duplicate check because local cache read failed:", error);
+        return Effect.succeed({ existing: undefined, canonicalUrl: undefined });
+      }),
+    );
+    if (existing) {
+      logger.debug("Article already saved in cache, skipping remote save:", article.url);
+      return existing;
+    }
+    const canonicalUrl = precomputedCanonical ?? (yield* canonical(article.url));
+    if (
+      !account.settings.normalizeOnCompare &&
+      account.settings.normalizeOnSave &&
+      canonicalUrl !== article.url &&
+      account.articles &&
+      account.articles.length > 0
+    ) {
+      const existingNormalized = this.getRawIndex(account, account.articles).get(canonicalUrl);
+      if (existingNormalized) {
+        logger.debug(
+          "Normalized article already saved in cache, skipping remote save:",
+          canonicalUrl,
+        );
+        return existingNormalized;
+      }
+    }
     const api = yield* this.adapter(account);
-    const canonicalUrl = yield* canonical(article.url);
     // Browser mutations cannot be cancelled after submission; commit and bookkeeping must finish together.
     return yield* Effect.gen({ self: this }, function* () {
       const savedArticle = yield* api.saveArticle({
@@ -487,23 +516,32 @@ export class ArticlesRepository {
     });
   }
 
+  private findSavedInAccount(
+    account: Account,
+    url: string,
+  ): Effect.Effect<{ existing: Article | undefined; canonicalUrl?: string }, LocalError> {
+    return Effect.gen({ self: this }, function* () {
+      const articles = yield* this.articles(account);
+      if (articles.length === 0) return { existing: undefined };
+      if (!account.settings.normalizeOnCompare) {
+        return { existing: this.getRawIndex(account, articles).get(url) };
+      }
+      let targetCanonical = yield* canonical(url);
+      const genAfterTarget = getCanonicalCacheGeneration();
+      const byCanonical = yield* this.getCanonicalIndex(account, articles);
+      if (getCanonicalCacheGeneration() !== genAfterTarget) {
+        targetCanonical = yield* canonical(url);
+      }
+      return { existing: byCanonical.get(targetCanonical), canonicalUrl: targetCanonical };
+    });
+  }
+
   readonly findSaved = Effect.fn("repository.findSaved")(function* (
     this: ArticlesRepository,
     url: string,
   ) {
     const account = yield* this.active();
-    const articles = yield* this.articles(account);
-    if (articles.length === 0) return undefined;
-    if (!account.settings.normalizeOnCompare) {
-      return this.getRawIndex(account, articles).get(url);
-    }
-    let targetCanonical = yield* canonical(url);
-    const genAfterTarget = getCanonicalCacheGeneration();
-    const byCanonical = yield* this.getCanonicalIndex(account, articles);
-    if (getCanonicalCacheGeneration() !== genAfterTarget) {
-      targetCanonical = yield* canonical(url);
-    }
-    return byCanonical.get(targetCanonical);
+    return (yield* this.findSavedInAccount(account, url)).existing;
   });
 
   private filterBySearch(articles: Article[], search?: string): Article[] {
