@@ -45,9 +45,26 @@ type KarakeepBookmark = v.InferOutput<typeof karakeepBookmarkSchema>;
 const providerFailure = (operation: string) => (data: unknown) =>
   v.is(karakeepErrorSchema, data) ? new ProviderFailure(operation) : undefined;
 
+const KARAKEEP_MAX_TITLE_LENGTH = 1000;
+
+const normalizeApiUrl = (rawUrl: string): string | undefined => {
+  let url: URL;
+  try {
+    url = new URL(rawUrl.trim());
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+  url.search = "";
+  url.hash = "";
+  const pathname = url.pathname.replace(/\/+$/, "");
+  url.pathname = pathname.toLowerCase().endsWith("/api/v1") ? pathname : `${pathname}/api/v1`;
+  return url.toString();
+};
+
 const toArticle = (item: KarakeepBookmark, url: string): Article => ({
   id: item.id,
-  title: item.title ?? item.content.title ?? url,
+  title: item.title?.trim() || item.content.title?.trim() || url,
   url,
   created_at: item.createdAt,
 });
@@ -58,11 +75,10 @@ export const createKarakeepAdapter = Effect.fn("karakeep.acquire")(function* (
 ) {
   const parsed = v.safeParse(karakeepSettingsSchema, settings);
   const token = parsed.success ? parsed.output.apiConfig.token.trim() : "";
-  // A missing token must not degrade into an unauthenticated request.
-  if (!parsed.success || !token || /[\r\n]/.test(token))
+  const apiUrl = parsed.success ? normalizeApiUrl(parsed.output.apiConfig.url) : undefined;
+  // A missing token or non-HTTP(S) URL must not degrade into an unauthenticated or unsafe request.
+  if (!parsed.success || !token || /[\r\n]/.test(token) || !apiUrl)
     return yield* Effect.fail(new ConfigurationFailure("karakeep.acquire"));
-  // The configured URL is the API base, for example https://host/api/v1.
-  const apiUrl = parsed.output.apiConfig.url.replace(/\/+$/, "");
   const authorization = Effect.succeed(`Bearer ${token}`);
 
   const request = (
@@ -90,18 +106,24 @@ export const createKarakeepAdapter = Effect.fn("karakeep.acquire")(function* (
 
   const adapter: EffectAdapter = {
     saveArticle: Effect.fn("karakeep.save")(function* (article: SavingArticle) {
+      const title = article.title.trim().slice(0, KARAKEEP_MAX_TITLE_LENGTH);
       // 201 creates the bookmark; 200 returns the existing bookmark for the same URL.
+      // Omit empty titles so saving a bare link never clears an existing title on Karakeep v0.33.1+.
       const data = yield* request("karakeep.save", "/bookmarks", {
         mutation: "save",
         confirms: karakeepBookmarkSchema,
         init: {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ type: "link", url: article.url, title: article.title }),
+          body: JSON.stringify({
+            type: "link",
+            url: article.url,
+            ...(title ? { title } : {}),
+          }),
         },
       });
       const saved = yield* validate(karakeepBookmarkSchema, data, "karakeep.save");
-      return toArticle(saved, saved.content.url ?? article.url);
+      return toArticle(saved, saved.content.url || article.url);
     }),
     deleteArticle: Effect.fn("karakeep.delete")(function* (id: number | string) {
       yield* request("karakeep.delete", `/bookmarks/${encodeURIComponent(String(id))}`, {
@@ -115,17 +137,15 @@ export const createKarakeepAdapter = Effect.fn("karakeep.acquire")(function* (
      * requested mode. Bookmarks without a URL (plain notes) are not articles.
      */
     sync: Effect.fn("karakeep.sync")(function* (_options?: SyncOptions) {
-      const query = new URLSearchParams({ limit: "100" });
+      const query = new URLSearchParams({ limit: "100", includeContent: "false" });
       const seen = new Set<string>();
-      const articles: Article[] = [];
-      for (let page = 0; ; page++) {
-        // Keeps the one-request-per-second pacing of the shared client this replaces.
-        if (page > 0) yield* Effect.sleep(1000);
+      const articlesById = new Map<string, Article>();
+      for (;;) {
         const data = yield* request("karakeep.sync", `/bookmarks?${query.toString()}`);
         const result = yield* validate(karakeepPageSchema, data, "karakeep.sync");
         for (const item of result.bookmarks) {
-          const url = item.content.url ?? item.content.sourceUrl;
-          if (url) articles.push(toArticle(item, url));
+          const url = item.content.url || item.content.sourceUrl;
+          if (url) articlesById.set(item.id, toArticle(item, url));
         }
         if (result.nextCursor === null) break;
         // A revisited cursor would never end; overwriting from a partial listing would drop articles.
@@ -134,6 +154,7 @@ export const createKarakeepAdapter = Effect.fn("karakeep.acquire")(function* (
         seen.add(result.nextCursor);
         query.set("cursor", result.nextCursor);
       }
+      const articles = [...articlesById.values()];
       return {
         articles,
         mode: "overwrite" as const,
@@ -146,9 +167,13 @@ export const createKarakeepAdapter = Effect.fn("karakeep.acquire")(function* (
       };
     }),
     testConnection: Effect.gen(function* () {
-      const data = yield* request("karakeep.testConnection", "/bookmarks?limit=1", {
-        timeoutMs: 10000,
-      });
+      const data = yield* request(
+        "karakeep.testConnection",
+        "/bookmarks?limit=1&includeContent=false",
+        {
+          timeoutMs: 10000,
+        },
+      );
       yield* validate(karakeepPageSchema, data, "karakeep.testConnection");
       yield* storageHealthy;
       return true as const;

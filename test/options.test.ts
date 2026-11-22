@@ -433,3 +433,20 @@ test("LinkAce options form labels the URL field as Instance URL (LinkAce 2.x)", 
     "Instance URL (LinkAce 2.x) must be a valid http:// or https:// URL",
   );
 });
+
+test("Karakeep options form labels the URL field as Instance URL", async () => {
+  await domReadyHandler?.();
+  await selectBackend("karakeep");
+
+  const labels = el("config-container").querySelectorAll("label");
+  const urlLabel = labels.find((label) => label.htmlFor === "url");
+  expect(urlLabel?.textContent).toBe("Instance URL");
+
+  el("url").value = "not-a-url";
+  el("token").value = "token";
+  clickButton("save");
+  expect(sentMessages).toEqual([]);
+  expect(el("status").textContent).toContain(
+    "Instance URL must be a valid http:// or https:// URL",
+  );
+});

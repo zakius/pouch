@@ -167,10 +167,11 @@ The `createdAfter` parameter may not actually work as expected. If the parameter
 ### 6. KaraKeep ❌ NO INCREMENTAL SUPPORT
 
 - **API:** https://docs.karakeep.app/api/get-all-bookmarks/
-- **Available params:** `archived`, `favourited`, `limit`, `cursor` only
-- **Deletions:** N/A (full sync only)
+- **Endpoint:** `GET /api/v1/bookmarks?limit=100&includeContent=false` (with `cursor` on subsequent pages)
+- **Available params:** `archived`, `favourited`, `limit`, `cursor`, `includeContent`, `sortOrder`
+- **Deletions:** N/A (full sync only; always returns `mode: "overwrite"`)
 - **Strategy:** Full sync only - must fetch all bookmarks every time
-- **Implementation:** `karakeep-adapter.ts:159-201`
+- **Implementation:** `karakeep-adapter.ts`
 
 **Limitations:**
 
@@ -181,16 +182,18 @@ The `createdAfter` parameter may not actually work as expected. If the parameter
 
 **Strategy:**
 
-- Always perform full sync (mode parameter is ignored)
+- Always perform full sync (`mode` parameter is ignored; always returns `"overwrite"`)
+- Passes `includeContent=false` to omit large crawled HTML/text payloads and deduplicates bookmark IDs across pages
 - Client-side diffing to detect changes
-- Consider implementing caching to reduce API calls if needed
 
 **Available query parameters:**
 
 - `archived` (boolean) - Filter by archived status
 - `favourited` (boolean) - Filter by favourite status
-- `limit` (number) - Limit number of results
+- `limit` (number) - Limit number of results (max 100)
 - `cursor` (string) - Pagination cursor
+- `includeContent` (boolean) - Include crawled HTML/text content (`false` keeps responses compact)
+- `sortOrder` (`asc` | `desc`) - Result sort order
 
 ---
 

@@ -111,7 +111,7 @@ export const backendForms: Record<
   karakeep: {
     displayName: "Karakeep",
     formConfig: [
-      { name: "url", label: "API URL" },
+      { name: "url", label: "Instance URL" },
       { name: "token", label: "API Token" },
     ],
   },
