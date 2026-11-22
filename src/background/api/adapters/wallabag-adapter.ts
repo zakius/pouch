@@ -1,6 +1,7 @@
 import { logger } from "../../../utils/logger";
-import { Effect, Semaphore } from "effect";
+import { Cause, Effect, Exit, Fiber } from "effect";
 import * as v from "valibot";
+import { reportRemoteOutcome, storageShutdownSignal } from "../../../utils/fatal-storage";
 import { wallabagConfigSchema, wallabagSettingsSchema } from "../../../utils/settings-schemas";
 import type { TokenManager } from "../../token-manager";
 import { parseOAuthToken, tokenManager } from "../../token-manager";
@@ -14,15 +15,20 @@ import {
   ConfigurationFailure,
   CredentialsFailure,
   HttpFailure,
+  recordMutationSuccess,
   storageHealthy,
   type EffectAdapter,
   type AcquisitionError,
+  type TransportError,
 } from "../effect-adapter";
 import type { Article } from "../../../types/common";
 import type { SavingArticle, SyncOptions } from "../read-it-later-adapter";
 export { wallabagConfigSchema, wallabagSettingsSchema };
 export type WallabagSettings = v.InferInput<typeof wallabagSettingsSchema>;
 export type WallabagConfig = v.InferInput<typeof wallabagConfigSchema>;
+
+const WALLABAG_SYNC_PER_PAGE = 150;
+const WALLABAG_SINCE_OVERLAP_SECONDS = 120;
 const wallabagItemSchema = v.object({
   id: v.union([
     v.pipe(v.number(), v.safeInteger(), v.minValue(1)),
@@ -73,7 +79,10 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
   )
     return yield* Effect.fail(new ConfigurationFailure("wallabag.acquire"));
   const config = { ...parsed.output.apiConfig };
-  const baseUrl = config.url.replace(/\/$/, "");
+  const baseUrl = config.url
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/\/api$/i, "");
   const tokenUrl = `${baseUrl}/oauth/v2/token`;
   const generation = yield* tokens.bindAccount("wallabag", JSON.stringify(config));
   const owned = Effect.try({
@@ -89,7 +98,7 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
     clientSecret: config.clientSecret,
     refreshToken: tokens.getTokenMetadata("wallabag")?.refreshToken ?? "",
   }));
-  const authenticate = Effect.gen(function* () {
+  const runAuthenticate: Effect.Effect<void, TransportError> = Effect.gen(function* () {
     yield* owned;
     const data = yield* requestJson({
       operation: "wallabag.authenticate",
@@ -125,6 +134,30 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
       generation,
     );
   });
+  let authFiber: Fiber.Fiber<void, TransportError> | undefined;
+  const authenticate: Effect.Effect<void, TransportError> = Effect.suspend(() => {
+    if (authFiber) return Fiber.join(authFiber);
+    return Effect.forkDetach(runAuthenticate).pipe(
+      Effect.flatMap((fiber) => {
+        if (authFiber) {
+          fiber.interruptUnsafe();
+          return Fiber.join(authFiber);
+        }
+        authFiber = fiber;
+        const shutdown = storageShutdownSignal();
+        const stop = () => fiber.interruptUnsafe();
+        shutdown.addEventListener("abort", stop, { once: true });
+        if (shutdown.aborted) stop();
+        fiber.addObserver((exit) => {
+          shutdown.removeEventListener("abort", stop);
+          if (Exit.isFailure(exit) && Cause.hasDies(exit.cause))
+            logger.error("Wallabag authentication died:", Cause.pretty(exit.cause));
+          if (authFiber === fiber) authFiber = undefined;
+        });
+        return Fiber.join(fiber);
+      }),
+    );
+  });
   const onAuthRejected = (authorization: string | undefined) =>
     Effect.gen(function* () {
       yield* owned;
@@ -132,14 +165,26 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
       if (token && !token.refreshToken && authorization === `Bearer ${token.accessToken}`)
         yield* tokens.discardRejectedToken("wallabag", token);
     });
-  const recoverAuth = Effect.gen(function* () {
-    yield* owned;
-    const result = yield* tokens.refreshToken("wallabag");
-    yield* owned;
-    if (result.success) return;
-    if (result.requiresReauth) return yield* authenticate;
-    return yield* Effect.fail(result.failure ?? new CredentialsFailure("wallabag.refresh"));
-  });
+  const hasRotatedToken = (rejectedAuthorization: string | undefined) => {
+    const current = tokens.getTokenMetadata("wallabag");
+    if (!current || Date.now() >= current.expiresAt) return false;
+    return (
+      rejectedAuthorization === undefined ||
+      `Bearer ${current.accessToken}` !== rejectedAuthorization
+    );
+  };
+  const recoverAuth = (getRejectedAuthorization: () => string | undefined) =>
+    Effect.gen(function* () {
+      yield* owned;
+      const rejectedAuthorization = getRejectedAuthorization();
+      if (hasRotatedToken(rejectedAuthorization)) return;
+      const result = yield* tokens.refreshToken("wallabag");
+      yield* owned;
+      if (result.success) return;
+      if (hasRotatedToken(rejectedAuthorization)) return;
+      if (result.requiresReauth) return yield* authenticate;
+      return yield* Effect.fail(result.failure ?? new CredentialsFailure("wallabag.refresh"));
+    });
   if (!tokens.getTokenMetadata("wallabag")) yield* authenticate;
   const authorization = Effect.gen(function* () {
     yield* owned;
@@ -149,27 +194,27 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
     // Wallabag issues token_type "bearer" but its OAuth server only matches "Bearer".
     return `Bearer ${access}`;
   });
-  const pacing = yield* Semaphore.make(1);
-  let lastRequestTime = 0;
-  const beforeAttempt = pacing.withPermit(
-    Effect.gen(function* () {
-      yield* Effect.sleep(Math.max(0, 1000 - (Date.now() - lastRequestTime)));
-      yield* storageHealthy;
-      lastRequestTime = Date.now();
-    }),
-  );
   const request = (
     endpoint: string,
     options: Omit<EffectRequest, "url" | "authorization" | "recoverAuth">,
   ) =>
-    requestJson({
-      ...options,
-      url: `${baseUrl}${endpoint}`,
-      authorization,
-      recoverAuth,
-      onAuthRejected,
-      beforeAttempt,
-      authRetries: 2,
+    Effect.suspend(() => {
+      let rejectedAuthorization: string | undefined;
+      return requestJson({
+        ...options,
+        url: `${baseUrl}${endpoint}`,
+        authorization: Effect.gen(function* () {
+          rejectedAuthorization = undefined;
+          return yield* authorization;
+        }),
+        recoverAuth: recoverAuth(() => rejectedAuthorization),
+        onAuthRejected: (header) =>
+          Effect.gen(function* () {
+            rejectedAuthorization = header;
+            yield* onAuthRejected(header);
+          }),
+        authRetries: 2,
+      });
     });
   const toArticle = (item: v.InferOutput<typeof wallabagItemSchema>, url: string): Article => ({
     id: String(item.id),
@@ -216,7 +261,17 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
         operation: "wallabag.delete",
         mutation: "delete",
         init: { method: "DELETE" },
-      });
+      }).pipe(
+        Effect.catchIf(
+          (error) => error instanceof HttpFailure && error.status === 404,
+          () =>
+            Effect.gen(function* () {
+              reportRemoteOutcome("delete", "succeeded");
+              yield* recordMutationSuccess("delete");
+              yield* storageHealthy;
+            }),
+        ),
+      );
     }),
     sync: Effect.fn("wallabag.sync")(function* (options?: SyncOptions) {
       const elapsed = options?.lastFullSyncTimestamp
@@ -244,18 +299,45 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
         timeSinceLastFullSync: elapsed,
         isBrowserIdle: options?.isBrowserIdle,
       });
-      const params = new URLSearchParams({ page: "1", perPage: "30", detail: "metadata" });
+      const params = new URLSearchParams({
+        page: "1",
+        perPage: String(WALLABAG_SYNC_PER_PAGE),
+        detail: "metadata",
+        sort: "created",
+        order: "asc",
+      });
       // Wallabag's since filter excludes deletions; only a full snapshot reconciles them.
-      if (mode === "update" && options?.lastSyncTimestamp)
-        params.set("since", String(Math.floor(Date.parse(options.lastSyncTimestamp) / 1000)));
-      const first = yield* page(params);
-      const articles = toArticles(first._embedded.items);
-      const totalPages = Math.ceil(first.total / 30);
-      for (let index = 2; index <= totalPages; index++) {
-        params.set("page", String(index));
-        const next = yield* page(params);
-        articles.push(...toArticles(next._embedded.items));
+      if (mode === "update" && options?.lastSyncTimestamp) {
+        const parsedMs = Date.parse(options.lastSyncTimestamp);
+        if (Number.isFinite(parsedMs)) {
+          const since = Math.max(0, Math.floor(parsedMs / 1000) - WALLABAG_SINCE_OVERLAP_SECONDS);
+          params.set("since", String(since));
+        }
       }
+      const first = yield* page(params);
+      const articlesById = new Map<string, Article>();
+      const collect = (items: readonly v.InferOutput<typeof wallabagItemSchema>[]) => {
+        for (const article of toArticles(items)) {
+          articlesById.set(String(article.id), article);
+        }
+      };
+      collect(first._embedded.items);
+      let totalPages = first.pages;
+      if (first._embedded.items.length > 0) {
+        for (let index = 2; index <= totalPages; index++) {
+          params.set("page", String(index));
+          const next = yield* page(params).pipe(
+            Effect.catchIf(
+              (error) => error instanceof HttpFailure && error.status === 404,
+              () => Effect.succeed(null),
+            ),
+          );
+          if (!next || next._embedded.items.length === 0) break;
+          collect(next._embedded.items);
+          totalPages = next.pages;
+        }
+      }
+      const articles = [...articlesById.values()];
       return {
         articles,
         mode,
@@ -274,7 +356,7 @@ export const createWallabagAdapter = Effect.fn("wallabag.acquire")(function* (
       };
     }),
     testConnection: Effect.gen(function* () {
-      const data = yield* request("/api/entries.json?page=1&perPage=1", {
+      const data = yield* request("/api/entries.json?page=1&perPage=1&detail=metadata", {
         operation: "wallabag.testConnection",
         timeoutMs: 10000,
       });

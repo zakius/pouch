@@ -332,8 +332,13 @@ export class TokenManager {
       if (refreshConfig) this.refreshConfigs.set(serviceName, refreshConfig);
       if (!this.refreshEffects.has(serviceName)) {
         // Cache failures through the cooldown so waiting requests retain the same recovery reason.
+        // Skip caching the in-memory "no refresh token" check so expiry triggers reauth right away.
         const shared = yield* Effect.cachedWithTTL(this.performRefresh(serviceName), (exit) =>
-          exit._tag === "Success" && !exit.value.success ? this.config.refreshCooldownMs : 0,
+          exit._tag === "Success" &&
+          !exit.value.success &&
+          exit.value.error !== "No refresh token available"
+            ? this.config.refreshCooldownMs
+            : 0,
         );
         if (!this.refreshEffects.has(serviceName)) this.refreshEffects.set(serviceName, shared);
       }
@@ -352,8 +357,36 @@ export class TokenManager {
           failure: new CredentialsFailure("token refresh"),
           error: "No token available",
         };
-      if (!token.refreshToken)
+      if (!token.refreshToken) {
+        if (Date.now() >= token.expiresAt) {
+          const discarded = yield* this.commitTokens(
+            (tokens) => {
+              this.assertAccount(serviceName, generation);
+              if (tokens.get(serviceName) !== token) throw new CredentialsFailure("token refresh");
+              tokens.delete(serviceName);
+            },
+            "failed",
+            "token refresh",
+          ).pipe(
+            Effect.as(true),
+            Effect.catchTag("CredentialsFailure", () => Effect.succeed(false)),
+          );
+          if (!discarded)
+            return {
+              success: false,
+              requiresReauth: false,
+              error: "Token ownership changed",
+              failure: new CredentialsFailure("token refresh"),
+            };
+          return {
+            success: false,
+            requiresReauth: true,
+            failure: new CredentialsFailure("token refresh"),
+            error: "Token expired without refresh token",
+          };
+        }
         return { success: false, requiresReauth: false, error: "No refresh token available" };
+      }
       const config =
         this.refreshConfigProviders.get(serviceName)?.() ?? this.refreshConfigs.get(serviceName);
       if (!config)

@@ -377,3 +377,32 @@ test("transient refresh failure does not perform unnecessary storage.local.set w
   expect(setSpy).not.toHaveBeenCalled();
   expect(manager.getTokenMetadata("wallabag")?.refreshCount).toBe(2);
 });
+
+test("refreshless token is preserved before expiry and discarded with requiresReauth once expired without cooldown lag", async () => {
+  const { storage } = setupBrowser();
+  const manager = new TokenManager({ refreshCooldownMs: 60_000 });
+  await runOperation(
+    manager.storeToken("wallabag", {
+      ...baseToken,
+      refreshToken: "",
+      expiresAt: Date.now() + 5_000,
+    }),
+  );
+
+  // Unexpired refreshless token is preserved and does not cache the failure across expiry.
+  const beforeExpiry = await runOperation(manager.refreshToken("wallabag"));
+  expect(beforeExpiry.success).toBe(false);
+  expect(beforeExpiry.requiresReauth).toBe(false);
+  expect(beforeExpiry.error).toBe("No refresh token available");
+  expect(manager.getTokenMetadata("wallabag")?.accessToken).toBe("old-access");
+
+  // Once expired, refreshToken immediately discards the token from memory and storage and signals reauth.
+  const metadata = manager.getTokenMetadata("wallabag")!;
+  metadata.expiresAt = Date.now() - 1;
+  const afterExpiry = await runOperation(manager.refreshToken("wallabag"));
+  expect(afterExpiry.success).toBe(false);
+  expect(afterExpiry.requiresReauth).toBe(true);
+  expect(afterExpiry.failure?._tag).toBe("CredentialsFailure");
+  expect(manager.getTokenMetadata("wallabag")).toBeNull();
+  expect(storage.api_tokens).toEqual([]);
+});

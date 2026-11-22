@@ -398,3 +398,21 @@ test("rapid showStatus calls cancel the inner 300ms clear timer so newer message
     globalThis.clearTimeout = origClearTimeout;
   }
 });
+
+test("Wallabag options form labels the URL field as Server URL", async () => {
+  await domReadyHandler?.();
+  await selectBackend("wallabag");
+
+  const labels = el("config-container").querySelectorAll("label");
+  const urlLabel = labels.find((label) => label.htmlFor === "url");
+  expect(urlLabel?.textContent).toBe("Server URL");
+
+  el("url").value = "not-a-url";
+  el("clientId").value = "cid";
+  el("clientSecret").value = "csecret";
+  el("username").value = "user";
+  el("password").value = "pass";
+  clickButton("save");
+  expect(sentMessages).toEqual([]);
+  expect(el("status").textContent).toContain("Server URL must be a valid http:// or https:// URL");
+});

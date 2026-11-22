@@ -88,7 +88,7 @@ export const backendForms: Record<
   wallabag: {
     displayName: "Wallabag",
     formConfig: [
-      { name: "url", label: "API URL" },
+      { name: "url", label: "Server URL" },
       { name: "clientId", label: "Client ID" },
       { name: "clientSecret", label: "Client Secret" },
       { name: "username", label: "Username" },
