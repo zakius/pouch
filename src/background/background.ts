@@ -368,7 +368,7 @@ browser.contextMenus.onClicked.addListener((info: OnClickData, tab?: Tab) =>
           return;
         }
         const repository = yield* getArticlesRepository;
-        yield* repository.saveArticle({ url: linkUrl, title: "" });
+        yield* repository.saveArticle({ url: linkUrl, title: "", resolveFinalUrl: true });
         if (tab?.id !== undefined) yield* updateUiForTab(tab.id);
       } else if (info.menuItemId === "save-page" && tab) {
         yield* togglePageSave(tab);

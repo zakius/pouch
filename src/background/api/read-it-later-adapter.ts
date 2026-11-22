@@ -3,6 +3,8 @@ import type { Article } from "../../types/common";
 export interface SavingArticle {
   url: string;
   title: string;
+  /** True for unvisited hyperlinks (e.g. context-menu "Save link") where the server should follow redirects. */
+  resolveFinalUrl?: boolean;
 }
 
 export type SyncMode = "overwrite" | "update";

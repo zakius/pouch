@@ -21,7 +21,7 @@ import { getReadyAdapter } from "../utils/adapter-factory";
 import { logger } from "../utils/logger";
 import type { Settings } from "../utils/settings";
 import { canonicalizeUrl, getCanonicalCacheGeneration } from "../utils/url-helpers";
-import type { SyncOptions, SyncResult } from "./api/read-it-later-adapter";
+import type { SavingArticle, SyncOptions, SyncResult } from "./api/read-it-later-adapter";
 import type { TokenManager } from "./token-manager";
 
 type Mutation = { type: "save"; article: Article } | { type: "delete"; id: number | string };
@@ -200,7 +200,7 @@ export class ArticlesRepository {
 
   readonly saveArticle = Effect.fn("repository.save")(function* (
     this: ArticlesRepository,
-    article: Pick<Article, "url" | "title">,
+    article: SavingArticle,
   ) {
     const account = yield* this.active();
     const { existing, canonicalUrl: precomputedCanonical } = yield* this.findSavedInAccount(
@@ -239,6 +239,9 @@ export class ArticlesRepository {
       const savedArticle = yield* api.saveArticle({
         url: account.settings.normalizeOnSave ? canonicalUrl : article.url,
         title: article.title,
+        ...(article.resolveFinalUrl !== undefined
+          ? { resolveFinalUrl: article.resolveFinalUrl }
+          : {}),
       });
       reportRemoteOutcome("save", "succeeded");
       const savedCanonicalUrl =

@@ -1,5 +1,7 @@
-import { Effect } from "effect";
+import { Cause, Effect, Exit, Fiber } from "effect";
 import * as v from "valibot";
+import { storageShutdownSignal } from "../../../utils/fatal-storage";
+import { logger } from "../../../utils/logger";
 import { instapaperConfigSchema, instapaperSettingsSchema } from "../../../utils/settings-schemas";
 export { instapaperConfigSchema, instapaperSettingsSchema };
 import type { Article } from "../../../types/common";
@@ -10,13 +12,13 @@ import {
   BrowserFailure,
   ConfigurationFailure,
   CredentialsFailure,
-  IncompleteSnapshotFailure,
   InvalidResponseFailure,
   ProviderFailure,
   RateLimitFailure,
   storageHealthy,
   type AcquisitionError,
   type EffectAdapter,
+  type TransportError,
 } from "../effect-adapter";
 import type { SavingArticle, SyncOptions } from "../read-it-later-adapter";
 
@@ -24,24 +26,14 @@ export type InstapaperSettings = v.InferInput<typeof instapaperSettingsSchema>;
 export type InstapaperConfig = v.InferInput<typeof instapaperConfigSchema>;
 
 const apiUrl = "https://www.instapaper.com";
-
-const instapaperTagSchema = v.object({
-  id: v.number(),
-  name: v.string(),
-});
+const INSTAPAPER_V1_LIST_LIMIT = 500;
 
 const instapaperBookmarkSchema = v.object({
   type: v.literal("bookmark"),
   bookmark_id: v.number(),
   url: v.string(),
-  title: v.string(),
-  description: v.optional(v.nullable(v.string())),
-  tags: v.optional(v.array(instapaperTagSchema)),
-  time: v.optional(v.number()),
-  image_url: v.optional(v.nullable(v.string())),
-  progress: v.optional(v.number()),
-  progress_timestamp: v.optional(v.number()),
-  private_source: v.optional(v.nullable(v.string())),
+  title: v.nullish(v.string()),
+  time: v.nullish(v.number()),
 });
 
 const instapaperUserSchema = v.object({
@@ -55,27 +47,25 @@ const instapaperErrorSchema = v.object({
   error_code: v.pipe(v.number(), v.safeInteger()),
 });
 
-const instapaperMetaSchema = v.object({
-  type: v.literal("meta"),
-});
-
-const instapaperSaveResponseSchema = v.array(
-  v.union([
-    instapaperBookmarkSchema,
-    instapaperUserSchema,
-    instapaperErrorSchema,
-    instapaperMetaSchema,
-  ]),
-);
+const instapaperDeleteResponseSchema = v.pipe(v.array(v.unknown()), v.maxLength(0));
 
 const instapaperSyncResponseSchema = v.object({
   user: instapaperUserSchema,
   bookmarks: v.array(instapaperBookmarkSchema),
-  highlights: v.optional(v.array(v.unknown())), // We don't use highlights
-  delete_ids: v.optional(v.array(v.number())),
+  highlights: v.optional(v.unknown()), // Unused
+  delete_ids: v.optional(v.unknown()), // Unused
 });
 
 type InstapaperBookmark = v.InferOutput<typeof instapaperBookmarkSchema>;
+
+const findSavedBookmark = (data: unknown): InstapaperBookmark | undefined => {
+  if (!Array.isArray(data)) return undefined;
+  for (const item of data) {
+    const parsed = v.safeParse(instapaperBookmarkSchema, item);
+    if (parsed.success) return parsed.output;
+  }
+  return undefined;
+};
 
 /** RFC 3986 percent-encoding required by OAuth 1.0a (RFC 5849 §3.6); encodeURIComponent leaves !'()* bare. */
 const percentEncode = (s: string) =>
@@ -106,7 +96,7 @@ export async function oauthHeader(
 ): Promise<string> {
   const oauthParams: Record<string, string> = {
     oauth_consumer_key: consumer.key,
-    oauth_nonce: Math.random().toString(36).substring(2),
+    oauth_nonce: crypto.randomUUID().replace(/-/g, ""),
     oauth_signature_method: "HMAC-SHA1",
     oauth_timestamp: Math.floor(Date.now() / 1000).toString(),
     ...(token ? { oauth_token: token.key } : {}),
@@ -151,7 +141,7 @@ const providerFailure = (operation: string) => (data: unknown) => {
 
 const toArticle = (item: InstapaperBookmark): Article => ({
   id: item.bookmark_id,
-  title: item.title,
+  title: item.title?.trim() || item.url,
   url: item.url,
   created_at: item.time ? new Date(item.time * 1000).toISOString() : new Date().toISOString(),
 });
@@ -161,30 +151,42 @@ export const createInstapaperAdapter = Effect.fn("instapaper.acquire")(function*
   tokens: TokenManager = tokenManager,
 ) {
   const parsed = v.safeParse(instapaperSettingsSchema, settings);
-  if (
-    !parsed.success ||
-    !parsed.output.apiConfig.consumerKey ||
-    !parsed.output.apiConfig.consumerSecret ||
-    !parsed.output.apiConfig.username
-  )
+  if (!parsed.success) return yield* Effect.fail(new ConfigurationFailure("instapaper.acquire"));
+  const consumerKey = parsed.output.apiConfig.consumerKey.trim();
+  const consumerSecret = parsed.output.apiConfig.consumerSecret.trim();
+  const username = parsed.output.apiConfig.username.trim();
+  if (!consumerKey || !consumerSecret || !username)
     return yield* Effect.fail(new ConfigurationFailure("instapaper.acquire"));
-  const config = { ...parsed.output.apiConfig };
+  // Do not trim password: Instapaper accounts may have empty or whitespace-significant passwords.
+  const config = {
+    ...parsed.output.apiConfig,
+    consumerKey,
+    consumerSecret,
+    username,
+  };
   const consumer = { key: config.consumerKey, secret: config.consumerSecret };
   const generation = yield* tokens.bindAccount("instapaper", JSON.stringify(config));
   const owned = Effect.try({
     try: () => tokens.assertAccount("instapaper", generation),
     catch: () => new CredentialsFailure("instapaper.account"),
   });
+
+  let token: OAuthCredentials | undefined;
+
   // Signing runs per attempt, so every request gets a fresh nonce and timestamp.
   const signedRequest = (
     operation: string,
     endpoint: string,
     params: Record<string, string>,
     options: {
-      token?: OAuthCredentials;
+      useToken?: boolean;
       mutation?: "save" | "delete";
       timeoutMs?: number;
       format?: "text";
+      authRetries?: number;
+      recoverAuth?: Effect.Effect<void, TransportError>;
+      confirms?: (data: unknown) => boolean;
+      onSign?: (usedToken: OAuthCredentials | undefined) => void;
     } = {},
   ) => {
     const url = `${apiUrl}${endpoint}`;
@@ -194,15 +196,22 @@ export const createInstapaperAdapter = Effect.fn("instapaper.acquire")(function*
       mutation: options.mutation,
       timeoutMs: options.timeoutMs,
       format: options.format,
+      authRetries: options.authRetries,
+      recoverAuth: options.recoverAuth,
+      confirms: options.confirms,
       providerFailure: providerFailure(operation),
-      authorization: owned.pipe(
-        Effect.andThen(
-          Effect.tryPromise({
-            try: () => oauthHeader(url, params, consumer, options.token),
-            catch: () => new BrowserFailure(operation, "crypto"),
-          }),
-        ),
-      ),
+      authorization: Effect.gen(function* () {
+        yield* owned;
+        const currentToken = options.useToken ? token : undefined;
+        if (options.useToken && !currentToken) {
+          return yield* Effect.fail(new CredentialsFailure(operation));
+        }
+        options.onSign?.(currentToken);
+        return yield* Effect.tryPromise({
+          try: () => oauthHeader(url, params, consumer, currentToken),
+          catch: () => new BrowserFailure(operation, "crypto"),
+        });
+      }),
       init: {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -212,100 +221,156 @@ export const createInstapaperAdapter = Effect.fn("instapaper.acquire")(function*
   };
 
   // xAuth exchanges the username and password for an access token without a redirect flow.
-  const body = yield* signedRequest(
-    "instapaper.authenticate",
-    "/api/1/oauth/access_token",
-    {
-      x_auth_username: config.username,
-      x_auth_password: config.password ?? "",
-      x_auth_mode: "client_auth",
-    },
-    { format: "text" },
-  );
-  const tokenParams = new URLSearchParams(typeof body === "string" ? body : "");
-  const key = tokenParams.get("oauth_token");
-  const secret = tokenParams.get("oauth_token_secret");
-  if (!key || !secret)
-    return yield* Effect.fail(new InvalidResponseFailure("instapaper.authenticate", "token"));
-  const token = { key, secret };
-  const now = Date.now();
-  // OAuth 1.0a tokens do not expire; one year prompts periodic re-authentication. The secret stays in memory.
-  yield* tokens.storeToken(
-    "instapaper",
-    {
-      accessToken: key,
-      refreshToken: "",
-      tokenType: "OAuth",
-      expiresAt: now + 365 * 24 * 60 * 60 * 1000,
-      issuedAt: now,
-      refreshCount: 0,
-    },
-    "succeeded",
-    "authentication",
-    generation,
-  );
+  const runAuthenticate: Effect.Effect<void, TransportError> = Effect.gen(function* () {
+    yield* owned;
+    const body = yield* signedRequest(
+      "instapaper.authenticate",
+      "/api/1/oauth/access_token",
+      {
+        x_auth_username: config.username,
+        x_auth_password: config.password ?? "",
+        x_auth_mode: "client_auth",
+      },
+      { format: "text", useToken: false },
+    );
+    const tokenParams = new URLSearchParams(typeof body === "string" ? body : "");
+    const key = tokenParams.get("oauth_token");
+    const secret = tokenParams.get("oauth_token_secret");
+    if (!key || !secret)
+      return yield* Effect.fail(new InvalidResponseFailure("instapaper.authenticate", "token"));
+    const nextToken: OAuthCredentials = { key, secret };
+    const now = Date.now();
+    // OAuth 1.0a tokens do not expire; one year prompts periodic re-authentication. The secret stays in memory.
+    yield* tokens.storeToken(
+      "instapaper",
+      {
+        accessToken: key,
+        refreshToken: "",
+        tokenType: "OAuth",
+        expiresAt: now + 365 * 24 * 60 * 60 * 1000,
+        issuedAt: now,
+        refreshCount: 0,
+      },
+      "succeeded",
+      "authentication",
+      generation,
+    );
+    yield* owned;
+    token = nextToken;
+  });
+
+  let authFiber: Fiber.Fiber<void, TransportError> | undefined;
+  const authenticate: Effect.Effect<void, TransportError> = Effect.suspend(() => {
+    if (authFiber) return Fiber.join(authFiber);
+    return Effect.forkDetach(runAuthenticate).pipe(
+      Effect.flatMap((fiber) => {
+        if (authFiber) {
+          fiber.interruptUnsafe();
+          return Fiber.join(authFiber);
+        }
+        authFiber = fiber;
+        const shutdown = storageShutdownSignal();
+        const stop = () => fiber.interruptUnsafe();
+        shutdown.addEventListener("abort", stop, { once: true });
+        if (shutdown.aborted) stop();
+        fiber.addObserver((exit) => {
+          shutdown.removeEventListener("abort", stop);
+          if (Exit.isFailure(exit) && Cause.hasDies(exit.cause))
+            logger.error("Instapaper authentication died:", Cause.pretty(exit.cause));
+          if (authFiber === fiber) authFiber = undefined;
+        });
+        return Fiber.join(fiber);
+      }),
+    );
+  });
+
+  yield* authenticate;
 
   const request = (
     operation: string,
     endpoint: string,
     params: Record<string, string>,
-    options: { mutation?: "save" | "delete"; timeoutMs?: number } = {},
-  ) => signedRequest(operation, endpoint, params, { ...options, token });
+    options: {
+      mutation?: "save" | "delete";
+      timeoutMs?: number;
+      confirms?: (data: unknown) => boolean;
+    } = {},
+  ) =>
+    Effect.suspend(() => {
+      let attemptedToken: OAuthCredentials | undefined;
+      return signedRequest(operation, endpoint, params, {
+        ...options,
+        useToken: true,
+        authRetries: 1,
+        onSign: (usedToken) => {
+          attemptedToken = usedToken;
+        },
+        recoverAuth: Effect.gen(function* () {
+          yield* owned;
+          if (attemptedToken !== undefined && token !== undefined && token !== attemptedToken) {
+            return;
+          }
+          yield* authenticate;
+        }),
+      });
+    });
 
   const adapter: EffectAdapter = {
     saveArticle: Effect.fn("instapaper.save")(function* (article: SavingArticle) {
-      const data = yield* request(
-        "instapaper.save",
-        "/api/1/bookmarks/add",
-        { url: article.url, title: article.title },
-        { mutation: "save" },
-      );
-      const items = yield* validate(instapaperSaveResponseSchema, data, "instapaper.save");
-      const saved = items.find((item): item is InstapaperBookmark => item.type === "bookmark");
+      const params: Record<string, string> = {
+        url: article.url,
+        resolve_final_url: article.resolveFinalUrl ? "1" : "0",
+      };
+      if (article.title.trim()) params.title = article.title;
+      const data = yield* request("instapaper.save", "/api/1/bookmarks/add", params, {
+        mutation: "save",
+        confirms: (payload) => findSavedBookmark(payload) !== undefined,
+      });
+      const saved = findSavedBookmark(data);
       if (!saved) return yield* Effect.fail(new InvalidResponseFailure("instapaper.save"));
       return toArticle(saved);
     }),
     deleteArticle: Effect.fn("instapaper.delete")(function* (id: number | string) {
-      yield* request(
+      const data = yield* request(
         "instapaper.delete",
         "/api/1/bookmarks/delete",
         { bookmark_id: String(id) },
-        { mutation: "delete" },
+        {
+          mutation: "delete",
+          confirms: (payload) => Array.isArray(payload) && payload.length === 0,
+        },
       );
+      yield* validate(instapaperDeleteResponseSchema, data, "instapaper.delete");
     }),
     /**
-     * Instapaper Sync (FULL SNAPSHOT)
+     * Instapaper API v1 Sync (FULL SNAPSHOT, capped at 500 unread bookmarks)
      *
-     * bookmarks/list returns at most `limit` bookmarks and has no cursor. Paging
-     * works through "have": every request after the first sends the IDs seen so
-     * far (comma-separated), and the API leaves those out of the response. The
-     * loop stops at the first page shorter than `limit`.
-     *
-     * delete_ids is ignored: each sync is a full snapshot, so removed bookmarks
-     * simply drop out. A full page containing only already-seen bookmarks means
-     * the API ignored "have" and retrieval cannot advance, so sync fails with
-     * IncompleteSnapshotFailure and the caller keeps its previous cache.
+     * Per official Instapaper v1 docs, /api/1/bookmarks/list always operates within
+     * the top `limit` (max 500) unread bookmarks; `have` is a delta exclusion filter
+     * within that window, not a pagination cursor past 500. Every sync fetches the
+     * top 500 unread bookmarks in a single request and always returns "overwrite"
+     * mode so removed or archived bookmarks are reconciled.
      */
-    sync: Effect.fn("instapaper.sync")(function* (options?: SyncOptions) {
-      const limit = 500;
+    sync: Effect.fn("instapaper.sync")(function* (_options?: SyncOptions) {
+      const data = yield* request("instapaper.sync", "/api/1/bookmarks/list", {
+        limit: String(INSTAPAPER_V1_LIST_LIMIT),
+      });
+      const page = yield* validate(instapaperSyncResponseSchema, data, "instapaper.sync");
+      if (page.bookmarks.length >= INSTAPAPER_V1_LIST_LIMIT) {
+        logger.warn(
+          `Instapaper API v1 returned ${page.bookmarks.length} unread bookmarks, reaching the ${INSTAPAPER_V1_LIST_LIMIT}-item unread listing cap; older unread bookmarks beyond ${INSTAPAPER_V1_LIST_LIMIT} cannot be listed by v1.`,
+        );
+      }
       const articlesById = new Map<number, Article>();
-      for (;;) {
-        const params: Record<string, string> = { limit: String(limit) };
-        if (articlesById.size > 0) params.have = [...articlesById.keys()].join(",");
-        const data = yield* request("instapaper.sync", "/api/1/bookmarks/list", params);
-        const page = yield* validate(instapaperSyncResponseSchema, data, "instapaper.sync");
-        const fresh = page.bookmarks.filter((item) => !articlesById.has(item.bookmark_id));
-        if (page.bookmarks.length >= limit && fresh.length === 0)
-          return yield* Effect.fail(new IncompleteSnapshotFailure("instapaper.sync"));
-        for (const item of fresh) articlesById.set(item.bookmark_id, toArticle(item));
-        if (page.bookmarks.length < limit) break;
-        // Instapaper publishes no rate limit; one second between pages is conservative.
-        yield* Effect.sleep(1000);
+      for (const item of page.bookmarks) {
+        if (!articlesById.has(item.bookmark_id)) {
+          articlesById.set(item.bookmark_id, toArticle(item));
+        }
       }
       const articles = [...articlesById.values()];
       return {
         articles,
-        mode: options?.mode ?? "overwrite",
+        mode: "overwrite" as const,
         metadata: {
           totalFetched: articles.length,
           totalProcessed: articles.length,
