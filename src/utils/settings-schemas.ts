@@ -118,7 +118,7 @@ export const backendForms: Record<
   linkace: {
     displayName: "LinkAce",
     formConfig: [
-      { name: "url", label: "API URL" },
+      { name: "url", label: "Instance URL (LinkAce 2.x)" },
       { name: "token", label: "API Token" },
     ],
   },

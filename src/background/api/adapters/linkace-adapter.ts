@@ -50,11 +50,18 @@ const linkaceSaveResponseSchema = v.union([
 /** Page totals come from `meta`, from Laravel's flat paginator fields, or not at all. */
 const linkacePageSchema = v.object({
   data: v.array(linkaceLinkSchema),
+  current_page: v.optional(v.number()),
   last_page: v.optional(v.number()),
-  meta: v.optional(v.object({ last_page: v.number() })),
+  meta: v.optional(
+    v.object({
+      current_page: v.optional(v.number()),
+      last_page: v.number(),
+    }),
+  ),
 });
 /** LinkAce trash listings return either a bare array or a paginated `{ data }` envelope. */
 const linkaceTrashLinksSchema = v.union([v.array(linkaceLinkSchema), linkacePageSchema]);
+const LINKACE_SYNC_PER_PAGE = 200;
 const MAX_TRASH_PAGES = 10;
 
 type LinkaceLink = v.InferOutput<typeof linkaceLinkSchema>;
@@ -85,7 +92,10 @@ export const createLinkaceAdapter = Effect.fn("linkace.acquire")(function* (
   // A missing token must not degrade into an unauthenticated request.
   if (!parsed.success || !token || /[\r\n]/.test(token))
     return yield* Effect.fail(new ConfigurationFailure("linkace.acquire"));
-  const apiUrl = parsed.output.apiConfig.url.replace(/\/+$/, "");
+  const apiUrl = parsed.output.apiConfig.url
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/\/api\/v2$/i, "");
   const authorization = Effect.succeed(`Bearer ${token}`);
 
   const request = (
@@ -212,39 +222,47 @@ export const createLinkaceAdapter = Effect.fn("linkace.acquire")(function* (
       });
     }),
     /**
-     * Update sync sends `created_after`, but LinkAce's link list does not honour it and
-     * returns every link; the repository merges the full listing either way.
+     * LinkAce v2's `GET /api/v2/links` has no `created_after` or `modified_since` filter, so every
+     * sync walks the full listing ordered by ascending ID and returns `"overwrite"` mode regardless
+     * of the requested mode so callers always reconcile deletions.
      *
-     * Without a page total, a short page ends the listing. A non-empty page of only
-     * already-seen links means the server ignored `page`, so sync fails instead of looping.
+     * Without a page total, a short page ends the listing. A mismatched `current_page` or a
+     * non-empty page of only already-seen links means the server ignored `page`, so sync fails
+     * instead of looping.
      */
-    sync: Effect.fn("linkace.sync")(function* (options?: SyncOptions) {
-      const perPage = 30;
-      const query = new URLSearchParams({ per_page: String(perPage) });
-      if (options?.lastSyncTimestamp && options.mode === "update") {
-        query.set("created_after", options.lastSyncTimestamp);
-        logger.debug("Sending LinkAce created_after (not honoured by the list endpoint)", {
-          lastSyncTimestamp: options.lastSyncTimestamp,
-        });
-      }
+    sync: Effect.fn("linkace.sync")(function* (_options?: SyncOptions) {
+      const perPage = LINKACE_SYNC_PER_PAGE;
+      const query = new URLSearchParams({
+        per_page: String(perPage),
+        order_by: "id",
+        order_dir: "asc",
+      });
       const articles: Article[] = [];
       const seen = new Set<number>();
       for (let page = 1; ; page++) {
-        // Keeps the one-request-per-second pacing of the shared client this replaces.
+        // Keeps the one-request-per-second pacing for LinkAce's default 60 req/min rate limit.
         if (page > 1) yield* Effect.sleep(1000);
         query.set("page", String(page));
         const data = yield* request("linkace.sync", `/api/v2/links?${query.toString()}`);
         const result = yield* validate(linkacePageSchema, data, "linkace.sync");
-        if (result.data.length > 0 && result.data.every((item) => seen.has(item.id)))
+        const currentPage = result.meta?.current_page ?? result.current_page;
+        if (currentPage !== undefined && currentPage !== page)
           return yield* Effect.fail(new IncompleteSnapshotFailure("linkace.sync"));
-        for (const item of result.data) seen.add(item.id);
-        articles.push(...result.data.map(toArticle));
+        let added = 0;
+        for (const item of result.data) {
+          if (seen.has(item.id)) continue;
+          seen.add(item.id);
+          articles.push(toArticle(item));
+          added++;
+        }
+        if (result.data.length > 0 && added === 0)
+          return yield* Effect.fail(new IncompleteSnapshotFailure("linkace.sync"));
         const lastPage = result.meta?.last_page ?? result.last_page;
         if (lastPage === undefined ? result.data.length !== perPage : page >= lastPage) break;
       }
       return {
         articles,
-        mode: options?.mode ?? "overwrite",
+        mode: "overwrite" as const,
         metadata: {
           totalFetched: articles.length,
           totalProcessed: articles.length,

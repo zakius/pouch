@@ -7,7 +7,7 @@
 | Instapaper | ✅ Yes                                  | ✅ Yes            | Incremental only                         |
 | Wallabag   | ✅ Yes (since)                          | ❌ No             | Periodic full syncs (24h)                |
 | Raindrop   | ⚠️ Partial (`sort=-created` early-stop) | ❌ No             | Periodic full syncs (24h idle / 48h max) |
-| LinkAce    | ⚠️ Likely (created_after)               | ❓ Unknown        | Periodic full syncs (48h)                |
+| LinkAce    | ❌ No                                   | N/A               | Full sync only                           |
 | Linkwarden | ❓ Uncertain                            | ❓ Unknown        | Needs testing/verification               |
 | KaraKeep   | ❌ No                                   | N/A               | Full sync only                           |
 | Bookmarks  | ❌ No                                   | N/A               | Full sync only                           |
@@ -113,39 +113,27 @@ params.set("since", unixTimestamp.toString());
 
 ---
 
-### 4. LinkAce ⚠️ DOCUMENTED INCREMENTAL SUPPORT
+### 4. LinkAce ❌ NO INCREMENTAL SUPPORT
 
 - **API:** https://api-docs.linkace.org/
-- **Method:** `created_after` parameter (ISO 8601)
-- **Deletions:** ❓ Unknown - not documented
-- **Strategy:** Incremental sync + periodic full syncs every 48h
-- **Implementation:** `linkace-adapter.ts:194-267`
+- **Endpoint:** `GET /api/v2/links?per_page=200&order_by=id&order_dir=asc&page=<n>`
+- **Method:** Full sync only (`GET /api/v2/links` does not support `created_after` or `modified_since`)
+- **Deletions:** N/A (full sync only; always returns `mode: "overwrite"` so deletions are reconciled on every sync)
+- **Strategy:** Full sync only - fetch all links ordered by ascending ID with `per_page=200` and 1s inter-page pacing (for LinkAce's default 60 req/min rate limit)
+- **Implementation:** `linkace-adapter.ts`
 
 **How it works:**
 
-1. Uses `created_after` parameter
-2. Format: ISO 8601 timestamp string
-3. Filters links created after timestamp
+1. Requests `GET /api/v2/links` with `per_page=200`, `order_by=id`, `order_dir=asc`, and `page=<n>`
+2. Ascending ID ordering keeps newly inserted links at the tail so earlier pages do not shift during pagination
+3. Deduplicates links by `id` across pages and fails with `IncompleteSnapshotFailure` if `current_page` mismatches or a non-empty page yields no new IDs
+4. Always returns `mode: "overwrite"` even when a caller requests `"update"`, ensuring deletions are reconciled after every full fetch
 
-**Example usage:**
+**Limitations:**
 
-```typescript
-// LinkAce documents created_after parameter for incremental sync
-// Format: ISO 8601 timestamp string
-if (options?.lastSyncTimestamp && options.mode === "update") {
-  baseParams.set("created_after", options.lastSyncTimestamp);
-}
-```
-
-**Unknowns:**
-
-- Deletion tracking: Not documented
-- Update tracking: Not documented
-
-**Strategy:**
-
-- Use incremental sync for speed
-- Perform periodic full syncs to catch potential deletions
+- `GET /api/v2/links` in LinkAce v2 does not support `created_after` or any timestamp filter (verified against `API/LinkController::index` and the OpenAPI spec)
+- Must fetch all links on every sync
+- Default API rate limit is 60 requests/minute, so multi-page sync pauses 1s between pages
 
 ---
 
@@ -234,7 +222,7 @@ The `createdAfter` parameter may not actually work as expected. If the parameter
 - Full sync only on first run or explicit user request
 - No periodic full syncs needed
 
-### For Backends with Partial Incremental Support (Wallabag, Raindrop, LinkAce)
+### For Backends with Partial Incremental Support (Wallabag, Raindrop)
 
 - Use hybrid approach:
   - Incremental sync for speed (every 30 min - 2 hours)
@@ -246,9 +234,8 @@ The `createdAfter` parameter may not actually work as expected. If the parameter
 
 - **Wallabag:** Full sync every 24h (uses hybrid approach internally)
 - **Raindrop:** Full sync every 24h when idle, or 48h max (uses hybrid approach internally)
-- **LinkAce:** Full sync every 48h
 
-### For Backends with No/Uncertain Incremental Support (KaraKeep, Bookmarks, Linkwarden)
+### For Backends with No/Uncertain Incremental Support (LinkAce, KaraKeep, Bookmarks, Linkwarden)
 
 - Always use full sync
 - For Linkwarden: Test and verify actual capabilities
@@ -282,7 +269,6 @@ For each backend with uncertain or partial incremental support:
 **Priority for testing:**
 
 1. **Linkwarden** - Uncertain if incremental sync works at all
-2. **LinkAce** - Deletion tracking unknown
 
 ---
 
@@ -293,7 +279,7 @@ For each backend with uncertain or partial incremental support:
 | Instapaper | N/A (uses ID lists)               | `12345,12346,12347`    |
 | Wallabag   | Unix seconds                      | `1704067200`           |
 | Raindrop   | ISO 8601 (client-side early-stop) | `2024-01-01T00:00:00Z` |
-| LinkAce    | ISO 8601                          | `2024-01-01T00:00:00Z` |
+| LinkAce    | N/A (full sync only)              | N/A                    |
 | Linkwarden | ISO 8601 (unverified)             | `2024-01-01T00:00:00Z` |
 | KaraKeep   | N/A (full sync only)              | N/A                    |
 | Bookmarks  | N/A (full sync only)              | N/A                    |

@@ -416,3 +416,20 @@ test("Wallabag options form labels the URL field as Server URL", async () => {
   expect(sentMessages).toEqual([]);
   expect(el("status").textContent).toContain("Server URL must be a valid http:// or https:// URL");
 });
+
+test("LinkAce options form labels the URL field as Instance URL (LinkAce 2.x)", async () => {
+  await domReadyHandler?.();
+  await selectBackend("linkace");
+
+  const labels = el("config-container").querySelectorAll("label");
+  const urlLabel = labels.find((label) => label.htmlFor === "url");
+  expect(urlLabel?.textContent).toBe("Instance URL (LinkAce 2.x)");
+
+  el("url").value = "not-a-url";
+  el("token").value = "token";
+  clickButton("save");
+  expect(sentMessages).toEqual([]);
+  expect(el("status").textContent).toContain(
+    "Instance URL (LinkAce 2.x) must be a valid http:// or https:// URL",
+  );
+});
