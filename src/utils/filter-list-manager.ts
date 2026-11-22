@@ -41,13 +41,21 @@ export interface FilterListResult {
 }
 
 const CACHE_KEY = "filter_list_url_cleaning_rules";
-const CACHE_VERSION = "1.1";
+export const FILTER_CACHE_VERSION = "1.2";
 const CACHE_EXPIRY_KEY = "filter_list_cache_expiry";
 
 const cachedRulesSchema = v.array(
   v.object({
     pattern: v.string(),
     params: v.array(v.string()),
+    paramRegexes: v.optional(
+      v.array(
+        v.object({
+          pattern: v.string(),
+          flags: v.string(),
+        }),
+      ),
+    ),
     domain: v.optional(v.string()),
     isRegex: v.optional(v.boolean()),
     isException: v.optional(v.boolean()),
@@ -173,7 +181,11 @@ export async function readCachedFilterLists(): Promise<CachedFilterRulesState> {
     const storedExpiry: unknown = result[CACHE_EXPIRY_KEY];
     const cacheExpiry = typeof storedExpiry === "number" ? storedExpiry : undefined;
 
-    if (cachedRules.success && cachedVersion === CACHE_VERSION && cachedRules.output.length > 0) {
+    if (
+      cachedRules.success &&
+      cachedVersion === FILTER_CACHE_VERSION &&
+      cachedRules.output.length > 0
+    ) {
       if (cacheExpiry !== undefined && Date.now() < cacheExpiry) {
         logger.info(`Loaded ${cachedRules.output.length} cached URL cleaning rules`);
         return { freshRules: cachedRules.output, staleRules: null };
@@ -210,7 +222,7 @@ export async function saveCachedFilterLists(
     const cacheExpiry = Date.now() + CACHE_DURATION_MS;
     await setLocal("persist filter cache", {
       [CACHE_KEY]: rules,
-      [`${CACHE_KEY}_version`]: CACHE_VERSION,
+      [`${CACHE_KEY}_version`]: FILTER_CACHE_VERSION,
       [CACHE_EXPIRY_KEY]: cacheExpiry,
       [`${CACHE_KEY}_filter_versions`]: filterListVersions || {},
     });

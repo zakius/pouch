@@ -221,8 +221,7 @@ export async function canonicalizeUrl(urlString: string): Promise<string> {
   try {
     await initializeUrlCanonizer();
 
-    const cleanedUrl = await filterListCleanUrl(urlString);
-    let url = new URL(cleanedUrl);
+    let url = new URL(urlString);
 
     const maxRedirects = 5;
     for (let i = 0; i < maxRedirects; i++) {
@@ -234,6 +233,7 @@ export async function canonicalizeUrl(urlString: string): Promise<string> {
       url = newUrl;
     }
     url = deAmpUrl(url);
+    url = new URL(await filterListCleanUrl(url.toString()));
     url = canonicalizeTwitterUrl(url);
     url = canonicalizeYoutubeUrl(url);
     url = canonicalizeAmazonUrl(url);

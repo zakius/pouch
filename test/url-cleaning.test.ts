@@ -7,13 +7,15 @@ import {
 } from "../src/utils/filter-list-url-cleaner";
 import {
 	initializeUrlCleanerWithRemoteLists,
+	loadCachedFilterLists,
 	loadFilterLists,
 	refreshFilterLists,
 	resetFilterListSources,
 	saveCachedFilterLists,
 	setFilterListSources,
 } from "../src/utils/filter-list-manager";
-import { parseCompleteFilterList } from "../src/utils/filter-list-parser";
+import { matchesPattern, parseCompleteFilterList } from "../src/utils/filter-list-parser";
+import { canonicalizeUrl, clearCanonicalUrlCache } from "../src/utils/url-helpers";
 import testFilterContent from "./test-data/test-filters.txt";
 
 await initializeWithRawFilterLists([
@@ -358,4 +360,192 @@ describe("Filter List Resilience & Cold Start", () => {
 			}).toEqual({ status: 0, error: "" });
 		});
 	}
+});
+
+describe("Issue #111: $removeparam modifiers, regexes, path tails, and post-unwrap cleaning", () => {
+	const originalBrowser = Object.getOwnPropertyDescriptor(globalThis, "browser");
+
+	function withLocalStorage(initial: Record<string, unknown> = {}) {
+		const storage: Record<string, unknown> = { ...initial };
+		Object.assign(globalThis, {
+			browser: {
+				storage: {
+					local: {
+						get: async (keys?: string | string[] | null) => {
+							if (!keys) return { ...storage };
+							const names = typeof keys === "string" ? [keys] : keys;
+							return Object.fromEntries(
+								names.filter((k) => k in storage).map((k) => [k, storage[k]]),
+							);
+						},
+						set: async (values: Record<string, unknown>) => {
+							Object.assign(storage, values);
+						},
+						remove: async (keys: string | string[]) => {
+							for (const key of typeof keys === "string" ? [keys] : keys) delete storage[key];
+						},
+					},
+				},
+			},
+		});
+		return storage;
+	}
+
+	afterEach(async () => {
+		if (originalBrowser) Object.defineProperty(globalThis, "browser", originalBrowser);
+		else Reflect.deleteProperty(globalThis, "browser");
+		resetFilterListSources();
+		clearCanonicalUrlCache();
+		await initializeWithRawFilterLists([{ name: "TestFilters", content: testFilterContent }]);
+	});
+
+	test("$removeparam=gclsrc,doc removes gclsrc and preserves doc", async () => {
+		const parsed = parseCompleteFilterList("$removeparam=gclsrc,doc");
+		expect(parsed.rules).toHaveLength(1);
+		expect(parsed.rules[0]?.params).toEqual(["gclsrc"]);
+
+		initializeWithFilterRules(parsed.rules);
+		expect(await cleanUrl("https://example.com/page?gclsrc=aw.ds&doc=123")).toBe(
+			"https://example.com/page?doc=123",
+		);
+	});
+
+	test("$removeparam=foo,document,important removes foo and preserves modifier names", async () => {
+		const parsed = parseCompleteFilterList(
+			"$removeparam=foo,document,important\n$doc,removeparam=bar",
+		);
+		expect(parsed.rules).toHaveLength(1);
+		expect(parsed.rules[0]?.params).toEqual(["foo", "bar"]);
+
+		initializeWithFilterRules(parsed.rules);
+		expect(
+			await cleanUrl("https://example.com/page?foo=0&bar=9&document=1&important=2&doc=3"),
+		).toBe("https://example.com/page?document=1&important=2&doc=3");
+	});
+
+	test("rules with non-document or scoping modifiers are skipped without leaking modifier names", async () => {
+		const raw = [
+			"$removeparam=foo,third-party",
+			"$removeparam=foo,image",
+			"$removeparam=foo,xmlhttprequest",
+			"$removeparam=foo,xhr",
+			"$removeparam=foo,script",
+			"$removeparam=foo,subdocument",
+			"$removeparam=foo,~doc",
+			"$removeparam=foo,~document",
+			"$removeparam=foo,badfilter",
+			"$removeparam=foo,doc,third-party",
+			"$removeparam=~keep",
+			"$removeparam=~/^keep_/",
+		].join("\n");
+
+		const parsed = parseCompleteFilterList(raw);
+		expect(parsed.rules).toHaveLength(0);
+
+		initializeWithFilterRules(parsed.rules);
+		const url =
+			"https://example.com/page?foo=1&third-party=2&image=3&xmlhttprequest=4&keep=5&keep_id=6";
+		expect(await cleanUrl(url)).toBe(url);
+	});
+
+	test("regex $removeparam rules (including commas inside /.../) strip matching params and survive JSON/cache round-trip", async () => {
+		const storage = withLocalStorage();
+		const raw = [
+			"$removeparam=/^utm_/",
+			"$removeparam=/^utm_[a-z]{1,10}/,doc",
+			"$removeparam=/^fbclid=/i,important",
+			"$removeparam=/^ref=home$/",
+			"@@||keep-utm.example^$removeparam=utm_source",
+			"$removeparam=/[unclosed",
+			"$removeparam=/^bad/g",
+		].join("\n");
+
+		const parsed = parseCompleteFilterList(raw);
+		expect(parsed.rules).toHaveLength(2);
+
+		// Verify JSON serialization round-trip and storage.local cache round-trip.
+		const jsonRoundTripped = JSON.parse(JSON.stringify(parsed.rules));
+		await saveCachedFilterLists(jsonRoundTripped);
+		const cached = await loadCachedFilterLists();
+		expect(cached).not.toBeNull();
+		expect(Object.keys(storage).length).toBeGreaterThan(0);
+
+		initializeWithFilterRules(cached ?? []);
+
+		expect(
+			await cleanUrl(
+				"https://example.com/article?utm_source=news&utm_medium=email&FBCLID=abc&ref=home&keep=1",
+			),
+		).toBe("https://example.com/article?keep=1");
+
+		expect(
+			await cleanUrl("https://example.com/article?ref=other&my_utm_source=keep&doc=42"),
+		).toBe("https://example.com/article?ref=other&my_utm_source=keep&doc=42");
+
+		// Literal exception rule overrides regex removal for that specific param.
+		expect(
+			await cleanUrl(
+				"https://keep-utm.example/article?utm_source=keep&utm_medium=drop&keep=1",
+			),
+		).toBe("https://keep-utm.example/article?utm_source=keep&keep=1");
+	});
+
+	test("||domain/path prefix matching and separator/end anchors", async () => {
+		await initializeWithRawFilterLists([
+			{
+				name: "PathRules",
+				content: "||example.com/foo$removeparam=bar\n||sep.example/foo^$removeparam=baz",
+			},
+		]);
+
+		expect(await cleanUrl("https://example.com/foo?bar=1&keep=2")).toBe(
+			"https://example.com/foo?keep=2",
+		);
+		expect(await cleanUrl("https://example.com/foo/baz?bar=1&keep=2")).toBe(
+			"https://example.com/foo/baz?keep=2",
+		);
+		expect(await cleanUrl("https://example.com/other?bar=1&keep=2")).toBe(
+			"https://example.com/other?bar=1&keep=2",
+		);
+
+		expect(await cleanUrl("https://sep.example/foo?baz=1&keep=2")).toBe(
+			"https://sep.example/foo?keep=2",
+		);
+		expect(await cleanUrl("https://sep.example/foo/child?baz=1&keep=2")).toBe(
+			"https://sep.example/foo/child?keep=2",
+		);
+		expect(await cleanUrl("https://sep.example/foobar?baz=1&keep=2")).toBe(
+			"https://sep.example/foobar?baz=1&keep=2",
+		);
+
+		expect(matchesPattern("example.com", "||example.com/foo$", "https://example.com/foo")).toBe(
+			true,
+		);
+		expect(
+			matchesPattern("example.com", "||example.com/foo$", "https://example.com/foo/baz"),
+		).toBe(false);
+	});
+
+	test("canonicalizeUrl strips tracking params after unwrapping Google redirects and AMP URLs", async () => {
+		withLocalStorage();
+		await initializeWithRawFilterLists([
+			{
+				name: "UnwrapClean",
+				content: "$removeparam=/^utm_/\n||example.com^$removeparam=ref,doc",
+			},
+		]);
+		clearCanonicalUrlCache();
+
+		expect(
+			await canonicalizeUrl(
+				"https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Farticle%3Futm_source%3Dtest%26ref%3Dg%26keep%3D1&sa=D",
+			),
+		).toBe("https://example.com/article?keep=1");
+
+		expect(
+			await canonicalizeUrl(
+				"https://www.google.com/amp/s/example.com/article?utm_medium=amp&ref=top&keep=1",
+			),
+		).toBe("https://example.com/article?keep=1");
+	});
 });

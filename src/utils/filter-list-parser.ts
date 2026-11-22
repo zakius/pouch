@@ -13,13 +13,111 @@ export interface FilterListMetadata {
   ruleCount: number;
 }
 
+export interface ParamRegexSpec {
+  pattern: string;
+  flags: string;
+}
+
 export interface FilterRule {
   pattern: string;
   params: string[];
+  paramRegexes?: ParamRegexSpec[];
   domain?: string;
   isRegex?: boolean;
   isException?: boolean; // @@ prefix indicates exception rule
   scope?: "domain" | "url"; // "url" rules include a path and must match the full URL
+}
+
+// Modifiers that do not narrow applicability for top-level document navigation URLs.
+// All other modifiers (domain=, third-party, image, xhr, ~document, badfilter, ...)
+// restrict scope or request type and cause the rule to be skipped rather than broadened.
+const SAFE_DOCUMENT_MODIFIERS = new Set(["doc", "document", "important", "all"]);
+
+function findClosingRegexSlash(input: string, openSlashIndex: number): number {
+  let inCharClass = false;
+  for (let i = openSlashIndex + 1; i < input.length; i++) {
+    const ch = input[i];
+    if (ch === "\\") {
+      if (i + 1 >= input.length) {
+        return -1;
+      }
+      i++;
+      continue;
+    }
+    if (ch === "[" && !inCharClass) {
+      inCharClass = true;
+    } else if (ch === "]" && inCharClass) {
+      inCharClass = false;
+    } else if (ch === "/" && !inCharClass) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function splitFilterOptions(optionsPart: string): string[] | null {
+  const options: string[] = [];
+  let current = "";
+
+  for (let i = 0; i < optionsPart.length; i++) {
+    const ch = optionsPart[i];
+    if (ch === ",") {
+      options.push(current.trim());
+      current = "";
+      continue;
+    }
+
+    current += ch;
+
+    // Keep commas inside removeparam=/regex/[flags] (or ~/regex/) intact.
+    if (ch === "/") {
+      const normalized = current.trimStart().toLowerCase();
+      if (normalized === "removeparam=/" || normalized === "removeparam=~/") {
+        const closingSlash = findClosingRegexSlash(optionsPart, i);
+        if (closingSlash === -1) {
+          return null;
+        }
+        current += optionsPart.slice(i + 1, closingSlash + 1);
+        i = closingSlash;
+      }
+    }
+  }
+
+  options.push(current.trim());
+  return options;
+}
+
+function parseRemoveParamValue(
+  rawValue: string,
+): { kind: "literal"; param: string } | { kind: "regex"; regex: ParamRegexSpec } | null {
+  if (!rawValue || rawValue.startsWith("~")) {
+    return null;
+  }
+
+  if (rawValue.startsWith("/")) {
+    const closingSlash = findClosingRegexSlash(rawValue, 0);
+    if (closingSlash <= 1) {
+      return null;
+    }
+    const pattern = rawValue.slice(1, closingSlash);
+    const flags = rawValue.slice(closingSlash + 1);
+    // Only allow stateless flags (none or case-insensitive `i`).
+    if (flags !== "" && flags !== "i") {
+      return null;
+    }
+    try {
+      new RegExp(pattern, flags);
+    } catch {
+      return null;
+    }
+    return { kind: "regex", regex: { pattern, flags } };
+  }
+
+  if (rawValue.includes("=") || rawValue.includes("$") || rawValue.includes("/")) {
+    return null;
+  }
+
+  return { kind: "literal", param: rawValue };
 }
 
 // Convert an ABP-style wildcard pattern to a regex source:
@@ -40,9 +138,17 @@ function wildcardToRegexSource(pattern: string): string {
   return source;
 }
 
-function testWildcardPattern(pattern: string, candidate: string): boolean {
+function testWildcardPattern(pattern: string, candidate: string, anchorEnd = true): boolean {
   try {
-    return new RegExp(`^${wildcardToRegexSource(pattern)}$`).test(candidate);
+    let body = pattern;
+    let shouldAnchorEnd = anchorEnd;
+    if (!anchorEnd && (body.endsWith("$") || body.endsWith("|"))) {
+      body = body.slice(0, -1);
+      shouldAnchorEnd = true;
+    }
+    return new RegExp(`^${wildcardToRegexSource(body)}${shouldAnchorEnd ? "$" : ""}`).test(
+      candidate,
+    );
   } catch {
     return false;
   }
@@ -143,31 +249,60 @@ export function parseFilterList(raw: string): {
       !trimmed ||
       trimmed.startsWith("!") ||
       trimmed.startsWith("#") ||
-      !trimmed.includes("$removeparam=")
+      !trimmed.toLowerCase().includes("removeparam=")
     ) {
       continue;
     }
 
-    const removeParamIndex = trimmed.indexOf("$removeparam=");
-    if (removeParamIndex === -1) continue;
-
     const isException = trimmed.startsWith("@@");
     const ruleText = isException ? trimmed.substring(2) : trimmed;
-    const removeParamIndexInRule = ruleText.indexOf("$removeparam=");
 
-    if (removeParamIndexInRule === -1) continue;
-
-    const patternPart = ruleText.substring(0, removeParamIndexInRule);
-    const removeParamPart = ruleText.substring(removeParamIndexInRule + "$removeparam=".length);
-
-    if (removeParamPart.includes("$") && !removeParamPart.startsWith("$removeparam=")) {
+    // Regex URL patterns (e.g. /^https?:\/\/...$/$removeparam=...) are not supported.
+    if (ruleText.startsWith("/")) {
       continue;
     }
 
-    const options = removeParamPart.split(",").map((option) => option.trim());
-    // Scope-modifying options (domain=, ~domain, third-party, ...) are not supported.
-    // Skip the whole rule rather than broadening its scope.
-    if (options.some((option) => !option || option.includes("=") || option.startsWith("~"))) {
+    const dollarIndex = ruleText.indexOf("$");
+    if (dollarIndex === -1) {
+      continue;
+    }
+
+    const patternPart = ruleText.substring(0, dollarIndex);
+    const optionsPart = ruleText.substring(dollarIndex + 1);
+
+    const options = splitFilterOptions(optionsPart);
+    if (!options) {
+      continue;
+    }
+
+    let removeParamRawValue: string | undefined;
+    let hasUnsupportedOption = false;
+
+    for (const option of options) {
+      if (!option) {
+        hasUnsupportedOption = true;
+        break;
+      }
+      if (option.toLowerCase().startsWith("removeparam=")) {
+        if (removeParamRawValue !== undefined) {
+          hasUnsupportedOption = true;
+          break;
+        }
+        removeParamRawValue = option.slice("removeparam=".length);
+      } else if (!SAFE_DOCUMENT_MODIFIERS.has(option.toLowerCase())) {
+        // Scope-modifying or non-document options (domain=, third-party, image, xhr, ...)
+        // are not supported. Skip the whole rule rather than broadening its scope.
+        hasUnsupportedOption = true;
+        break;
+      }
+    }
+
+    if (hasUnsupportedOption || removeParamRawValue === undefined) {
+      continue;
+    }
+
+    const parsedParam = parseRemoveParamValue(removeParamRawValue);
+    if (!parsedParam) {
       continue;
     }
 
@@ -234,21 +369,36 @@ export function parseFilterList(raw: string): {
       domain = patternPart;
     }
 
-    const params = options;
-
     const ruleKey = `${isException ? "@@" : ""}${pattern}`;
     const existingRule = ruleMap.get(ruleKey);
     if (existingRule) {
-      existingRule.params.push(...params);
+      if (parsedParam.kind === "literal") {
+        if (!existingRule.params.includes(parsedParam.param)) {
+          existingRule.params.push(parsedParam.param);
+        }
+      } else {
+        existingRule.paramRegexes ??= [];
+        const duplicate = existingRule.paramRegexes.some(
+          (entry) =>
+            entry.pattern === parsedParam.regex.pattern && entry.flags === parsedParam.regex.flags,
+        );
+        if (!duplicate) {
+          existingRule.paramRegexes.push(parsedParam.regex);
+        }
+      }
     } else {
-      ruleMap.set(ruleKey, {
+      const newRule: FilterRule = {
         pattern,
-        params,
+        params: parsedParam.kind === "literal" ? [parsedParam.param] : [],
         domain,
         isRegex,
         isException,
         scope,
-      });
+      };
+      if (parsedParam.kind === "regex") {
+        newRule.paramRegexes = [parsedParam.regex];
+      }
+      ruleMap.set(ruleKey, newRule);
     }
   }
 
@@ -295,13 +445,16 @@ export function matchesPattern(hostname: string, pattern: string, fullUrl?: stri
     if (fullUrl === undefined) {
       return false;
     }
-    let pathname: string;
+    let parsedUrl: URL;
     try {
-      pathname = new URL(fullUrl).pathname;
+      parsedUrl = new URL(fullUrl);
     } catch {
       return false;
     }
-    return testWildcardPattern(tail, pathname);
+    const candidate = tail.includes("?")
+      ? `${parsedUrl.pathname}${parsedUrl.search}`
+      : parsedUrl.pathname;
+    return testWildcardPattern(tail, candidate, false);
   }
   if (pattern.startsWith("|") && pattern.endsWith("|")) {
     const domain = pattern.substring(1, pattern.length - 1);
@@ -322,7 +475,7 @@ export function matchesPattern(hostname: string, pattern: string, fullUrl?: stri
     if (!pathPart || pathPart === "/" || pathPart === "/*") {
       return true;
     }
-    return fullUrl !== undefined && testWildcardPattern(pattern, fullUrl);
+    return fullUrl !== undefined && testWildcardPattern(pattern, fullUrl, false);
   }
 
   if (pattern.startsWith("?")) {

@@ -1,8 +1,31 @@
-import { type FilterRule, matchesPattern, parseCompleteFilterList } from "./filter-list-parser";
+import {
+  type FilterRule,
+  type ParamRegexSpec,
+  matchesPattern,
+  parseCompleteFilterList,
+} from "./filter-list-parser";
 import { logger } from "./logger";
 
 let filterRules: FilterRule[] = [];
 let isInitialized = false;
+const compiledRegexCache = new Map<string, RegExp | null>();
+
+function compileParamRegex(spec: ParamRegexSpec): RegExp | null {
+  const key = `${spec.flags}\0${spec.pattern}`;
+  if (compiledRegexCache.has(key)) {
+    return compiledRegexCache.get(key) ?? null;
+  }
+  let compiled: RegExp | null = null;
+  if (spec.flags === "" || spec.flags === "i") {
+    try {
+      compiled = new RegExp(spec.pattern, spec.flags);
+    } catch {
+      compiled = null;
+    }
+  }
+  compiledRegexCache.set(key, compiled);
+  return compiled;
+}
 
 export function filterRuleCount(): number {
   return filterRules.length;
@@ -10,6 +33,7 @@ export function filterRuleCount(): number {
 
 export function initializeWithFilterRules(rules: FilterRule[]): void {
   filterRules = rules;
+  compiledRegexCache.clear();
   isInitialized = true;
 }
 
@@ -80,17 +104,44 @@ function applyFilterRules(urlString: string): string {
       return urlString;
     }
 
+    if (!url.search) {
+      return urlString;
+    }
+
     const paramsToRemove = new Set<string>();
+    const regexesToRemove: RegExp[] = [];
     for (const rule of applicableRegularRules) {
       for (const param of rule.params) {
         paramsToRemove.add(param);
       }
+      if (rule.paramRegexes) {
+        for (const spec of rule.paramRegexes) {
+          const compiled = compileParamRegex(spec);
+          if (compiled) {
+            regexesToRemove.push(compiled);
+          }
+        }
+      }
     }
 
+    const exceptionParams = new Set<string>();
+    const exceptionRegexes: RegExp[] = [];
     for (const rule of applicableExceptionRules) {
       for (const param of rule.params) {
-        paramsToRemove.delete(param);
+        exceptionParams.add(param);
       }
+      if (rule.paramRegexes) {
+        for (const spec of rule.paramRegexes) {
+          const compiled = compileParamRegex(spec);
+          if (compiled) {
+            exceptionRegexes.push(compiled);
+          }
+        }
+      }
+    }
+
+    if (paramsToRemove.size === 0 && regexesToRemove.length === 0) {
+      return urlString;
     }
 
     // Filter the raw pairs: searchParams would re-encode kept ones (%20 -> +, flag -> flag=).
@@ -98,8 +149,22 @@ function applyFilterRules(urlString: string): string {
       .slice(1)
       .split("&")
       .filter((pair) => {
-        const [name] = new URLSearchParams(pair).keys();
-        return name === undefined || !paramsToRemove.has(name);
+        const entry = new URLSearchParams(pair).entries().next().value;
+        if (entry === undefined) {
+          return true;
+        }
+        const [name, value] = entry;
+        const pairForRegex = pair.includes("=") ? `${name}=${value}` : name;
+
+        const matchesRegular =
+          paramsToRemove.has(name) || regexesToRemove.some((regex) => regex.test(pairForRegex));
+        if (!matchesRegular) {
+          return true;
+        }
+
+        return (
+          exceptionParams.has(name) || exceptionRegexes.some((regex) => regex.test(pairForRegex))
+        );
       });
     url.search = kept.join("&");
 

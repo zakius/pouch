@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { setFilterListSources } from "../../src/utils/filter-list-manager";
+import { FILTER_CACHE_VERSION, setFilterListSources } from "../../src/utils/filter-list-manager";
 import { parseCompleteFilterList } from "../../src/utils/filter-list-parser";
 import { canonicalizeUrl, initializeUrlCanonizer } from "../../src/utils/url-helpers";
 
@@ -65,7 +65,7 @@ const cachedRules = parseCompleteFilterList("$removeparam=utm_source").rules;
 switch (scenario) {
   case "fresh-cache-race": {
     store[CACHE_KEY] = cachedRules;
-    store[`${CACHE_KEY}_version`] = "1.1";
+    store[`${CACHE_KEY}_version`] = FILTER_CACHE_VERSION;
     store[CACHE_EXPIRY_KEY] = Date.now() + 60_000;
     setFilterListSources([{ name: "ListA", url: "https://filters.example/a.txt" }]);
     globalThis.fetch = (async () => {
@@ -89,7 +89,7 @@ switch (scenario) {
 
   case "expired-cache-slow-remote": {
     store[CACHE_KEY] = cachedRules;
-    store[`${CACHE_KEY}_version`] = "1.1";
+    store[`${CACHE_KEY}_version`] = FILTER_CACHE_VERSION;
     store[CACHE_EXPIRY_KEY] = Date.now() - 60_000;
     setFilterListSources([
       { name: "ListA", url: "https://filters.example/a.txt" },
