@@ -2,15 +2,15 @@
 
 ## Summary Table
 
-| Backend    | Incremental Support       | Deletion Tracking | Strategy                   |
-| ---------- | ------------------------- | ----------------- | -------------------------- |
-| Instapaper | ✅ Yes                    | ✅ Yes            | Incremental only           |
-| Wallabag   | ✅ Yes (since)            | ❌ No             | Periodic full syncs (24h)  |
-| Raindrop   | ⚠️ Partial (search)       | ❌ No             | Periodic full syncs (48h)  |
-| LinkAce    | ⚠️ Likely (created_after) | ❓ Unknown        | Periodic full syncs (48h)  |
-| Linkwarden | ❓ Uncertain              | ❓ Unknown        | Needs testing/verification |
-| KaraKeep   | ❌ No                     | N/A               | Full sync only             |
-| Bookmarks  | ❌ No                     | N/A               | Full sync only             |
+| Backend    | Incremental Support                     | Deletion Tracking | Strategy                                 |
+| ---------- | --------------------------------------- | ----------------- | ---------------------------------------- |
+| Instapaper | ✅ Yes                                  | ✅ Yes            | Incremental only                         |
+| Wallabag   | ✅ Yes (since)                          | ❌ No             | Periodic full syncs (24h)                |
+| Raindrop   | ⚠️ Partial (`sort=-created` early-stop) | ❌ No             | Periodic full syncs (24h idle / 48h max) |
+| LinkAce    | ⚠️ Likely (created_after)               | ❓ Unknown        | Periodic full syncs (48h)                |
+| Linkwarden | ❓ Uncertain                            | ❓ Unknown        | Needs testing/verification               |
+| KaraKeep   | ❌ No                                   | N/A               | Full sync only                           |
+| Bookmarks  | ❌ No                                   | N/A               | Full sync only                           |
 
 ## Detailed Backend Analysis
 
@@ -82,39 +82,34 @@ params.set("since", unixTimestamp.toString());
 
 ---
 
-### 3. Raindrop ⚠️ INCREMENTAL VIA SEARCH SYNTAX
+### 3. Raindrop ⚠️ INCREMENTAL VIA `sort=-created` EARLY-STOP
 
 - **API:** https://developer.raindrop.io/
-- **Method:** Search parameter `created:>UNIX_TIMESTAMP`
-- **Deletions:** ❌ No - only filters by creation date
-- **Strategy:** Incremental sync + periodic full syncs every 48h
-- **Implementation:** `raindrop-adapter.ts:179-255`
+- **Method:** Paginate `GET /raindrops/0?page=<p>&perpage=50&sort=-created` and stop early client-side once `created < lastSyncTimestamp - 120s`
+- **Deletions:** ❌ No - incremental sync only captures newly created raindrops
+- **Strategy:** Hybrid incremental sync + periodic full syncs (24h when idle, forced at 48h)
+- **Implementation:** `raindrop-adapter.ts`
 
 **How it works:**
 
-1. Uses search syntax for incremental filtering
-2. Search syntax: `created:>UNIX_TIMESTAMP`
-3. Timestamp must be Unix timestamp in SECONDS
-4. Does NOT track deletions or updates to existing items
-
-**Search syntax example:**
-
-```typescript
-// Convert ISO string to Unix timestamp in seconds
-const unixTimestamp = Math.floor(new Date(lastSyncTimestamp).getTime() / 1000);
-queryParams.set("search", `created:>${unixTimestamp}`);
-```
+1. Requests pages ordered newest-first (`sort=-created`) without a `search` parameter (Raindrop's `created:` search operator only supports calendar dates `YYYY-MM-DD`, not Unix timestamps)
+2. In `"update"` mode, computes a cutoff `Date.parse(lastSyncTimestamp) - 120_000` (2-minute clock-skew overlap)
+3. Keeps items with unparseable `created` or `created >= cutoffMs`; once an item older than `cutoffMs` is seen, finishes the current page and stops paginating early
+4. Deduplicates items by `_id` across pages and fails with `IncompleteSnapshotFailure` if a full page yields no new IDs
+5. Falls back to `"overwrite"` when `lastSyncTimestamp` is missing/invalid, on first sync, after 24h when idle, or after 48h overdue
 
 **Limitations:**
 
-- Only filters by creation date
-- Does NOT track deletions
-- Does NOT track updates to existing raindrops
+- Only captures newly created raindrops during incremental sync
+- Does NOT track deletions (reconciled on periodic full syncs)
+- Does NOT track updates to older existing raindrops (reconciled on periodic full syncs)
 
-**Strategy:**
+**Hybrid Strategy:**
 
-- Use incremental sync for quick updates
-- Perform full sync every 24-48 hours to catch deletions
+- First sync or missing/invalid `lastSyncTimestamp` → FULL (`overwrite`)
+- Last full sync ≥ 48h ago → FULL (`overwrite`)
+- Last full sync ≥ 24h ago + browser idle → FULL (`overwrite`)
+- Otherwise → INCREMENTAL (`update`)
 
 ---
 
@@ -250,7 +245,7 @@ The `createdAfter` parameter may not actually work as expected. If the parameter
 **Recommended intervals:**
 
 - **Wallabag:** Full sync every 24h (uses hybrid approach internally)
-- **Raindrop:** Full sync every 48h
+- **Raindrop:** Full sync every 24h when idle, or 48h max (uses hybrid approach internally)
 - **LinkAce:** Full sync every 48h
 
 ### For Backends with No/Uncertain Incremental Support (KaraKeep, Bookmarks, Linkwarden)
@@ -288,21 +283,20 @@ For each backend with uncertain or partial incremental support:
 
 1. **Linkwarden** - Uncertain if incremental sync works at all
 2. **LinkAce** - Deletion tracking unknown
-3. **Raindrop** - Verify search syntax works as expected
 
 ---
 
 ## Timestamp Formats Reference
 
-| Backend    | Format                   | Example                |
-| ---------- | ------------------------ | ---------------------- |
-| Instapaper | N/A (uses ID lists)      | `12345,12346,12347`    |
-| Wallabag   | Unix seconds             | `1704067200`           |
-| Raindrop   | Unix seconds (in search) | `created:>1704067200`  |
-| LinkAce    | ISO 8601                 | `2024-01-01T00:00:00Z` |
-| Linkwarden | ISO 8601 (unverified)    | `2024-01-01T00:00:00Z` |
-| KaraKeep   | N/A (full sync only)     | N/A                    |
-| Bookmarks  | N/A (full sync only)     | N/A                    |
+| Backend    | Format                            | Example                |
+| ---------- | --------------------------------- | ---------------------- |
+| Instapaper | N/A (uses ID lists)               | `12345,12346,12347`    |
+| Wallabag   | Unix seconds                      | `1704067200`           |
+| Raindrop   | ISO 8601 (client-side early-stop) | `2024-01-01T00:00:00Z` |
+| LinkAce    | ISO 8601                          | `2024-01-01T00:00:00Z` |
+| Linkwarden | ISO 8601 (unverified)             | `2024-01-01T00:00:00Z` |
+| KaraKeep   | N/A (full sync only)              | N/A                    |
+| Bookmarks  | N/A (full sync only)              | N/A                    |
 
 ---
 

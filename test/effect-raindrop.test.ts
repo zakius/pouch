@@ -17,16 +17,17 @@ const settings: RaindropSettings = {
 };
 const json = (body: unknown, status = 200, headers?: HeadersInit) =>
   new Response(JSON.stringify(body), { status, headers });
-const item = (id: number) => ({
+const item = (id: number, overrides: Record<string, unknown> = {}) => ({
   _id: id,
   title: `Article ${id}`,
   link: `https://example.com/${id}`,
   created: `2026-01-0${(id % 9) + 1}T00:00:00.000Z`,
   tags: [],
+  ...overrides,
 });
 const page = (ids: number[], count?: number) => ({
   result: true,
-  items: ids.map(item),
+  items: ids.map((id) => item(id)),
   ...(count === undefined ? {} : { count }),
 });
 const range = (from: number, to: number) =>
@@ -106,8 +107,76 @@ test("save posts JSON with the static key and maps the saved raindrop", async ()
   expect(new Headers(init?.headers).get("Content-Type")).toBe("application/json");
   expect(JSON.parse(String(init?.body))).toEqual({
     link: "https://example.com/1",
+    pleaseParse: {},
     title: "Article 1",
   });
+});
+
+test("save requests pleaseParse, omits blank title, and accepts minimal item shapes", async () => {
+  const fetchMock = api(() =>
+    json({
+      result: true,
+      item: {
+        _id: 99,
+        title: null,
+        link: "https://example.com/99",
+        created: "2026-01-02T00:00:00.000Z",
+      },
+    }),
+  );
+  const adapter = await acquire();
+  const saved = await runOperation(
+    adapter.saveArticle({ url: "https://example.com/99", title: "   " }),
+  );
+  expect(saved).toEqual({
+    id: 99,
+    title: "https://example.com/99",
+    url: "https://example.com/99",
+    created_at: "2026-01-02T00:00:00.000Z",
+  });
+  expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+    link: "https://example.com/99",
+    pleaseParse: {},
+  });
+});
+
+test("sync accepts minimal raindrop items without tags, important, or collection", async () => {
+  api(() =>
+    json({
+      result: true,
+      items: [
+        {
+          _id: 10,
+          link: "https://example.com/10",
+          created: "2026-01-02T00:00:00.000Z",
+        },
+        {
+          _id: 11,
+          title: "   ",
+          link: "https://example.com/11",
+          created: "2026-01-01T00:00:00.000Z",
+          tags: "unexpected-type",
+          important: "unexpected-type",
+          collection: null,
+        },
+      ],
+    }),
+  );
+  const result = await runOperation((await acquire()).sync({ mode: "overwrite" }));
+  expect(result.articles).toEqual([
+    {
+      id: 10,
+      title: "https://example.com/10",
+      url: "https://example.com/10",
+      created_at: "2026-01-02T00:00:00.000Z",
+    },
+    {
+      id: 11,
+      title: "https://example.com/11",
+      url: "https://example.com/11",
+      created_at: "2026-01-01T00:00:00.000Z",
+    },
+  ]);
 });
 
 test("delete and connection test use their endpoints", async () => {
@@ -123,7 +192,15 @@ test("delete and connection test use their endpoints", async () => {
 
 test("missing or header-unsafe API key fails acquisition before any request", async () => {
   const fetchMock = spyOn(globalThis, "fetch");
-  for (const apiKey of ["", "  ", "a\r\nX-Injected: 1"])
+  for (const apiKey of [
+    "",
+    "  ",
+    "a\r\nX-Injected: 1",
+    "token with space",
+    "tok\u0080en",
+    "café",
+    "token🔑",
+  ])
     expect(
       (await failure(createRaindropAdapter({ ...settings, apiConfig: { apiKey } }))).code,
     ).toBe("ConfigurationFailure");
@@ -316,23 +393,205 @@ test("multi-page sync follows the first page's count and preserves order and tot
   }
 });
 
-test("sync without a count stops after the first page", async () => {
-  const fetchMock = api(() => json(page(range(1, 50))));
-  const result = await runOperation((await acquire()).sync());
-  expect(result.articles).toHaveLength(50);
-  expect(fetchMock).toHaveBeenCalledTimes(1);
+test("multi-page sync continues without count, stops on short page, and deduplicates overlapping IDs", async () => {
+  const fetchMock = api((url) => {
+    const index = Number(url.searchParams.get("page"));
+    if (index === 0) return json(page(range(1, 50)));
+    // Simulate concurrent insert shifting item 50 onto page 1, with no `count` field.
+    if (index === 1) return json(page([50, ...range(51, 75)]));
+    return json(page([]));
+  });
+  const result = await runOperation((await acquire()).sync({ mode: "overwrite" }));
+  expect(result.articles.map((a) => a.id)).toEqual(range(1, 75));
+  expect(result.metadata).toMatchObject({
+    totalFetched: 75,
+    totalProcessed: 75,
+  });
+  expect(fetchMock).toHaveBeenCalledTimes(2);
 });
 
-test("update sync searches by creation time in seconds; overwrite sync ignores the timestamp", async () => {
-  const fetchMock = api(() => json(page([3], 1)));
+test("multi-page sync stops cleanly after an exact page-size multiple and tolerates deletion shrinkage", async () => {
+  const fetchMock = api((url) => {
+    const index = Number(url.searchParams.get("page"));
+    if (index === 0) return json(page(range(1, 50), 100));
+    return json(page([]));
+  });
+  const result = await runOperation((await acquire()).sync({ mode: "overwrite" }));
+  expect(result.articles.map((a) => a.id)).toEqual(range(1, 50));
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+});
+
+test("repeated full page fails with IncompleteSnapshotFailure and repository preserves existing cache", async () => {
+  setFilterListSources([{ name: "empty", url: "data:text/plain,! empty" }]);
+  await initializeUrlCanonizer();
+  const keys = getAccountStorageKeys(settings);
+  let brokenPagination = false;
+  const fetchMock = api(() => {
+    if (!brokenPagination) return json(page([1, 2], 2));
+    return json(page(range(1, 50), 100));
+  });
+  const repo = new ArticlesRepository(new TokenManager({ persist: false }));
+  await repo.initialize(settings);
+  await runOperation(repo.syncWithAPI({ mode: "overwrite" }));
+  expect((storage[keys.articles] as { id: number }[]).map((a) => a.id)).toEqual([1, 2]);
+
+  brokenPagination = true;
+  const result = await failure(repo.syncWithAPI({ mode: "overwrite" }));
+  expect(result).toMatchObject({
+    code: "IncompleteSnapshotFailure",
+    details: { operation: "raindrop.sync" },
+  });
+  expect(fetchMock).toHaveBeenCalledTimes(3);
+  expect((storage[keys.articles] as { id: number }[]).map((a) => a.id)).toEqual([1, 2]);
+});
+
+test("overwrite sync fails with IncompleteSnapshotFailure when page 0 is empty despite positive count", async () => {
+  api(() => json({ result: true, items: [], count: 42 }));
+  const result = await failure((await acquire()).sync({ mode: "overwrite" }));
+  expect(result).toMatchObject({
+    code: "IncompleteSnapshotFailure",
+    details: { operation: "raindrop.sync" },
+  });
+});
+
+test("update sync paginates sort=-created without search, honors 2m clock-skew overlap, and stops early", async () => {
+  const lastSyncTimestamp = "2026-01-10T12:00:00.000Z";
+  const page0Items = [
+    ...range(1, 49).map((id) => item(id, { created: "2026-01-10T12:05:00.000Z" })),
+    // Within 2-minute clock-skew overlap (11:58:30 >= 11:58:00)
+    item(50, { created: "2026-01-10T11:58:30.000Z" }),
+  ];
+  const page1Items = [
+    // Exactly at cutoff (11:58:00) -> kept
+    item(51, { created: "2026-01-10T11:58:00.000Z" }),
+    // Unparseable created -> kept
+    item(52, { created: "not-a-timestamp" }),
+    // Older than cutoff -> triggers early stop after finishing this page
+    item(53, { created: "2026-01-10T11:57:59.999Z" }),
+    ...range(54, 100).map((id) => item(id, { created: "2026-01-09T00:00:00.000Z" })),
+  ];
+  const fetchMock = api((url) => {
+    const index = Number(url.searchParams.get("page"));
+    if (index === 0) return json({ result: true, items: page0Items, count: 200 });
+    if (index === 1) return json({ result: true, items: page1Items, count: 200 });
+    throw new Error("Should have stopped early before page 2");
+  });
   const adapter = await acquire();
-  const lastSyncTimestamp = "2023-11-14T22:13:20.999Z";
   const update = await runOperation(adapter.sync({ mode: "update", lastSyncTimestamp }));
-  await runOperation(adapter.sync({ mode: "overwrite", lastSyncTimestamp }));
   expect(update.mode).toBe("update");
-  const [incremental, full] = fetchMock.mock.calls.map(urlOf);
-  expect(incremental.searchParams.get("search")).toBe("created:>1700000000");
-  expect(full.searchParams.has("search")).toBe(false);
+  expect(update.articles.map((a) => a.id)).toEqual(range(1, 52));
+  expect(update.metadata?.syncDecision).toMatchObject({
+    reason: "explicit_mode",
+    wasFullSync: false,
+  });
+  const urls = fetchMock.mock.calls.map(urlOf);
+  expect(urls.map((u) => u.searchParams.get("page"))).toEqual(["0", "1"]);
+  for (const url of urls) {
+    expect(url.searchParams.get("sort")).toBe("-created");
+    expect(url.searchParams.has("search")).toBe(false);
+  }
+});
+
+test("update sync falls back to overwrite when lastSyncTimestamp is missing or invalid", async () => {
+  const fetchMock = api((url) => {
+    const index = Number(url.searchParams.get("page"));
+    if (index === 0) return json(page(range(1, 50)));
+    return json(page(range(51, 60)));
+  });
+  const adapter = await acquire();
+  const missing = await runOperation(adapter.sync({ mode: "update" }));
+  expect(missing.mode).toBe("overwrite");
+  expect(missing.articles).toHaveLength(60);
+  expect(missing.metadata?.syncDecision).toMatchObject({
+    reason: "missing_last_sync",
+    wasFullSync: true,
+  });
+
+  const invalid = await runOperation(
+    adapter.sync({ mode: "update", lastSyncTimestamp: "not-a-date" }),
+  );
+  expect(invalid.mode).toBe("overwrite");
+  expect(invalid.articles).toHaveLength(60);
+  expect(invalid.metadata?.syncDecision).toMatchObject({
+    reason: "missing_last_sync",
+    wasFullSync: true,
+  });
+  expect(fetchMock).toHaveBeenCalledTimes(4);
+});
+
+test("hybrid sync mode selection follows first-sync, incremental, 24h-idle, and 48h-overdue rules", async () => {
+  const now = Date.now();
+  const recentIso = new Date(now).toISOString();
+  api(() => json({ result: true, items: [item(1, { created: recentIso })], count: 1 }));
+  const adapter = await acquire();
+
+  const first = await runOperation(adapter.sync());
+  expect(first.mode).toBe("overwrite");
+  expect(first.metadata?.syncDecision).toMatchObject({
+    reason: "first_sync",
+    wasFullSync: true,
+  });
+
+  const missingLastSync = await runOperation(
+    adapter.sync({ lastFullSyncTimestamp: now - 60_000, isBrowserIdle: false }),
+  );
+  expect(missingLastSync.mode).toBe("overwrite");
+  expect(missingLastSync.metadata?.syncDecision).toMatchObject({
+    reason: "first_sync",
+    wasFullSync: true,
+  });
+
+  const recent = await runOperation(
+    adapter.sync({
+      lastFullSyncTimestamp: now - 60_000,
+      lastSyncTimestamp: recentIso,
+      isBrowserIdle: false,
+    }),
+  );
+  expect(recent.mode).toBe("update");
+  expect(recent.metadata?.syncDecision).toMatchObject({
+    reason: "incremental",
+    wasFullSync: false,
+  });
+
+  const active24h = await runOperation(
+    adapter.sync({
+      lastFullSyncTimestamp: now - 86_400_001,
+      lastSyncTimestamp: recentIso,
+      isBrowserIdle: false,
+    }),
+  );
+  expect(active24h.mode).toBe("update");
+  expect(active24h.metadata?.syncDecision).toMatchObject({
+    reason: "incremental",
+    wasFullSync: false,
+  });
+
+  const idle24h = await runOperation(
+    adapter.sync({
+      lastFullSyncTimestamp: now - 86_400_001,
+      lastSyncTimestamp: recentIso,
+      isBrowserIdle: true,
+    }),
+  );
+  expect(idle24h.mode).toBe("overwrite");
+  expect(idle24h.metadata?.syncDecision).toMatchObject({
+    reason: "24h_idle",
+    wasFullSync: true,
+  });
+
+  const overdue48h = await runOperation(
+    adapter.sync({
+      lastFullSyncTimestamp: now - 2 * 86_400_001,
+      lastSyncTimestamp: recentIso,
+      isBrowserIdle: false,
+    }),
+  );
+  expect(overdue48h.mode).toBe("overwrite");
+  expect(overdue48h.metadata?.syncDecision).toMatchObject({
+    reason: "48h_overdue",
+    wasFullSync: true,
+  });
 });
 
 test("cancellation during the page wait stops pagination without another request", async () => {
@@ -387,11 +646,11 @@ test("repository save, delete, overwrite and update sync commit Raindrop outcome
   setFilterListSources([{ name: "empty", url: "data:text/plain,! empty" }]);
   await initializeUrlCanonizer();
   const keys = getAccountStorageKeys(settings);
-  let listed = [1, 2];
+  let listed = [item(1), item(2)];
   api((url, init) => {
     if (init?.method === "POST") return json({ result: true, item: item(3) });
     if (init?.method === "DELETE") return json({ result: true });
-    return json(page(listed, listed.length));
+    return json({ result: true, items: listed, count: listed.length });
   });
   const ids = () => (storage[keys.articles] as { id: number }[]).map((a) => a.id).sort();
   const repo = new ArticlesRepository(new TokenManager({ persist: false }));
@@ -402,7 +661,7 @@ test("repository save, delete, overwrite and update sync commit Raindrop outcome
   expect(ids()).toEqual([1, 2, 3]);
   await runOperation(repo.deleteArticle(1));
   expect(ids()).toEqual([2, 3]);
-  listed = [4];
+  listed = [item(4, { created: new Date().toISOString() })];
   await runOperation(repo.syncWithAPI({ mode: "update" }));
   expect(ids()).toEqual([2, 3, 4]);
   await runOperation(repo.syncWithAPI({ mode: "overwrite" }));

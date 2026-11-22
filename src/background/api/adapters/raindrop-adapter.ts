@@ -7,31 +7,29 @@ import { logger } from "../../../utils/logger";
 import { requestJson, validate } from "../effect-api-client";
 import {
   ConfigurationFailure,
+  IncompleteSnapshotFailure,
   ProviderFailure,
   storageHealthy,
   type AcquisitionError,
   type EffectAdapter,
 } from "../effect-adapter";
-import type { SavingArticle, SyncOptions } from "../read-it-later-adapter";
+import type { SavingArticle, SyncMode, SyncOptions } from "../read-it-later-adapter";
 
 export type RaindropSettings = v.InferInput<typeof raindropSettingsSchema>;
 export type RaindropConfig = v.InferInput<typeof raindropConfigSchema>;
 
 const apiUrl = "https://api.raindrop.io/rest/v1";
+const RAINDROP_SYNC_PER_PAGE = 50;
+const RAINDROP_PAGE_DELAY_MS = 500;
+const RAINDROP_UPDATE_OVERLAP_MS = 120_000;
+const FULL_SYNC_IDLE_MS = 86_400_000;
+const FULL_SYNC_OVERDUE_MS = 2 * FULL_SYNC_IDLE_MS;
 
 const raindropItemSchema = v.object({
   _id: v.number(),
-  title: v.string(),
+  title: v.nullish(v.string()),
   link: v.string(),
   created: v.string(),
-  cover: v.optional(v.nullable(v.string())),
-  tags: v.array(v.string()),
-  excerpt: v.optional(v.nullable(v.string())),
-  type: v.optional(v.nullable(v.string())),
-  domain: v.optional(v.nullable(v.string())),
-  lastUpdate: v.optional(v.nullable(v.string())),
-  important: v.optional(v.union([v.boolean(), v.number()])),
-  collection: v.optional(v.object({ $id: v.number() })),
 });
 
 const raindropErrorSchema = v.object({
@@ -51,6 +49,16 @@ const raindropSyncResponseSchema = v.object({
 
 type RaindropItem = v.InferOutput<typeof raindropItemSchema>;
 
+function isValidApiKey(value: string): boolean {
+  if (!value || /[^\x21-\x7e]/.test(value)) return false;
+  try {
+    new Headers({ Authorization: `Bearer ${value}` });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** result=false is a definitive rejection; only a numeric error code is kept. */
 const providerFailure = (operation: string) => (data: unknown) => {
   const parsed = v.safeParse(raindropErrorSchema, data);
@@ -61,7 +69,7 @@ const providerFailure = (operation: string) => (data: unknown) => {
 
 const toArticle = (item: RaindropItem): Article => ({
   id: item._id,
-  title: item.title,
+  title: item.title?.trim() || item.link,
   url: item.link,
   created_at: item.created,
 });
@@ -72,7 +80,7 @@ export const createRaindropAdapter = Effect.fn("raindrop.acquire")(function* (
 ) {
   const parsed = v.safeParse(raindropSettingsSchema, settings);
   const apiKey = parsed.success ? parsed.output.apiConfig.apiKey.trim() : "";
-  if (!apiKey || /[\r\n]/.test(apiKey))
+  if (!isValidApiKey(apiKey))
     return yield* Effect.fail(new ConfigurationFailure("raindrop.acquire"));
   const authorization = Effect.succeed(`Bearer ${apiKey}`);
 
@@ -102,13 +110,18 @@ export const createRaindropAdapter = Effect.fn("raindrop.acquire")(function* (
 
   const adapter: EffectAdapter = {
     saveArticle: Effect.fn("raindrop.save")(function* (article: SavingArticle) {
+      const title = article.title.trim();
       const data = yield* request("raindrop.save", "/raindrop", {
         mutation: "save",
         confirms: raindropSaveResponseSchema,
         init: {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ link: article.url, title: article.title }),
+          body: JSON.stringify({
+            link: article.url,
+            pleaseParse: {},
+            ...(title ? { title } : {}),
+          }),
         },
       });
       const saved = yield* validate(raindropSaveResponseSchema, data, "raindrop.save");
@@ -122,60 +135,125 @@ export const createRaindropAdapter = Effect.fn("raindrop.acquire")(function* (
       });
     }),
     /**
-     * Raindrop Incremental Sync (PARTIAL SUPPORT)
+     * Raindrop Hybrid Incremental Sync
      *
-     * Raindrop supports incremental sync via search parameter with special syntax.
-     * This is NOT a dedicated API parameter, but a search feature.
+     * Raindrop's `created:` search operator only supports calendar dates (YYYY-MM-DD),
+     * not timestamps. Incremental sync instead paginates `sort=-created` (newest first)
+     * and stops early once items older than `lastSyncTimestamp - 2 min` are reached.
      *
      * LIMITATIONS:
-     * - Only filters by creation date (created:>TIMESTAMP)
-     * - Does NOT track deletions (deleted raindrops remain in local cache)
-     * - Does NOT track updates to existing raindrops
-     *
-     * SEARCH SYNTAX: created:>UNIX_TIMESTAMP
-     * - Timestamp must be Unix timestamp in SECONDS, not milliseconds
-     * - API docs: https://developer.raindrop.io/
-     *
-     * STRATEGY:
-     * - Use incremental sync for quick updates between periodic full syncs
-     * - Perform full sync every 24-48 hours to catch deletions
-     *
-     * The first page's count fixes the page total; a missing count stops after page 0.
+     * - Incremental sync only catches newly created raindrops (not deletions or edits to older items)
+     * - Periodic full syncs run at 24h when idle (or forced at 48h) to reconcile deletions
      */
     sync: Effect.fn("raindrop.sync")(function* (options?: SyncOptions) {
-      const perPage = 50;
+      const parsedLastSyncMs = options?.lastSyncTimestamp
+        ? Date.parse(options.lastSyncTimestamp)
+        : Number.NaN;
+      const hasValidLastSync = Number.isFinite(parsedLastSyncMs);
+      const lastFullSyncTimestamp = options?.lastFullSyncTimestamp;
+      const elapsed =
+        typeof lastFullSyncTimestamp === "number" &&
+        Number.isFinite(lastFullSyncTimestamp) &&
+        lastFullSyncTimestamp > 0
+          ? Date.now() - lastFullSyncTimestamp
+          : undefined;
+      // Full syncs wait for idle, but not past 48h: an always-active browser would never reconcile deletions.
+      const overdue = elapsed !== undefined && elapsed >= FULL_SYNC_OVERDUE_MS;
+
+      let mode: SyncMode;
+      let reason: string;
+      if (options?.mode === "overwrite") {
+        mode = "overwrite";
+        reason = "explicit_mode";
+      } else if (options?.mode === "update") {
+        if (hasValidLastSync) {
+          mode = "update";
+          reason = "explicit_mode";
+        } else {
+          mode = "overwrite";
+          reason = "missing_last_sync";
+        }
+      } else if (elapsed === undefined || !hasValidLastSync) {
+        mode = "overwrite";
+        reason = "first_sync";
+      } else if (overdue) {
+        mode = "overwrite";
+        reason = "48h_overdue";
+      } else if (elapsed >= FULL_SYNC_IDLE_MS && options?.isBrowserIdle) {
+        mode = "overwrite";
+        reason = "24h_idle";
+      } else {
+        mode = "update";
+        reason = "incremental";
+      }
+
+      logger.info("Raindrop sync mode decision", {
+        mode,
+        reason,
+        timeSinceLastFullSync: elapsed,
+        isBrowserIdle: options?.isBrowserIdle,
+      });
+
+      const cutoffMs =
+        mode === "update" ? parsedLastSyncMs - RAINDROP_UPDATE_OVERLAP_MS : undefined;
       const query = new URLSearchParams({
         page: "0",
-        perpage: String(perPage),
+        perpage: String(RAINDROP_SYNC_PER_PAGE),
         sort: "-created",
       });
-      if (options?.lastSyncTimestamp && options.mode === "update") {
-        const unixTimestamp = Math.floor(new Date(options.lastSyncTimestamp).getTime() / 1000);
-        query.set("search", `created:>${unixTimestamp}`);
-        logger.debug("Using Raindrop incremental sync with search syntax", {
-          lastSyncTimestamp: options.lastSyncTimestamp,
-          unixTimestamp,
-        });
-      }
-      const articles: Article[] = [];
-      let totalPages = 1;
-      for (let page = 0; page < totalPages; page++) {
-        // Raindrop allows 120 requests per minute; one second between pages stays well below it.
-        if (page > 0) yield* Effect.sleep(1000);
+      const seenIds = new Set<number>();
+      const articlesById = new Map<number, Article>();
+      for (let page = 0; ; page++) {
+        // Raindrop allows 120 requests per minute (2 req/sec); 500ms between pages stays within it.
+        if (page > 0) yield* Effect.sleep(RAINDROP_PAGE_DELAY_MS);
         query.set("page", String(page));
         const data = yield* request("raindrop.sync", `/raindrops/0?${query.toString()}`);
         const result = yield* validate(raindropSyncResponseSchema, data, "raindrop.sync");
-        articles.push(...result.items.map(toArticle));
-        if (page === 0) totalPages = Math.ceil((result.count ?? 0) / perPage);
+        if (
+          page === 0 &&
+          mode === "overwrite" &&
+          result.items.length === 0 &&
+          result.count !== undefined &&
+          result.count > 0
+        ) {
+          return yield* Effect.fail(new IncompleteSnapshotFailure("raindrop.sync"));
+        }
+        let newIdsOnPage = 0;
+        let reachedCutoff = false;
+        for (const item of result.items) {
+          if (!seenIds.has(item._id)) {
+            seenIds.add(item._id);
+            newIdsOnPage++;
+          }
+          if (cutoffMs !== undefined) {
+            const createdMs = Date.parse(item.created);
+            if (Number.isFinite(createdMs) && createdMs < cutoffMs) {
+              reachedCutoff = true;
+              continue;
+            }
+          }
+          articlesById.set(item._id, toArticle(item));
+        }
+        if (result.items.length >= RAINDROP_SYNC_PER_PAGE && newIdsOnPage === 0) {
+          return yield* Effect.fail(new IncompleteSnapshotFailure("raindrop.sync"));
+        }
+        if (reachedCutoff || result.items.length < RAINDROP_SYNC_PER_PAGE) break;
       }
+      const articles = [...articlesById.values()];
       return {
         articles,
-        mode: options?.mode ?? "overwrite",
+        mode,
         metadata: {
           totalFetched: articles.length,
           totalProcessed: articles.length,
           lastSyncTimestamp: new Date().toISOString(),
           apiVersion: "1.0",
+          syncDecision: {
+            reason,
+            wasFullSync: mode === "overwrite",
+            timeSinceLastFullSync: elapsed,
+            isBrowserIdle: options?.isBrowserIdle,
+          },
         },
       };
     }),
