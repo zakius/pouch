@@ -113,7 +113,7 @@ function applyFilterRules(urlString: string): string {
 export async function cleanUrl(urlString: string): Promise<string> {
   try {
     if (!isInitialized) {
-      throw new Error("URL cleaner not initialized");
+      return urlString;
     }
 
     if (filterRules.length > 0) {

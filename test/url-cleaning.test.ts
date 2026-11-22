@@ -1,8 +1,19 @@
-import { test, expect, describe } from "bun:test";
-import { 
-	cleanUrl, 
-	initializeWithRawFilterLists
+import { test, expect, describe, afterEach } from "bun:test";
+import {
+	cleanUrl,
+	filterRuleCount,
+	initializeWithFilterRules,
+	initializeWithRawFilterLists,
 } from "../src/utils/filter-list-url-cleaner";
+import {
+	initializeUrlCleanerWithRemoteLists,
+	loadFilterLists,
+	refreshFilterLists,
+	resetFilterListSources,
+	saveCachedFilterLists,
+	setFilterListSources,
+} from "../src/utils/filter-list-manager";
+import { parseCompleteFilterList } from "../src/utils/filter-list-parser";
 import testFilterContent from "./test-data/test-filters.txt";
 
 await initializeWithRawFilterLists([
@@ -175,4 +186,176 @@ describe("Filter List URL Cleaning", () => {
 		const output2 = await cleanUrl(input2);
 		expect(output2).toBe("https://wildcard.test/page?wc=abc&keep=this");
 	});
+});
+
+describe("Filter List Resilience & Cold Start", () => {
+	const originalBrowser = Object.getOwnPropertyDescriptor(globalThis, "browser");
+	const originalFetch = globalThis.fetch;
+
+	function withLocalStorage(initial: Record<string, unknown> = {}) {
+		const storage: Record<string, unknown> = { ...initial };
+		let removeCalls = 0;
+		Object.assign(globalThis, {
+			browser: {
+				storage: {
+					local: {
+						get: async (keys?: string | string[] | null) => {
+							if (!keys) return { ...storage };
+							const names = typeof keys === "string" ? [keys] : keys;
+							return Object.fromEntries(
+								names.filter((k) => k in storage).map((k) => [k, storage[k]]),
+							);
+						},
+						set: async (values: Record<string, unknown>) => {
+							Object.assign(storage, values);
+						},
+						remove: async (keys: string | string[]) => {
+							removeCalls++;
+							for (const key of typeof keys === "string" ? [keys] : keys) delete storage[key];
+						},
+					},
+				},
+			},
+		});
+		return {
+			storage,
+			getRemoveCalls: () => removeCalls,
+		};
+	}
+
+	afterEach(async () => {
+		globalThis.fetch = originalFetch;
+		if (originalBrowser) Object.defineProperty(globalThis, "browser", originalBrowser);
+		else Reflect.deleteProperty(globalThis, "browser");
+		resetFilterListSources();
+		await initializeWithRawFilterLists([{ name: "TestFilters", content: testFilterContent }]);
+	});
+
+	test("offline/failing refreshFilterLists preserves cached and in-memory rules and keeps cleaning URLs", async () => {
+		const { storage, getRemoveCalls } = withLocalStorage();
+		setFilterListSources([
+			{ name: "ListA", url: "https://filters.example/a.txt" },
+			{ name: "ListB", url: "https://filters.example/b.txt" },
+		]);
+		globalThis.fetch = (async (input: RequestInfo | URL) => {
+			if (String(input).endsWith("/a.txt")) return new Response("$removeparam=utm_a", { status: 200 });
+			return new Response("$removeparam=utm_b", { status: 200 });
+		}) as typeof fetch;
+
+		await initializeUrlCleanerWithRemoteLists();
+		const cachedBefore = structuredClone(storage);
+		const countBefore = filterRuleCount();
+		expect(countBefore).toBe(2);
+		expect(await cleanUrl("https://example.com/page?utm_a=1&utm_b=2&keep=3")).toBe(
+			"https://example.com/page?keep=3",
+		);
+
+		globalThis.fetch = (async () => {
+			throw new TypeError("Network offline");
+		}) as typeof fetch;
+
+		await refreshFilterLists();
+
+		expect(getRemoveCalls()).toBe(0);
+		expect(storage).toEqual(cachedBefore);
+		expect(filterRuleCount()).toBe(countBefore);
+		expect(await cleanUrl("https://example.com/page?utm_a=1&utm_b=2&keep=3")).toBe(
+			"https://example.com/page?keep=3",
+		);
+	});
+
+	test("partial failure (1 of 2 filter lists fails) does not overwrite cache or drop the other list's rules", async () => {
+		const { storage, getRemoveCalls } = withLocalStorage();
+		setFilterListSources([
+			{ name: "ListA", url: "https://filters.example/a.txt" },
+			{ name: "ListB", url: "https://filters.example/b.txt" },
+		]);
+		globalThis.fetch = (async (input: RequestInfo | URL) => {
+			if (String(input).endsWith("/a.txt")) return new Response("$removeparam=utm_a", { status: 200 });
+			return new Response("$removeparam=utm_b", { status: 200 });
+		}) as typeof fetch;
+
+		await initializeUrlCleanerWithRemoteLists();
+		const cachedBefore = structuredClone(storage);
+		expect(await cleanUrl("https://example.com/page?utm_a=1&utm_b=2&utm_new=3&keep=4")).toBe(
+			"https://example.com/page?utm_new=3&keep=4",
+		);
+
+		// Verify parallel fetching and AbortSignal wiring while 1 of 2 sources fails.
+		let started = 0;
+		let bothStarted!: () => void;
+		const parallelGate = new Promise<void>((resolve) => {
+			bothStarted = resolve;
+		});
+		const signals: Array<AbortSignal | undefined> = [];
+
+		globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+			signals.push(init?.signal ?? undefined);
+			started++;
+			if (started === 2) bothStarted();
+			await parallelGate;
+			if (String(input).endsWith("/a.txt")) {
+				return new Response("$removeparam=utm_a\n$removeparam=utm_new", { status: 200 });
+			}
+			return new Response("Service Unavailable", { status: 503 });
+		}) as typeof fetch;
+
+		await refreshFilterLists();
+
+		expect(started).toBe(2);
+		expect(signals.every((signal) => signal instanceof AbortSignal)).toBe(true);
+		expect(getRemoveCalls()).toBe(0);
+		expect(storage).toEqual(cachedBefore);
+		expect(filterRuleCount()).toBe(2);
+		// List B's rule is preserved and partial List A update was not applied.
+		expect(await cleanUrl("https://example.com/page?utm_a=1&utm_b=2&utm_new=3&keep=4")).toBe(
+			"https://example.com/page?utm_new=3&keep=4",
+		);
+
+		const loaded = await loadFilterLists();
+		expect(loaded.allSucceeded).toBe(false);
+	});
+
+	test("expired cache on offline startup still hydrates stale rules instead of wiping URL cleaning", async () => {
+		const { storage } = withLocalStorage();
+		await saveCachedFilterLists(parseCompleteFilterList("$removeparam=utm_stale").rules);
+		storage.filter_list_cache_expiry = Date.now() - 60_000;
+		const expiredCacheBefore = structuredClone(storage);
+
+		initializeWithFilterRules([]);
+		expect(filterRuleCount()).toBe(0);
+
+		setFilterListSources([
+			{ name: "ListA", url: "https://filters.example/a.txt" },
+			{ name: "ListB", url: "https://filters.example/b.txt" },
+		]);
+		globalThis.fetch = (async () => {
+			throw new TypeError("Network offline");
+		}) as typeof fetch;
+
+		await initializeUrlCleanerWithRemoteLists();
+
+		expect(filterRuleCount()).toBe(1);
+		expect(storage).toEqual(expiredCacheBefore);
+		expect(await cleanUrl("https://example.com/page?utm_stale=1&keep=2")).toBe(
+			"https://example.com/page?keep=2",
+		);
+	});
+
+	for (const scenario of [
+		"fresh-cache-race",
+		"expired-cache-slow-remote",
+		"missing-cache-offline-cooldown",
+	]) {
+		test(`cold-start url canonizer: ${scenario}`, () => {
+			const result = Bun.spawnSync(
+				[process.execPath, `${import.meta.dir}/fixtures/url-canonizer-cold-start.ts`, scenario],
+				{ timeout: 10_000 },
+			);
+			expect({
+				status: result.exitCode,
+				error: result.exitCode === 0 ? "" : result.stderr.toString(),
+			}).toEqual({ status: 0, error: "" });
+		});
+	}
 });

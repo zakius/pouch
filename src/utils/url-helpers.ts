@@ -1,5 +1,5 @@
-import { assertStorageHealthy } from "./fatal-storage";
-import { initializeUrlCleanerWithRemoteLists } from "./filter-list-manager";
+import { FatalStorageError, assertStorageHealthy } from "./fatal-storage";
+import { fetchAndApplyRemoteFilterLists, hydrateFilterRulesFromCache } from "./filter-list-manager";
 import { cleanUrl as filterListCleanUrl, filterRuleCount } from "./filter-list-url-cleaner";
 import { logger } from "./logger";
 
@@ -7,19 +7,82 @@ import { logger } from "./logger";
 const INIT_RETRY_MS = 5 * 60_000;
 let urlCanonizerInitialized = false;
 let lastInitAttempt = -Infinity;
+let localCacheHydrationPromise: Promise<void> | null = null;
+let remoteRefreshPromise: Promise<void> | null = null;
+
+export function markUrlCanonizerInitialized(): void {
+  if (filterRuleCount() > 0) {
+    urlCanonizerInitialized = true;
+  }
+}
+
+function startBackgroundRemoteRefresh(): void {
+  if (remoteRefreshPromise) return;
+  const refreshPromise = (async () => {
+    try {
+      const result = await fetchAndApplyRemoteFilterLists();
+      if (result.applied || filterRuleCount() > 0) {
+        urlCanonizerInitialized = true;
+      } else {
+        lastInitAttempt = Date.now();
+      }
+    } catch (error) {
+      if (error instanceof FatalStorageError) {
+        logger.error("Background filter list refresh stopped by fatal storage:", error);
+        return;
+      }
+      logger.warn("Failed to refresh filter lists in background:", error);
+      if (filterRuleCount() === 0) {
+        lastInitAttempt = Date.now();
+      }
+    }
+  })().finally(() => {
+    if (remoteRefreshPromise === refreshPromise) {
+      remoteRefreshPromise = null;
+    }
+  });
+  remoteRefreshPromise = refreshPromise;
+}
 
 export async function initializeUrlCanonizer(): Promise<void> {
-  if (urlCanonizerInitialized || Date.now() - lastInitAttempt < INIT_RETRY_MS) return;
-  lastInitAttempt = Date.now();
-
-  try {
-    await initializeUrlCleanerWithRemoteLists();
-  } catch (error) {
-    assertStorageHealthy();
-    logger.warn("Failed to initialize filter list cleaner:", error);
+  assertStorageHealthy();
+  if (urlCanonizerInitialized) return;
+  if (localCacheHydrationPromise) {
+    await localCacheHydrationPromise;
+    return;
   }
+  if (remoteRefreshPromise) return;
+  if (Date.now() - lastInitAttempt < INIT_RETRY_MS) return;
 
-  urlCanonizerInitialized = filterRuleCount() > 0;
+  const hydrationPromise = (async () => {
+    let startedRemoteRefresh = false;
+    try {
+      const hydration = await hydrateFilterRulesFromCache();
+      urlCanonizerInitialized = filterRuleCount() > 0;
+
+      if (hydration.status !== "fresh") {
+        startedRemoteRefresh = true;
+        startBackgroundRemoteRefresh();
+      }
+    } catch (error) {
+      assertStorageHealthy();
+      logger.warn("Failed to initialize filter list cleaner:", error);
+    } finally {
+      if (!startedRemoteRefresh && filterRuleCount() === 0) {
+        urlCanonizerInitialized = false;
+        lastInitAttempt = Date.now();
+      }
+    }
+  })();
+
+  localCacheHydrationPromise = hydrationPromise;
+  try {
+    await hydrationPromise;
+  } finally {
+    if (localCacheHydrationPromise === hydrationPromise) {
+      localCacheHydrationPromise = null;
+    }
+  }
 }
 const redirectTargets: { host: string; paths: string[]; params: string[] }[] = [
   {
@@ -176,7 +239,7 @@ export async function canonicalizeUrl(urlString: string): Promise<string> {
     url = canonicalizeAmazonUrl(url);
 
     // A result computed without filter rules would outlive the rules' arrival.
-    if (urlCanonizerInitialized) {
+    if (filterRuleCount() > 0) {
       if (canonicalUrlCache.size >= CANONICAL_CACHE_LIMIT) {
         canonicalUrlCache.clear();
       }
