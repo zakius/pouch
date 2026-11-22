@@ -8,7 +8,7 @@ import {
   runOperation,
 } from "../src/background/api/effect-adapter";
 import { errorResponse } from "../src/background/runtime-message";
-import { TokenManager } from "../src/background/token-manager";
+import { hashAccountIdentity, TokenManager } from "../src/background/token-manager";
 import { DEFAULT_SETTINGS } from "../src/utils/settings";
 import { ArticlesRepository, getAccountStorageKeys } from "../src/background/articles-repository";
 import { initializeUrlCanonizer } from "../src/utils/url-helpers";
@@ -26,6 +26,7 @@ const settings: WallabagSettings = {
     password: "PASSWORD",
   },
 };
+const settingsIdentityHash = await hashAccountIdentity(JSON.stringify(settings.apiConfig));
 const oldToken = {
   accessToken: "active-access",
   refreshToken: "active-refresh",
@@ -33,6 +34,7 @@ const oldToken = {
   expiresAt: Date.now() + 3600000,
   issuedAt: Date.now(),
   refreshCount: 0,
+  accountIdentityHash: settingsIdentityHash,
 };
 const token = {
   access_token: "rotated-access",
@@ -908,4 +910,72 @@ test("invalidation during acquisition token persistence fails the acquisition", 
   await clearing;
   expect(tokens.getTokenMetadata("wallabag")).toBeNull();
   expect(fetchMock).toHaveBeenCalledTimes(1);
+});
+
+test("cold-start Wallabag evicts Account A's persisted token when synced to Account B without persisting secrets", async () => {
+  const accountB: WallabagSettings = {
+    ...settings,
+    apiConfig: {
+      url: "https://account-b.example",
+      clientId: "client-b",
+      clientSecret: "SUPER_SECRET_B",
+      username: "user-b",
+      password: "SUPER_PASSWORD_B",
+    },
+  };
+  // Persist a token bound to Account A in a first TokenManager instance.
+  const firstRun = new TokenManager();
+  await runOperation(firstRun.bindAccount("wallabag", JSON.stringify(settings.apiConfig)));
+  await runOperation(
+    firstRun.storeToken("wallabag", { ...oldToken, accessToken: "account-a-access" }),
+  );
+
+  // Cold start: fresh TokenManager loads Account A's persisted token, then binds Account B.
+  const secondRun = new TokenManager();
+  await runOperation(secondRun.loadTokens);
+  expect(secondRun.getTokenMetadata("wallabag")?.accessToken).toBe("account-a-access");
+
+  const sentAuthHeaders: string[] = [];
+  const fetchMock = spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    if (String(url).includes("/oauth/v2/token")) {
+      expect(String(url)).toBe("https://account-b.example/oauth/v2/token");
+      return json({ ...token, access_token: "account-b-access" });
+    }
+    sentAuthHeaders.push(new Headers(init?.headers).get("Authorization") ?? "");
+    expect(String(url)).toStartWith("https://account-b.example/");
+    return json(snapshot());
+  });
+
+  const api = await runOperation(createWallabagAdapter(accountB, secondRun));
+  expect(await runOperation(api.testConnection)).toBe(true);
+  expect(sentAuthHeaders).toEqual(["Bearer account-b-access"]);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+
+  const persistedJson = JSON.stringify(storage.api_tokens);
+  expect(persistedJson).not.toContain("SUPER_PASSWORD_B");
+  expect(persistedJson).not.toContain("SUPER_SECRET_B");
+  expect(persistedJson).not.toContain("account-b.example");
+  expect(persistedJson).not.toContain("user-b");
+  expect(persistedJson).toContain(await hashAccountIdentity(JSON.stringify(accountB.apiConfig)));
+});
+
+test("cold-start Wallabag evicts legacy persisted token without accountIdentityHash and re-authenticates", async () => {
+  const { accountIdentityHash: _omit, ...legacyToken } = oldToken;
+  storage.api_tokens = [["wallabag", { ...legacyToken, serviceName: "wallabag" }]];
+  const tokens = new TokenManager();
+  await runOperation(tokens.loadTokens);
+  expect(tokens.getTokenMetadata("wallabag")?.accessToken).toBe("active-access");
+
+  const fetchMock = spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    if (String(url).includes("/oauth/v2/token")) {
+      return json({ ...token, access_token: "reauthed-access" });
+    }
+    expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer reauthed-access");
+    return json(snapshot());
+  });
+
+  const api = await runOperation(createWallabagAdapter(settings, tokens));
+  expect(await runOperation(api.testConnection)).toBe(true);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(tokens.getTokenMetadata("wallabag")?.accountIdentityHash).toBe(settingsIdentityHash);
 });

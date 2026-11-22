@@ -1,6 +1,10 @@
 import { runOperation } from "../src/background/api/effect-adapter";
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
-import { type TokenMetadata, TokenManager } from "../src/background/token-manager";
+import {
+  hashAccountIdentity,
+  type TokenMetadata,
+  TokenManager,
+} from "../src/background/token-manager";
 
 interface AlarmsMock {
   create: ReturnType<typeof mock>;
@@ -252,4 +256,97 @@ test("refresh without configuration fails without deleting the token", async () 
   expect(result.success).toBe(false);
   expect(result.requiresReauth).toBe(false);
   expect(manager.getTokenMetadata("wallabag")?.accessToken).toBe("old-access");
+});
+
+test("cold-start TokenManager evicts persisted Account A token when binding Account B and hashes identity", async () => {
+  const { storage } = setupBrowser();
+  const identityA = JSON.stringify({
+    url: "https://a.example",
+    username: "alice",
+    password: "SECRET_PASSWORD_A",
+  });
+  const identityB = JSON.stringify({
+    url: "https://b.example",
+    username: "bob",
+    password: "SECRET_PASSWORD_B",
+  });
+
+  const first = new TokenManager({ refreshBufferMs: 0 });
+  await runOperation(first.bindAccount("wallabag", identityA));
+  await runOperation(
+    first.storeToken("wallabag", { ...baseToken, accessToken: "token-a", expiresAt: Date.now() + 3600_000 }),
+  );
+
+  // Persisted token contains SHA-256 hash, never raw credentials.
+  const storedJson = JSON.stringify(storage.api_tokens);
+  expect(storedJson).toContain(await hashAccountIdentity(identityA));
+  expect(storedJson).not.toContain("SECRET_PASSWORD_A");
+  expect(storedJson).not.toContain("alice");
+
+  // Same account survives cold start.
+  const sameAccount = new TokenManager({ refreshBufferMs: 0 });
+  await runOperation(sameAccount.loadTokens);
+  await runOperation(sameAccount.bindAccount("wallabag", identityA));
+  expect(sameAccount.getTokenMetadata("wallabag")?.accessToken).toBe("token-a");
+
+  // Different account on cold start evicts Account A's token from memory and storage.local.
+  const differentAccount = new TokenManager({ refreshBufferMs: 0 });
+  await runOperation(differentAccount.loadTokens);
+  expect(differentAccount.getTokenMetadata("wallabag")?.accessToken).toBe("token-a");
+  await runOperation(differentAccount.bindAccount("wallabag", identityB));
+  expect(differentAccount.getTokenMetadata("wallabag")).toBeNull();
+  expect(storage.api_tokens).toEqual([]);
+});
+
+test("loadTokens handles corrupt or non-iterable api_tokens without throwing", async () => {
+  const { storage } = setupBrowser();
+  for (const corrupt of [42, "not-an-array", { wallabag: baseToken }, true]) {
+    storage.api_tokens = corrupt;
+    const manager = new TokenManager();
+    await runOperation(manager.loadTokens);
+    expect(manager.getTokenMetadata("wallabag")).toBeNull();
+  }
+
+  // Partially corrupt array skips malformed entries and keeps valid ones.
+  const validEntry: [string, TokenMetadata] = [
+    "wallabag",
+    { ...baseToken, serviceName: "wallabag", accessToken: "valid-token" },
+  ];
+  storage.api_tokens = [
+    "not-a-tuple",
+    ["", { ...baseToken, serviceName: "empty-key" }],
+    ["missing-access", { ...baseToken, serviceName: "missing-access", accessToken: "" }],
+    ["nan-expiry", { ...baseToken, serviceName: "nan-expiry", expiresAt: Number.NaN }],
+    ["negative-count", { ...baseToken, serviceName: "negative-count", refreshCount: -1 }],
+    validEntry,
+  ];
+  const manager = new TokenManager();
+  await runOperation(manager.loadTokens);
+  expect(manager.getTokenMetadata("wallabag")?.accessToken).toBe("valid-token");
+  expect(manager.getTokenMetadata("missing-access")).toBeNull();
+  expect(manager.getTokenMetadata("nan-expiry")).toBeNull();
+  expect(manager.getTokenMetadata("negative-count")).toBeNull();
+});
+
+test("transient refresh failure does not perform unnecessary storage.local.set writes", async () => {
+  setupBrowser();
+  const setSpy = spyOn(browser.storage.local, "set");
+  const manager = new TokenManager({ refreshCooldownMs: 0 });
+  manager.setRefreshConfigProvider("wallabag", () => refreshConfig);
+  await runOperation(manager.storeToken("wallabag", baseToken));
+  setSpy.mockClear();
+
+  spyOn(globalThis, "fetch").mockRejectedValueOnce(new TypeError("Offline"));
+  const networkResult = await runOperation(manager.refreshToken("wallabag"));
+  expect(networkResult.success).toBe(false);
+  expect(networkResult.requiresReauth).toBe(false);
+  expect(setSpy).not.toHaveBeenCalled();
+  expect(manager.getTokenMetadata("wallabag")?.refreshCount).toBe(1);
+
+  spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response("busy", { status: 503 }));
+  const serverResult = await runOperation(manager.refreshToken("wallabag"));
+  expect(serverResult.success).toBe(false);
+  expect(serverResult.requiresReauth).toBe(false);
+  expect(setSpy).not.toHaveBeenCalled();
+  expect(manager.getTokenMetadata("wallabag")?.refreshCount).toBe(2);
 });

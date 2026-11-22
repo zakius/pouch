@@ -228,20 +228,17 @@ switch (scenario) {
     break;
   case "token-clear":
   case "token-refresh":
-  case "token-refresh-failed":
-  case "token-refresh-transient": {
+  case "token-refresh-failed": {
     await runOperation(tokens.storeToken("service", baseToken));
     const before = structuredClone(tokens.getTokenMetadata("service"));
     rejectSet = true;
     if (scenario === "token-clear")
       await rejectsFatal(() => runOperation(tokens.clearToken("service")));
     else {
-      globalThis.fetch = async () => {
-        if (scenario === "token-refresh-transient") throw new TypeError("network failed SECRET");
-        return new Response(JSON.stringify({ access_token: "new", expires_in: 3600 }), {
+      globalThis.fetch = async () =>
+        new Response(JSON.stringify({ access_token: "new", expires_in: 3600 }), {
           status: scenario === "token-refresh-failed" ? 401 : 200,
         });
-      };
       await rejectsFatal(() =>
         runOperation(
           tokens.refreshToken("service", {
@@ -255,14 +252,34 @@ switch (scenario) {
       );
       assert.equal(
         getStorageDiagnostic()?.remoteOutcome,
-        scenario === "token-refresh-failed"
-          ? "failed"
-          : scenario === "token-refresh-transient"
-            ? "unknown"
-            : "succeeded",
+        scenario === "token-refresh-failed" ? "failed" : "succeeded",
       );
     }
     assert.deepEqual(tokens.getTokenMetadata("service"), before);
+    assert.equal(store.api_tokens instanceof Array, true);
+    break;
+  }
+  case "token-refresh-transient": {
+    await runOperation(tokens.storeToken("service", baseToken));
+    const writesBefore = writes;
+    rejectSet = true;
+    globalThis.fetch = async () => {
+      throw new TypeError("network failed SECRET");
+    };
+    const result = await runOperation(
+      tokens.refreshToken("service", {
+        serviceName: "service",
+        refreshUrl: "https://example.com/token",
+        clientId: "id",
+        clientSecret: "secret",
+        refreshToken: "refresh",
+      }),
+    );
+    assert.equal(result.success, false);
+    assert.equal(result.requiresReauth, false);
+    assert.equal(writes, writesBefore);
+    assert.equal(getStorageDiagnostic(), undefined);
+    assert.equal(tokens.getTokenMetadata("service")?.accessToken, baseToken.accessToken);
     assert.equal(store.api_tokens instanceof Array, true);
     break;
   }
@@ -329,9 +346,14 @@ switch (scenario) {
       created_at: "2026-01-01T00:00:00Z",
     };
     store[accountKeys.articles] = [original];
-    await runOperation(
-      tokens.storeToken("wallabag", { ...baseToken, expiresAt: Date.now() + 3600000 }),
-    );
+    if (!instapaper) {
+      await runOperation(
+        tokens.bindAccount("wallabag", JSON.stringify(wallabagSettings.apiConfig)),
+      );
+      await runOperation(
+        tokens.storeToken("wallabag", { ...baseToken, expiresAt: Date.now() + 3600000 }),
+      );
+    }
     const repo = new ArticlesRepository(tokens);
     await repo.initialize(wallabagSettings);
     await runOperation(repo.getAllArticles);

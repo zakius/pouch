@@ -29,7 +29,7 @@ import {
 import { refreshFilterLists } from "../utils/filter-list-manager";
 import { logger } from "../utils/logger";
 import { getMissingOrigins, messageForOrigins } from "../utils/backend-permissions";
-import { getSettings, saveSettings } from "../utils/settings";
+import { DEFAULT_SETTINGS, getSettings, saveSettings, type Settings } from "../utils/settings";
 import { clearCanonicalUrlCache, initializeUrlCanonizer } from "../utils/url-helpers";
 import { ArticlesRepository, getAccountIdentity } from "./articles-repository";
 import { TOKEN_CHECK_ALARM_NAME, TokenManager, tokenManager } from "./token-manager";
@@ -97,7 +97,19 @@ function run<A, E extends Error>(
 
 // The worker owns one repository: an account change retires the old account's work.
 const articlesRepository = new ArticlesRepository();
-let repositoryInitialized = false;
+const SETTINGS_KEYS = new Set(Object.keys(DEFAULT_SETTINGS));
+let initializedSettings: Settings | undefined;
+let pendingLocalSettingsWrites = 0;
+
+function settingsEqual(a: Settings, b: Settings): boolean {
+  return (
+    a.backend === b.backend &&
+    a.logLevel === b.logLevel &&
+    a.normalizeOnSave === b.normalizeOnSave &&
+    a.normalizeOnCompare === b.normalizeOnCompare &&
+    getAccountIdentity(a) === getAccountIdentity(b)
+  );
+}
 
 // Filter lists may download, so requests don't wait for them; initialize does.
 const urlCanonizer = Effect.runSync(
@@ -139,11 +151,13 @@ const getArticlesRepository = Effect.gen(function* () {
   yield* storageHealthy;
   yield* startup;
   yield* storageHealthy;
-  if (!repositoryInitialized) {
+  if (!initializedSettings) {
     const settings = yield* Effect.promise(() => getSettings());
-    // saveSettings may have initialized it with newer settings meanwhile.
-    if (!repositoryInitialized) articlesRepository.initialize(settings);
-    repositoryInitialized = true;
+    // saveSettings or storage.onChanged may have initialized it with newer settings meanwhile.
+    if (!initializedSettings) {
+      articlesRepository.initialize(settings);
+      initializedSettings = settings;
+    }
   }
   return articlesRepository;
 });
@@ -165,19 +179,32 @@ const syncInBackground = (reason: string) =>
 const saveSettingsMessage = Effect.fn("background.saveSettings")(function* (
   settings: Parameters<typeof saveSettings>[0],
 ) {
-  const oldSettings = yield* Effect.promise(() => getSettings());
+  const oldSettings = initializedSettings ?? (yield* Effect.promise(() => getSettings()));
   if (getAccountIdentity(oldSettings) !== getAccountIdentity(settings))
     yield* tokenManager.clearToken(oldSettings.backend);
   yield* storageHealthy;
-  yield* browserCall("save settings", () => saveSettings(settings));
-  yield* storageHealthy;
-  // Retire a replaced account before cleanup: its late writes must not recreate removed keys.
-  // The same account keeps its in-flight work and only takes the new settings.
-  articlesRepository.initialize(settings);
-  repositoryInitialized = true;
+  yield* Effect.sync(() => {
+    pendingLocalSettingsWrites++;
+  }).pipe(
+    Effect.andThen(browserCall("save settings", () => saveSettings(settings))),
+    Effect.andThen(storageHealthy),
+    Effect.tap(() =>
+      Effect.sync(() => {
+        // Retire a replaced account before cleanup: its late writes must not recreate removed keys.
+        // The same account keeps its in-flight work and only takes the new settings.
+        articlesRepository.initialize(settings);
+        initializedSettings = settings;
+      }),
+    ),
+    Effect.ensuring(
+      Effect.sync(() => {
+        pendingLocalSettingsWrites--;
+      }),
+    ),
+  );
   yield* articlesRepository.removeStaleKeys(settings);
   clearCanonicalUrlCache();
-  yield* Effect.promise(() => logger.initialize());
+  logger.setLevel(settings.logLevel);
   yield* forkDetachLogged(
     "Sync after settings change",
     syncInBackground("Sync after settings change"),
@@ -185,6 +212,37 @@ const saveSettingsMessage = Effect.fn("background.saveSettings")(function* (
   logger.info("Settings saved and API re-initialized.");
   return { success: true };
 });
+
+const handleSyncSettingsChange = (changes: Record<string, browser.storage.StorageChange>) =>
+  Effect.gen(function* () {
+    yield* storageHealthy;
+    yield* startup;
+    yield* storageHealthy;
+    if (pendingLocalSettingsWrites > 0) return;
+    const settings = yield* Effect.promise(() => getSettings());
+    yield* storageHealthy;
+    if (pendingLocalSettingsWrites > 0) return;
+    if (initializedSettings && settingsEqual(initializedSettings, settings)) return;
+    const accountChanged = initializedSettings
+      ? getAccountIdentity(initializedSettings) !== getAccountIdentity(settings)
+      : "backend" in changes || "apiConfig" in changes;
+    if (accountChanged) {
+      const oldBackend =
+        initializedSettings?.backend ??
+        (typeof changes.backend?.oldValue === "string"
+          ? changes.backend.oldValue
+          : settings.backend);
+      yield* tokenManager.clearToken(oldBackend);
+    }
+    yield* storageHealthy;
+    articlesRepository.initialize(settings);
+    initializedSettings = settings;
+    if (accountChanged) yield* articlesRepository.removeStaleKeys(settings);
+    clearCanonicalUrlCache();
+    logger.setLevel(settings.logLevel);
+    yield* refreshActiveTabUi;
+    logger.info("Applied out-of-band synced settings change.");
+  });
 
 const handleMessage = Effect.fn("background.message")(function* (rawMessage: unknown) {
   const message = yield* Effect.try({
@@ -623,6 +681,12 @@ browser.alarms.onAlarm.addListener((alarm) =>
     }),
   ),
 );
+browser.storage.onChanged?.addListener((changes, areaName) => {
+  if (areaName !== "sync" || pendingLocalSettingsWrites > 0) return;
+  if (!Object.keys(changes).some((key) => SETTINGS_KEYS.has(key))) return;
+  void run("Sync settings change", handleSyncSettingsChange(changes));
+});
+
 browser.runtime.onInstalled.addListener(async (details) => {
   if (details.reason === "install" || details.reason === "update") {
     await run("Initialization", initialize);

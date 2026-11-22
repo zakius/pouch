@@ -2,6 +2,7 @@ import { Effect, Semaphore } from "effect";
 import * as v from "valibot";
 import { requestJson, isOAuthRejection } from "./api/effect-api-client";
 import {
+  BrowserFailure,
   CredentialsFailure,
   InvalidResponseFailure,
   localRead,
@@ -45,6 +46,29 @@ export function parseOAuthToken(
 
 export const TOKEN_CHECK_ALARM_NAME = "token-refresh-check";
 
+export async function hashAccountIdentity(identity: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(identity));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+const storedTokenMetadataSchema = v.object({
+  accessToken: v.pipe(v.string(), v.minLength(1)),
+  refreshToken: v.string(),
+  tokenType: v.pipe(v.string(), v.minLength(1)),
+  expiresAt: v.pipe(v.number(), v.finite()),
+  issuedAt: v.pipe(v.number(), v.finite()),
+  scope: v.optional(v.string()),
+  lastRefreshAttempt: v.optional(v.pipe(v.number(), v.finite())),
+  refreshCount: v.pipe(v.number(), v.finite(), v.minValue(0)),
+  serviceName: v.pipe(v.string(), v.minLength(1)),
+  accountIdentityHash: v.optional(v.string()),
+});
+
+const storedTokenEntrySchema = v.tuple([
+  v.pipe(v.string(), v.minLength(1)),
+  storedTokenMetadataSchema,
+]);
+
 export interface TokenMetadata {
   accessToken: string;
   refreshToken: string;
@@ -55,6 +79,7 @@ export interface TokenMetadata {
   lastRefreshAttempt?: number;
   refreshCount: number;
   serviceName: string;
+  accountIdentityHash?: string;
 }
 
 export interface TokenRefreshConfig {
@@ -90,10 +115,10 @@ export class TokenManager {
   private refreshConfigProviders: Map<string, () => TokenRefreshConfig | null> = new Map();
   private refreshEffects = new Map<string, Effect.Effect<TokenRefreshResult, TransportError>>();
   private accountGenerations = new Map<string, number>();
-  /** Null identity marks a failed binding whose previous-account token may still be stored. */
+  /** Null identityHash marks a failed binding whose previous-account token may still be stored. */
   private accountBindings = new Map<
     string,
-    { identity: string | null; ready: Effect.Effect<number, TransportError> }
+    { identityHash: string | null; ready: Effect.Effect<number, TransportError> }
   >();
   private readonly commits = Semaphore.makeUnsafe(1);
 
@@ -103,6 +128,10 @@ export class TokenManager {
    */
   public bindAccount(serviceName: string, identity: string): Effect.Effect<number, TransportError> {
     return Effect.gen({ self: this }, function* () {
+      const identityHash = yield* Effect.tryPromise({
+        try: () => hashAccountIdentity(identity),
+        catch: () => new BrowserFailure("account identity", "crypto"),
+      });
       let generation = 0;
       const deletion = yield* Effect.cached(
         Effect.suspend(() =>
@@ -113,18 +142,24 @@ export class TokenManager {
         ).pipe(Effect.map(() => generation)),
       );
       let binding = this.accountBindings.get(serviceName);
-      if (binding?.identity !== identity) {
-        const replacing = binding !== undefined;
+      if (binding?.identityHash !== identityHash) {
+        const existingToken = this.tokens.get(serviceName);
+        const replacing =
+          binding !== undefined ||
+          (existingToken !== undefined && existingToken.accountIdentityHash !== identityHash);
         this.invalidateAccount(serviceName);
         generation = this.accountGenerations.get(serviceName) ?? 0;
         const current = {
-          identity,
+          identityHash,
           ready: replacing
             ? deletion.pipe(
                 Effect.tapError(() =>
                   Effect.sync(() => {
                     if (this.accountBindings.get(serviceName) === current)
-                      this.accountBindings.set(serviceName, { identity: null, ready: deletion });
+                      this.accountBindings.set(serviceName, {
+                        identityHash: null,
+                        ready: deletion,
+                      });
                   }),
                 ),
               )
@@ -221,10 +256,16 @@ export class TokenManager {
     remoteOperation?: string,
     accountGeneration?: number,
   ): Effect.Effect<void, TransportError> {
-    const tokenMetadata: TokenMetadata = { ...tokenData, serviceName };
     return this.commitTokens(
       (tokens) => {
         if (accountGeneration !== undefined) this.assertAccount(serviceName, accountGeneration);
+        const boundHash = this.accountBindings.get(serviceName)?.identityHash ?? undefined;
+        const accountIdentityHash = boundHash ?? tokenData.accountIdentityHash;
+        const tokenMetadata: TokenMetadata = {
+          ...tokenData,
+          ...(accountIdentityHash !== undefined ? { accountIdentityHash } : {}),
+          serviceName,
+        };
         tokens.set(serviceName, tokenMetadata);
       },
       remoteOutcome,
@@ -233,9 +274,10 @@ export class TokenManager {
       Effect.tap(() =>
         Effect.sync(() => {
           this.refreshEffects.delete(serviceName);
+          const stored = this.tokens.get(serviceName);
           logger.info(`Token stored for ${serviceName}`, {
-            expiresAt: new Date(tokenMetadata.expiresAt).toISOString(),
-            scope: tokenMetadata.scope,
+            expiresAt: stored ? new Date(stored.expiresAt).toISOString() : undefined,
+            scope: stored?.scope,
           });
         }),
       ),
@@ -400,13 +442,15 @@ export class TokenManager {
                 "failed",
                 "token refresh",
               );
-            else
-              yield* this.commitTokens((tokens) => {
-                this.assertAccount(serviceName, generation);
-                if (tokens.get(serviceName) !== token)
-                  throw new CredentialsFailure("token refresh");
-                tokens.set(serviceName, attempt);
-              });
+            else {
+              yield* storageHealthy;
+              if (
+                this.tokens.get(serviceName) === token &&
+                (this.accountGenerations.get(serviceName) ?? 0) === generation
+              ) {
+                this.tokens.set(serviceName, attempt);
+              }
+            }
             return {
               success: false,
               requiresReauth: definitive,
@@ -453,9 +497,29 @@ export class TokenManager {
           }),
         ),
       );
-      const storedTokens = result[this.config.storageKey] as [string, TokenMetadata][] | undefined;
-      if (!storedTokens) return;
-      this.tokens = new Map(storedTokens);
+      const storedTokens = result[this.config.storageKey];
+      if (storedTokens === undefined || storedTokens === null) return;
+      if (!Array.isArray(storedTokens)) {
+        this.tokens = new Map();
+        logger.warn("Stored tokens format is invalid; ignoring persisted tokens");
+        return;
+      }
+      const loaded = new Map<string, TokenMetadata>();
+      let skipped = 0;
+      for (const entry of storedTokens) {
+        const parsed = v.safeParse(storedTokenEntrySchema, entry);
+        if (parsed.success) {
+          loaded.set(parsed.output[0], parsed.output[1]);
+        } else {
+          skipped++;
+        }
+      }
+      if (skipped > 0) {
+        logger.warn(
+          `Skipped ${skipped} malformed stored token ${skipped === 1 ? "entry" : "entries"}`,
+        );
+      }
+      this.tokens = loaded;
       logger.info(`Loaded ${this.tokens.size} tokens from storage`);
       if (this.tokens.size > 0) yield* this.initializeAlarm;
     },
