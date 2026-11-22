@@ -527,7 +527,9 @@ switch (scenario) {
     if (scenario.endsWith("-message-sync") || scenario.endsWith("-message-timestamp")) {
       const saved = await message({
         type: "saveSettings",
-        payload: { settings: accountSettings },
+        payload: {
+          settings: { ...accountSettings, normalizeOnSave: !accountSettings.normalizeOnSave },
+        },
       });
       assert.deepEqual(saved, { success: true });
       for (let i = 0; i < 200 && !getStorageDiagnostic(); i++)

@@ -3,7 +3,7 @@ import { getAccountStorageKeys } from "../src/background/articles-repository";
 import { runOperation } from "../src/background/api/effect-adapter";
 import { tokenManager } from "../src/background/token-manager";
 import { LogLevel, logger } from "../src/utils/logger";
-import { DEFAULT_SETTINGS } from "../src/utils/settings";
+import { DEFAULT_SETTINGS, getSettings } from "../src/utils/settings";
 
 // A settings save while an article save is still waiting for its backend.
 type Listener = (message: unknown, sender: unknown, sendResponse: (r?: unknown) => void) => boolean;
@@ -37,6 +37,10 @@ let createStarted = deferred();
 let releaseCreate = deferred();
 let afterRemove: (() => Promise<void>) | undefined;
 let rejectSyncSet: Error | undefined;
+let rejectSyncGet: Error | undefined;
+let onSyncSet: ((values: Record<string, unknown>) => Promise<void>) | undefined;
+let syncGetCalls = 0;
+const fetchUrls: string[] = [];
 
 const pick = (store: Record<string, unknown>, keys: string | string[] | null) =>
   keys === null
@@ -61,8 +65,13 @@ Object.assign(globalThis, {
         addListener: (listener: StorageChangedListener) => storageChangedListeners.push(listener),
       },
       sync: {
-        get: async (keys: string | string[]) => pick(syncStore, keys),
+        get: async (keys: string | string[]) => {
+          syncGetCalls++;
+          if (rejectSyncGet) throw rejectSyncGet;
+          return pick(syncStore, keys);
+        },
         set: async (values: Record<string, unknown>) => {
+          await onSyncSet?.(values);
           if (rejectSyncSet) throw rejectSyncSet;
           const changes: Record<string, { oldValue?: unknown; newValue?: unknown }> = {};
           for (const [key, value] of Object.entries(values)) {
@@ -124,8 +133,10 @@ Object.assign(globalThis, {
       onActivated: event,
     },
   },
-  fetch: (async () =>
-    new Response(JSON.stringify({ result: true, items: [], count: 0 }))) as unknown as typeof fetch,
+  fetch: (async (input: unknown) => {
+    fetchUrls.push(String(input));
+    return new Response(JSON.stringify({ result: true, items: [], count: 0 }));
+  }) as unknown as typeof fetch,
 });
 
 function sendMessage(message: unknown): Promise<unknown> {
@@ -227,7 +238,8 @@ test("out-of-band storage.sync change updates logger, repository, tokens, and ac
     },
   };
 
-  // Own saveSettings write emits storage.onChanged via our mock sync.set, and must NOT double-trigger UI refresh.
+  // Own saveSettings write emits storage.onChanged via our mock sync.set:
+  // saveSettings itself refreshes the active tab UI once, and storage.onChanged must NOT double-trigger it.
   activeTabs = [{ id: 11, url: "https://example.com/synced" }];
   tabUiUpdates.length = 0;
   const setLevelSpy = spyOn(logger, "setLevel");
@@ -236,7 +248,7 @@ test("out-of-band storage.sync change updates logger, repository, tokens, and ac
   });
   await Bun.sleep(20);
   expect(setLevelSpy).toHaveBeenCalledTimes(1);
-  expect(tabUiUpdates).toEqual([]);
+  expect(tabUiUpdates).toEqual([{ tabId: 11, title: "Save to Pouch" }]);
 
   // Seed Account A token and cached article, plus Account B cached article.
   await runOperation(
@@ -284,4 +296,129 @@ test("out-of-band storage.sync change updates logger, repository, tokens, and ac
   ).toMatchObject({ id: "b1" });
   expect(tabUiUpdates).toContainEqual({ tabId: 11, title: "Article saved" });
   setLevelSpy.mockRestore();
+});
+
+test("saveSettings preserves the active account token if storage.sync.set fails", async () => {
+  await runOperation(
+    tokenManager.storeToken("wallabag", {
+      accessToken: "keep-me",
+      refreshToken: "refresh-keep",
+      tokenType: "Bearer",
+      expiresAt: Date.now() + 3600_000,
+      issuedAt: Date.now(),
+      refreshCount: 0,
+    }),
+  );
+
+  rejectSyncSet = new Error("QUOTA_BYTES_PER_ITEM quota exceeded.");
+  const response = await sendMessage({
+    type: "saveSettings",
+    payload: { settings: bookmarksSettings },
+  });
+  rejectSyncSet = undefined;
+
+  expect(response).toMatchObject({ code: "BrowserFailure" });
+  expect(tokenManager.getTokenMetadata("wallabag")?.accessToken).toBe("keep-me");
+});
+
+test("saveSettings skips overwrite sync on logLevel-only change and refreshes active tab UI without extra storage.sync.get", async () => {
+  const raindrop = {
+    ...DEFAULT_SETTINGS,
+    backend: "raindrop" as const,
+    logLevel: LogLevel.ERROR,
+    apiConfig: { apiKey: "raindrop-key-1" },
+  };
+  activeTabs = [{ id: 22, url: "https://example.com/raindrop-tab" }];
+
+  expect(await sendMessage({ type: "saveSettings", payload: { settings: raindrop } })).toEqual({
+    success: true,
+  });
+  await Bun.sleep(30);
+
+  fetchUrls.length = 0;
+  tabUiUpdates.length = 0;
+  const syncGetsBefore = syncGetCalls;
+  const setLevelSpy = spyOn(logger, "setLevel");
+
+  expect(
+    await sendMessage({
+      type: "saveSettings",
+      payload: { settings: { ...raindrop, logLevel: LogLevel.DEBUG } },
+    }),
+  ).toEqual({ success: true });
+  await Bun.sleep(30);
+
+  expect(fetchUrls).toEqual([]);
+  expect(syncGetCalls).toBe(syncGetsBefore);
+  expect(setLevelSpy).toHaveBeenCalledWith(LogLevel.DEBUG);
+  expect(tabUiUpdates).toEqual([{ tabId: 22, title: "Save to Pouch" }]);
+  setLevelSpy.mockRestore();
+});
+
+test("concurrent saveSettings calls serialize storage writes and in-memory state", async () => {
+  const first = {
+    ...DEFAULT_SETTINGS,
+    backend: "raindrop" as const,
+    apiConfig: { apiKey: "first-key" },
+  };
+  const second = {
+    ...DEFAULT_SETTINGS,
+    backend: "raindrop" as const,
+    apiConfig: { apiKey: "second-key" },
+  };
+  const firstKeys = getAccountStorageKeys(first);
+  const secondKeys = getAccountStorageKeys(second);
+
+  const firstWriteEntered = deferred();
+  const releaseFirstWrite = deferred();
+  const writeOrder: string[] = [];
+  onSyncSet = async (values) => {
+    const key = (values.apiConfig as { apiKey?: string } | undefined)?.apiKey ?? "unknown";
+    writeOrder.push(`start:${key}`);
+    if (key === "first-key") {
+      firstWriteEntered.resolve();
+      await releaseFirstWrite.promise;
+    }
+    writeOrder.push(`end:${key}`);
+  };
+
+  const p1 = sendMessage({ type: "saveSettings", payload: { settings: first } });
+  await firstWriteEntered.promise;
+  const p2 = sendMessage({ type: "saveSettings", payload: { settings: second } });
+  await Bun.sleep(15);
+  expect(writeOrder).toEqual(["start:first-key"]);
+
+  releaseFirstWrite.resolve();
+  expect(await Promise.all([p1, p2])).toEqual([{ success: true }, { success: true }]);
+  onSyncSet = undefined;
+  await Bun.sleep(30);
+
+  expect(writeOrder).toEqual([
+    "start:first-key",
+    "end:first-key",
+    "start:second-key",
+    "end:second-key",
+  ]);
+  expect(syncStore.apiConfig).toEqual({ apiKey: "second-key" });
+  expect(localStore[firstKeys.articles]).toBeUndefined();
+  expect(localStore[secondKeys.lastSyncTimestamp]).toBeDefined();
+});
+
+test("getSettings rejects on storage.sync.get failure instead of falling back to DEFAULT_SETTINGS, while logger.initialize stays fault-tolerant", async () => {
+  rejectSyncGet = new Error("Sync storage temporarily unavailable");
+  try {
+    await expect(getSettings()).rejects.toThrow("Sync storage temporarily unavailable");
+    await expect(logger.initialize()).resolves.toBeUndefined();
+  } finally {
+    rejectSyncGet = undefined;
+  }
+
+  // Empty storage still resolves to DEFAULT_SETTINGS.
+  const backup = { ...syncStore };
+  for (const key of Object.keys(syncStore)) delete syncStore[key];
+  try {
+    expect(await getSettings()).toEqual(DEFAULT_SETTINGS);
+  } finally {
+    Object.assign(syncStore, backup);
+  }
 });

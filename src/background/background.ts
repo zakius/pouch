@@ -1,4 +1,4 @@
-import { Effect } from "effect";
+import { Effect, Semaphore } from "effect";
 import {
   parseRuntimeMessage,
   errorResponse,
@@ -99,9 +99,12 @@ function run<A, E extends Error>(
 
 // The worker owns one repository: an account change retires the old account's work.
 const articlesRepository = new ArticlesRepository();
+const settingsSaveLock = Semaphore.makeUnsafe(1);
 const SETTINGS_KEYS = new Set(Object.keys(DEFAULT_SETTINGS));
 let initializedSettings: Settings | undefined;
 let pendingLocalSettingsWrites = 0;
+
+const readSettings = browserCall("read settings", () => getSettings());
 
 function settingsEqual(a: Settings, b: Settings): boolean {
   return (
@@ -154,7 +157,7 @@ const getArticlesRepository = Effect.gen(function* () {
   yield* startup;
   yield* storageHealthy;
   if (!initializedSettings) {
-    const settings = yield* Effect.promise(() => getSettings());
+    const settings = yield* readSettings;
     // saveSettings or storage.onChanged may have initialized it with newer settings meanwhile.
     if (!initializedSettings) {
       articlesRepository.initialize(settings);
@@ -181,70 +184,89 @@ const syncInBackground = (reason: string) =>
 const saveSettingsMessage = Effect.fn("background.saveSettings")(function* (
   settings: Parameters<typeof saveSettings>[0],
 ) {
-  const oldSettings = initializedSettings ?? (yield* Effect.promise(() => getSettings()));
-  if (getAccountIdentity(oldSettings) !== getAccountIdentity(settings))
-    yield* tokenManager.clearToken(oldSettings.backend);
-  yield* storageHealthy;
-  yield* Effect.sync(() => {
-    pendingLocalSettingsWrites++;
-  }).pipe(
-    Effect.andThen(browserCall("save settings", () => saveSettings(settings))),
-    Effect.andThen(storageHealthy),
-    Effect.tap(() =>
-      Effect.sync(() => {
-        // Retire a replaced account before cleanup: its late writes must not recreate removed keys.
-        // The same account keeps its in-flight work and only takes the new settings.
-        articlesRepository.initialize(settings);
-        initializedSettings = settings;
-      }),
-    ),
-    Effect.ensuring(
-      Effect.sync(() => {
-        pendingLocalSettingsWrites--;
-      }),
-    ),
+  return yield* Semaphore.withPermit(
+    settingsSaveLock,
+    Effect.gen(function* () {
+      const oldSettings = initializedSettings ?? (yield* readSettings);
+      const accountChanged = getAccountIdentity(oldSettings) !== getAccountIdentity(settings);
+      const normalizationChanged =
+        oldSettings.normalizeOnSave !== settings.normalizeOnSave ||
+        oldSettings.normalizeOnCompare !== settings.normalizeOnCompare;
+      yield* storageHealthy;
+      yield* Effect.sync(() => {
+        pendingLocalSettingsWrites++;
+      }).pipe(
+        Effect.andThen(browserCall("save settings", () => saveSettings(settings))),
+        Effect.andThen(storageHealthy),
+        Effect.andThen(accountChanged ? tokenManager.clearToken(oldSettings.backend) : Effect.void),
+        Effect.andThen(storageHealthy),
+        Effect.tap(() =>
+          Effect.sync(() => {
+            // Retire a replaced account before cleanup: its late writes must not recreate removed keys.
+            // The same account keeps its in-flight work and only takes the new settings.
+            articlesRepository.initialize(settings);
+            initializedSettings = settings;
+          }),
+        ),
+        Effect.ensuring(
+          Effect.sync(() => {
+            pendingLocalSettingsWrites--;
+          }),
+        ),
+      );
+      if (accountChanged) yield* articlesRepository.removeStaleKeys(settings);
+      if (accountChanged || normalizationChanged) clearCanonicalUrlCache();
+      logger.setLevel(settings.logLevel);
+      yield* refreshActiveTabUi;
+      if (accountChanged || normalizationChanged) {
+        yield* forkDetachLogged(
+          "Sync after settings change",
+          syncInBackground("Sync after settings change"),
+        );
+      }
+      logger.info("Settings saved and API re-initialized.");
+      return { success: true };
+    }),
   );
-  yield* articlesRepository.removeStaleKeys(settings);
-  clearCanonicalUrlCache();
-  logger.setLevel(settings.logLevel);
-  yield* forkDetachLogged(
-    "Sync after settings change",
-    syncInBackground("Sync after settings change"),
-  );
-  logger.info("Settings saved and API re-initialized.");
-  return { success: true };
 });
 
 const handleSyncSettingsChange = (changes: Record<string, browser.storage.StorageChange>) =>
-  Effect.gen(function* () {
-    yield* storageHealthy;
-    yield* startup;
-    yield* storageHealthy;
-    if (pendingLocalSettingsWrites > 0) return;
-    const settings = yield* Effect.promise(() => getSettings());
-    yield* storageHealthy;
-    if (pendingLocalSettingsWrites > 0) return;
-    if (initializedSettings && settingsEqual(initializedSettings, settings)) return;
-    const accountChanged = initializedSettings
-      ? getAccountIdentity(initializedSettings) !== getAccountIdentity(settings)
-      : "backend" in changes || "apiConfig" in changes;
-    if (accountChanged) {
-      const oldBackend =
-        initializedSettings?.backend ??
-        (typeof changes.backend?.oldValue === "string"
-          ? changes.backend.oldValue
-          : settings.backend);
-      yield* tokenManager.clearToken(oldBackend);
-    }
-    yield* storageHealthy;
-    articlesRepository.initialize(settings);
-    initializedSettings = settings;
-    if (accountChanged) yield* articlesRepository.removeStaleKeys(settings);
-    clearCanonicalUrlCache();
-    logger.setLevel(settings.logLevel);
-    yield* refreshActiveTabUi;
-    logger.info("Applied out-of-band synced settings change.");
-  });
+  Semaphore.withPermit(
+    settingsSaveLock,
+    Effect.gen(function* () {
+      yield* storageHealthy;
+      yield* startup;
+      yield* storageHealthy;
+      if (pendingLocalSettingsWrites > 0) return;
+      const settings = yield* readSettings;
+      yield* storageHealthy;
+      if (pendingLocalSettingsWrites > 0) return;
+      if (initializedSettings && settingsEqual(initializedSettings, settings)) return;
+      const accountChanged = initializedSettings
+        ? getAccountIdentity(initializedSettings) !== getAccountIdentity(settings)
+        : "backend" in changes || "apiConfig" in changes;
+      const normalizationChanged = initializedSettings
+        ? initializedSettings.normalizeOnSave !== settings.normalizeOnSave ||
+          initializedSettings.normalizeOnCompare !== settings.normalizeOnCompare
+        : "normalizeOnSave" in changes || "normalizeOnCompare" in changes;
+      if (accountChanged) {
+        const oldBackend =
+          initializedSettings?.backend ??
+          (typeof changes.backend?.oldValue === "string"
+            ? changes.backend.oldValue
+            : settings.backend);
+        yield* tokenManager.clearToken(oldBackend);
+      }
+      yield* storageHealthy;
+      articlesRepository.initialize(settings);
+      initializedSettings = settings;
+      if (accountChanged) yield* articlesRepository.removeStaleKeys(settings);
+      if (accountChanged || normalizationChanged) clearCanonicalUrlCache();
+      logger.setLevel(settings.logLevel);
+      yield* refreshActiveTabUi;
+      logger.info("Applied out-of-band synced settings change.");
+    }),
+  );
 
 const handleMessage = Effect.fn("background.message")(function* (rawMessage: unknown) {
   const message = yield* Effect.try({
@@ -421,7 +443,13 @@ const notifyToggleFailure = (error: Error) => notifyError("toggle page", error);
 const PERMISSIONS_NOTIFICATION_ID = "pouch-permissions";
 async function warnIfPermissionsMissing(): Promise<void> {
   if (getStorageDiagnostic()) return;
-  const settings = await getSettings();
+  let settings: Settings;
+  try {
+    settings = await getSettings();
+  } catch (error) {
+    logger.warn("Failed to read settings while checking permissions:", error);
+    return;
+  }
   const missing = await getMissingOrigins(settings);
   if (missing.length === 0) {
     return;
