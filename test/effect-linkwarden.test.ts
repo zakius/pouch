@@ -347,8 +347,19 @@ for (const body of [
 
 test("rate-limited requests retry three times, then report the exhausted budget", async () => {
   const fetchMock = api(() => new Response("Too many requests", { status: 429 }));
-  const result = await failure(await run("sync"));
-  expect(result).toMatchObject({
+  const pending = await run("sync");
+  const flush = () => Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+  const error = await Effect.runPromise(
+    Effect.gen(function* () {
+      const fiber = yield* Effect.forkChild(Effect.flip(pending));
+      for (const delayMs of [1000, 2000, 4000]) {
+        yield* flush();
+        yield* TestClock.adjust(delayMs);
+      }
+      return yield* Fiber.join(fiber);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+  expect(errorResponse(error)).toMatchObject({
     code: "RateLimitFailure",
     details: { operation: "linkwarden.sync" },
   });

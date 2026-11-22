@@ -419,7 +419,7 @@ export class TokenManager {
         ),
         Effect.catch((failure) =>
           Effect.gen({ self: this }, function* () {
-            const definitive = failure instanceof CredentialsFailure;
+            const definitive = failure instanceof CredentialsFailure && failure.recoverable;
             if (failure._tag === "FatalStorageFailure") return yield* Effect.fail(failure);
             if (
               this.tokens.get(serviceName) !== token ||

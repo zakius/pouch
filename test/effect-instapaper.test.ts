@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
 import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
-import { Effect } from "effect";
+import { Effect, Fiber } from "effect";
+import { TestClock } from "effect/testing";
 import { createInstapaperAdapter } from "../src/background/api/adapters/instapaper-adapter";
 import { runOperation } from "../src/background/api/effect-adapter";
 import { errorResponse } from "../src/background/runtime-message";
@@ -331,7 +332,19 @@ for (const [operation, status] of [
 
 test("a persistent rate limit fails as a definite rate-limit rejection", async () => {
   const fetchMock = api(() => rateLimited(500));
-  const result = await failure((await acquire()).saveArticle({ url: "https://a", title: "a" }));
+  const pending = (await acquire()).saveArticle({ url: "https://a", title: "a" });
+  const flush = () => Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+  const error = await Effect.runPromise(
+    Effect.gen(function* () {
+      const fiber = yield* Effect.forkChild(Effect.flip(pending));
+      for (const delayMs of [1000, 2000, 4000]) {
+        yield* flush();
+        yield* TestClock.adjust(delayMs);
+      }
+      return yield* Fiber.join(fiber);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+  const result = errorResponse(error);
   expect(result).toMatchObject({
     code: "RateLimitFailure",
     error: "The server rate limit is reached. Wait and try again later.",
