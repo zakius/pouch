@@ -103,7 +103,10 @@ export interface EffectRequest {
   /** Returns the raw body instead of parsing JSON. */
   readonly format?: "text";
   /** Maps a provider error envelope in any parsed body to a definitive rejection. */
-  readonly providerFailure?: (data: unknown) => ProviderFailure | RateLimitFailure | undefined;
+  readonly providerFailure?: (
+    data: unknown,
+    status: number,
+  ) => ProviderFailure | RateLimitFailure | undefined;
   /**
    * A parsed body this rejects is an invalid response; a mutation's outcome stays unknown.
    * A body it accepts is a confirmed success, even if it carries an `error` key.
@@ -195,7 +198,7 @@ export const requestJson = Effect.fn("transport.request")(function* (request: Ef
           const data = yield* Effect.tryPromise(
             async (): Promise<unknown> => JSON.parse(await response.text()),
           ).pipe(Effect.orElseSucceed(() => undefined));
-          const provider = request.providerFailure(data);
+          const provider = request.providerFailure(data, response.status);
           if (provider?._tag === "ProviderFailure" && response.status >= 500)
             return yield* Effect.fail(unknownOutcome(provider));
           if (provider) {
@@ -233,7 +236,7 @@ export const requestJson = Effect.fn("transport.request")(function* (request: Ef
         try: (): unknown => (request.format === "text" ? text : JSON.parse(text)),
         catch: () => unknownOutcome(new InvalidResponseFailure(operation, request.responseKind)),
       });
-      const provider = request.providerFailure?.(data);
+      const provider = request.providerFailure?.(data, response.status);
       if (provider) {
         if (mutation) yield* recordMutationOutcome();
         yield* storageHealthy;
