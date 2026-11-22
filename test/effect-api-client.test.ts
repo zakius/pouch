@@ -9,6 +9,7 @@ import {
 import {
   CredentialsFailure,
   InvalidResponseFailure,
+  ProviderFailure,
   RateLimitFailure,
   runOperation,
 } from "../src/background/api/effect-adapter";
@@ -367,4 +368,61 @@ test("empty 200 OK body succeeds for unconfirmed mutations and fails for reads a
     code: "InvalidResponseFailure",
     details: { remoteOperation: "delete", remoteOutcome: "unknown" },
   });
+});
+
+test("classifyUnauthorized can turn a provider-specific 401 into ProviderFailure without auth recovery", async () => {
+  const onAuthRejected = mock(() => Effect.void);
+  const recoverAuth = mock(() => Effect.void);
+  const classifyUnauthorized = (data: unknown) =>
+    typeof data === "object" &&
+    data !== null &&
+    "response" in data &&
+    data.response === "Collection is not accessible."
+      ? new ProviderFailure("test.delete", 401)
+      : undefined;
+
+  const fetchMock = spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(JSON.stringify({ response: "Collection is not accessible." }), { status: 401 }),
+  );
+  const classified = await runOperation(
+    requestJson({
+      operation: "test.delete",
+      url: "https://example.com/items/1",
+      mutation: "delete",
+      authRetries: 2,
+      authorization: Effect.succeed("Bearer token"),
+      onAuthRejected,
+      recoverAuth: Effect.suspend(recoverAuth),
+      classifyUnauthorized,
+    }),
+  ).catch((err: unknown) => err);
+
+  expect(classified).toBeInstanceOf(ProviderFailure);
+  expect((classified as ProviderFailure).providerCode).toBe(401);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(onAuthRejected).not.toHaveBeenCalled();
+  expect(recoverAuth).not.toHaveBeenCalled();
+
+  // Unmatched JSON or non-JSON 401 still falls through to CredentialsFailure + auth recovery.
+  for (const body of [JSON.stringify({ response: "You must be logged in." }), "Unauthorized"]) {
+    onAuthRejected.mockClear();
+    recoverAuth.mockClear();
+    fetchMock.mockClear();
+    fetchMock.mockImplementation(async () => new Response(body, { status: 401 }));
+    const err = await runOperation(
+      requestJson({
+        operation: "test.delete",
+        url: "https://example.com/items/1",
+        mutation: "delete",
+        authRetries: 1,
+        authorization: Effect.succeed("Bearer token"),
+        onAuthRejected,
+        recoverAuth: Effect.suspend(recoverAuth),
+        classifyUnauthorized,
+      }),
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CredentialsFailure);
+    expect(onAuthRejected).toHaveBeenCalledTimes(2);
+    expect(recoverAuth).toHaveBeenCalledTimes(1);
+  }
 });

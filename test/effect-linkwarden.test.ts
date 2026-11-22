@@ -145,9 +145,77 @@ test("delete and connection test use their endpoints with the static token", asy
   const [remove, probe] = fetchMock.mock.calls;
   expect(String(remove[0])).toBe(`${base}/links/7`);
   expect(remove[1]?.method).toBe("DELETE");
-  expect(String(probe[0])).toBe(`${base}/search`);
+  expect(String(probe[0])).toBe(`${base}/search?pinnedOnly=true`);
   for (const [, init] of fetchMock.mock.calls)
     expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer TOKEN");
+});
+
+test("save omits empty or whitespace names and clamps names to 2048 characters", async () => {
+  const fetchMock = api(() => json({ response: link(1) }));
+  const adapter = await acquire();
+  await runOperation(adapter.saveArticle({ url: "https://example.com/bare", title: "" }));
+  await runOperation(adapter.saveArticle({ url: "https://example.com/ws", title: "   \t\n  " }));
+  await runOperation(
+    adapter.saveArticle({
+      url: "https://example.com/long",
+      title: `  ${"a".repeat(2100)}  `,
+    }),
+  );
+
+  const bodies = fetchMock.mock.calls.map(([, init]) => JSON.parse(String(init?.body)));
+  expect(bodies).toEqual([
+    { url: "https://example.com/bare" },
+    { url: "https://example.com/ws" },
+    { url: "https://example.com/long", name: "a".repeat(2048) },
+  ]);
+  expect("name" in bodies[0]).toBe(false);
+  expect("name" in bodies[1]).toBe(false);
+});
+
+test("base URL normalization handles roots, subpaths, optional /api/v1, whitespace, and query/hash", async () => {
+  const cases = [
+    ["https://warden.example.com", "https://warden.example.com/api/v1/search?pinnedOnly=true"],
+    ["https://warden.example.com/", "https://warden.example.com/api/v1/search?pinnedOnly=true"],
+    [
+      "https://host.example/linkwarden",
+      "https://host.example/linkwarden/api/v1/search?pinnedOnly=true",
+    ],
+    [
+      "https://host.example/linkwarden/",
+      "https://host.example/linkwarden/api/v1/search?pinnedOnly=true",
+    ],
+    [
+      "https://warden.example.com/api/v1",
+      "https://warden.example.com/api/v1/search?pinnedOnly=true",
+    ],
+    [
+      "https://warden.example.com/api/v1///",
+      "https://warden.example.com/api/v1/search?pinnedOnly=true",
+    ],
+    [
+      "  https://warden.example.com/api/v1/  ",
+      "https://warden.example.com/api/v1/search?pinnedOnly=true",
+    ],
+    [
+      "https://host.example/linkwarden/API/V1/?foo=bar#hash",
+      "https://host.example/linkwarden/api/v1/search?pinnedOnly=true",
+    ],
+    [
+      "http://localhost:3000/subpath?x=1#y",
+      "http://localhost:3000/subpath/api/v1/search?pinnedOnly=true",
+    ],
+  ] as const;
+
+  for (const [configuredUrl, expectedUrl] of cases) {
+    const fetchMock = api(() => json(page([])));
+    const adapter = await acquire({
+      ...settings,
+      apiConfig: { url: configuredUrl, token: "TOKEN" },
+    });
+    expect(await runOperation(adapter.testConnection)).toBe(true);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(expectedUrl);
+    mock.restore();
+  }
 });
 
 test("missing, header-unsafe, or invalid settings fail acquisition before any request", async () => {
@@ -157,11 +225,49 @@ test("missing, header-unsafe, or invalid settings fail acquisition before any re
     { url: settings.apiConfig.url, token: "  " },
     { url: settings.apiConfig.url, token: "a\r\nX-Injected: 1" },
     { url: "not a url", token: "TOKEN" },
+    { url: "ftp://warden.example.com", token: "TOKEN" },
+    { url: "javascript:alert(1)", token: "TOKEN" },
+    { url: "file:///etc/passwd", token: "TOKEN" },
   ])
     expect((await failure(createLinkwardenAdapter({ ...settings, apiConfig }))).code).toBe(
       "ConfigurationFailure",
     );
   expect(fetchMock).not.toHaveBeenCalled();
+});
+
+test("delete 401 distinguishes Collection is not accessible. from invalid credentials", async () => {
+  api(() => json({ response: "Collection is not accessible." }, 401));
+  const inaccessible = await failure(await run("delete"));
+  expect(inaccessible).toMatchObject({
+    code: "ProviderFailure",
+    details: { operation: "linkwarden.delete", providerCode: 401 },
+  });
+  expect(inaccessible.details).not.toHaveProperty("remoteOutcome");
+  mock.restore();
+
+  api(() => json({ response: "You must be logged in." }, 401));
+  const invalidToken = await failure(await run("delete"));
+  expect(invalidToken).toMatchObject({
+    code: "CredentialsFailure",
+    details: { operation: "linkwarden.delete" },
+  });
+  mock.restore();
+
+  api(() => new Response("Unauthorized", { status: 401 }));
+  const nonJson = await failure(await run("delete"));
+  expect(nonJson).toMatchObject({
+    code: "CredentialsFailure",
+    details: { operation: "linkwarden.delete" },
+  });
+  mock.restore();
+
+  // Non-delete operations keep 401 as CredentialsFailure even with the same message.
+  api(() => json({ response: "Collection is not accessible." }, 401));
+  const testConn = await failure(await run("testConnection"));
+  expect(testConn).toMatchObject({
+    code: "CredentialsFailure",
+    details: { operation: "linkwarden.testConnection" },
+  });
 });
 
 test("the static token never enters TokenManager or refresh, and rejection is never retried", async () => {
@@ -375,21 +481,28 @@ test("a rate-limited save was not processed, so it retries and succeeds once", a
   expect(fetchMock).toHaveBeenCalledTimes(2);
 });
 
-test("sync follows nextCursor through every page, including a final empty one", async () => {
+test("sync follows nextCursor through every page, including a final empty one, and deduplicates by id", async () => {
   // Linkwarden's Prisma path returns the last id of a full page, then an empty page.
   const pages: Record<string, ReturnType<typeof page>> = {
     "": page(range(51, 100).reverse(), 51),
-    "51": page(range(1, 50).reverse(), 1),
+    "51": page([51, ...range(1, 50).reverse()], 1),
     "1": page([]),
   };
   const fetchMock = api((url) => json(pages[url.searchParams.get("cursor") ?? ""]));
   const result = await runOperation((await acquire()).sync({ mode: "overwrite" }));
   expect(result.articles.map((a) => a.id)).toEqual(range(1, 100).reverse());
   expect(result.mode).toBe("overwrite");
-  expect(result.metadata).toMatchObject({ totalFetched: 100, totalProcessed: 100 });
+  expect(result.metadata).toMatchObject({
+    totalFetched: 100,
+    totalProcessed: 100,
+    syncDecision: { reason: "explicit_mode", wasFullSync: true },
+  });
   const urls = fetchMock.mock.calls.map(urlOf);
   expect(urls.map((url) => url.searchParams.get("cursor"))).toEqual([null, "51", "1"]);
-  for (const url of urls) expect(url.pathname).toBe("/api/v1/search");
+  for (const url of urls) {
+    expect(url.pathname).toBe("/api/v1/search");
+    expect(url.searchParams.get("sort")).toBe("0");
+  }
 });
 
 test("sync skips uploaded files without a URL", async () => {
@@ -403,15 +516,128 @@ test("sync skips uploaded files without a URL", async () => {
   expect(result.articles.map((a) => a.id)).toEqual([1]);
 });
 
-test("update sync is still a complete overwrite listing without filters", async () => {
-  const fetchMock = api(() => json(page([3])));
+test("hybrid sync selects overwrite vs early-stopping update mode based on known id, idle state, and age", async () => {
+  const now = Date.now();
+  const hour = 3_600_000;
+  const pages: Record<string, ReturnType<typeof page>> = {
+    "": page([105, 104, 103], 103),
+    "103": page([102, 100, 99], 99),
+    "99": page([98, 97], null),
+  };
+  const fetchMock = api((url) => json(pages[url.searchParams.get("cursor") ?? ""]));
   const adapter = await acquire();
-  const lastSyncTimestamp = "2023-11-14T22:13:20.999Z";
-  const update = await runOperation(adapter.sync({ mode: "update", lastSyncTimestamp }));
-  const full = await runOperation(adapter.sync({ mode: "overwrite", lastSyncTimestamp }));
-  expect(update.mode).toBe("overwrite");
-  expect(full.mode).toBe("overwrite");
-  for (const url of fetchMock.mock.calls.map(urlOf)) expect(url.search).toBe("");
+
+  // 1. First sync (no lastFullSyncTimestamp) -> full overwrite across all pages.
+  const first = await runOperation(adapter.sync());
+  expect(first.mode).toBe("overwrite");
+  expect(first.articles.map((a) => a.id)).toEqual([105, 104, 103, 102, 100, 99, 98, 97]);
+  expect(first.metadata?.syncDecision).toMatchObject({
+    reason: "first_sync",
+    wasFullSync: true,
+  });
+  expect(fetchMock).toHaveBeenCalledTimes(3);
+
+  // 2. Recent full sync with maxKnownNumericId -> incremental update stopping on page 2 (id 100 <= 100).
+  fetchMock.mockClear();
+  const incremental = await runOperation(
+    adapter.sync({
+      lastFullSyncTimestamp: now - 2 * hour,
+      isBrowserIdle: false,
+      maxKnownNumericId: 100,
+    }),
+  );
+  expect(incremental.mode).toBe("update");
+  expect(incremental.articles.map((a) => a.id)).toEqual([105, 104, 103, 102]);
+  expect(incremental.metadata?.syncDecision).toMatchObject({
+    reason: "incremental",
+    wasFullSync: false,
+    isBrowserIdle: false,
+  });
+  expect(fetchMock.mock.calls.map((c) => urlOf(c).searchParams.get("cursor"))).toEqual([
+    null,
+    "103",
+  ]);
+  for (const url of fetchMock.mock.calls.map(urlOf)) {
+    expect(url.searchParams.get("sort")).toBe("0");
+  }
+
+  // 3. 24h elapsed but browser is active -> stays incremental.
+  fetchMock.mockClear();
+  const active24h = await runOperation(
+    adapter.sync({
+      lastFullSyncTimestamp: now - 25 * hour,
+      isBrowserIdle: false,
+      maxKnownNumericId: 104,
+    }),
+  );
+  expect(active24h.mode).toBe("update");
+  expect(active24h.articles.map((a) => a.id)).toEqual([105]);
+  expect(active24h.metadata?.syncDecision).toMatchObject({
+    reason: "incremental",
+    wasFullSync: false,
+  });
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+
+  // 4. 24h elapsed and browser is idle -> full overwrite.
+  fetchMock.mockClear();
+  const idle24h = await runOperation(
+    adapter.sync({
+      lastFullSyncTimestamp: now - 25 * hour,
+      isBrowserIdle: true,
+      maxKnownNumericId: 104,
+    }),
+  );
+  expect(idle24h.mode).toBe("overwrite");
+  expect(idle24h.articles.map((a) => a.id)).toEqual([105, 104, 103, 102, 100, 99, 98, 97]);
+  expect(idle24h.metadata?.syncDecision).toMatchObject({
+    reason: "24h_idle",
+    wasFullSync: true,
+    isBrowserIdle: true,
+  });
+  expect(fetchMock).toHaveBeenCalledTimes(3);
+
+  // 5. 48h overdue even when browser is active -> full overwrite.
+  fetchMock.mockClear();
+  const overdue48h = await runOperation(
+    adapter.sync({
+      lastFullSyncTimestamp: now - 49 * hour,
+      isBrowserIdle: false,
+      maxKnownNumericId: 104,
+    }),
+  );
+  expect(overdue48h.mode).toBe("overwrite");
+  expect(overdue48h.metadata?.syncDecision).toMatchObject({
+    reason: "48h_overdue",
+    wasFullSync: true,
+  });
+  expect(fetchMock).toHaveBeenCalledTimes(3);
+
+  // 6. Explicit update without maxKnownNumericId falls back to overwrite.
+  fetchMock.mockClear();
+  const fallback = await runOperation(adapter.sync({ mode: "update" }));
+  expect(fallback.mode).toBe("overwrite");
+  expect(fallback.metadata?.syncDecision).toMatchObject({
+    reason: "missing_known_id",
+    wasFullSync: true,
+  });
+  expect(fetchMock).toHaveBeenCalledTimes(3);
+
+  // 7. Explicit update with maxKnownNumericId stops early even if the boundary link has url: null.
+  mock.restore();
+  const boundaryFetch = api(() =>
+    json({
+      ...page([106, 100]),
+      data: { links: [link(106), { ...link(100), url: null }], nextCursor: 100 },
+    }),
+  );
+  const boundary = await runOperation(adapter.sync({ mode: "update", maxKnownNumericId: 100 }));
+  expect(boundary.mode).toBe("update");
+  expect(boundary.articles.map((a) => a.id)).toEqual([106]);
+  expect(boundary.metadata?.syncDecision).toMatchObject({
+    reason: "explicit_mode",
+    wasFullSync: false,
+  });
+  expect(boundaryFetch).toHaveBeenCalledTimes(1);
 });
 
 test("a cursor cycle fails as an incomplete snapshot instead of paging forever", async () => {
@@ -431,20 +657,25 @@ test("a cursor cycle fails as an incomplete snapshot instead of paging forever",
   ]);
 });
 
-test("cancellation during the page wait stops pagination without another request", async () => {
-  const seen = deferred<void>();
-  const fetchMock = api(() => {
-    seen.resolve();
-    return json(page([1], 1));
+test("cancellation during an in-flight second page fetch aborts pagination cleanly", async () => {
+  const page2Started = deferred<void>();
+  let page2Signal: AbortSignal | undefined;
+  let calls = 0;
+  const fetchMock = spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+    calls++;
+    if (calls === 1) return json(page([2], 2));
+    page2Signal = init?.signal ?? undefined;
+    page2Started.resolve();
+    return new Promise<Response>(() => {});
   });
   const adapter = await acquire();
   const controller = new AbortController();
   const result = failure(adapter.sync(), controller.signal);
-  await seen.promise;
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await page2Started.promise;
   controller.abort();
   expect((await result).code).toBe("OPERATION_INTERRUPTED");
-  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(page2Signal?.aborted).toBe(true);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
 });
 
 test("cancellation aborts an in-flight delete and reports an unknown outcome", async () => {
@@ -479,17 +710,17 @@ test("draft connection test reports an actionable failure and stores no credenti
   expect(storage.api_tokens).toBeUndefined();
 });
 
-test("repository save, delete, and every sync mode commit complete Linkwarden listings", async () => {
+test("repository save, delete, incremental update across restart, and overwrite sync work together", async () => {
   setFilterListSources([{ name: "empty", url: "data:text/plain,! empty" }]);
   await initializeUrlCanonizer();
   const keys = getAccountStorageKeys(settings);
-  let listed = [1, 2];
-  api((_url, init) => {
+  let pages: Record<string, ReturnType<typeof page>> = { "": page([2, 1]) };
+  const fetchMock = api((url, init) => {
     if (init?.method === "POST") return json({ response: link(3) });
     if (init?.method === "DELETE") return json({ response: link(1) });
-    return json(page(listed));
+    return json(pages[url.searchParams.get("cursor") ?? ""] ?? page([]));
   });
-  const ids = () => (storage[keys.articles] as { id: number }[]).map((a) => a.id).sort();
+  const ids = () => (storage[keys.articles] as { id: number }[]).map((a) => a.id).sort((a, b) => a - b);
   const repo = new ArticlesRepository(new TokenManager({ persist: false }));
   await repo.initialize(settings);
   await runOperation(repo.syncWithAPI({ mode: "overwrite" }));
@@ -498,9 +729,25 @@ test("repository save, delete, and every sync mode commit complete Linkwarden li
   expect(ids()).toEqual([1, 2, 3]);
   await runOperation(repo.deleteArticle(1));
   expect(ids()).toEqual([2, 3]);
-  listed = [4];
-  // A requested update still replaces the cache, so remote deletions disappear locally.
-  await runOperation(repo.syncWithAPI({ mode: "update" }));
+
+  // Simulate an MV3 service worker restart with a fresh repository reading cached articles from storage.
+  const restarted = new ArticlesRepository(new TokenManager({ persist: false }));
+  await restarted.initialize(settings);
+  fetchMock.mockClear();
+  pages = {
+    "": page([4, 3], 3),
+    "3": page([2], null),
+  };
+  const inc = await runOperation(restarted.syncWithAPI());
+  expect(inc.syncResult.mode).toBe("update");
+  expect(ids()).toEqual([2, 3, 4]);
+  // Stopped after page 1 because id 3 <= maxKnownNumericId (3).
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+
+  // Full overwrite reconciles remote deletions.
+  pages = { "": page([4]) };
+  const full = await runOperation(restarted.syncWithAPI({ mode: "overwrite" }));
+  expect(full.syncResult.mode).toBe("overwrite");
   expect(ids()).toEqual([4]);
   expect(typeof storage[keys.lastSyncTimestamp]).toBe("string");
   expect(typeof storage[keys.lastFullSyncTimestamp]).toBe("number");
@@ -538,5 +785,7 @@ for (const operation of ["save", "delete"] as const) {
 
 test("the options form says sync needs Linkwarden 2.10 or later", () => {
   // Older servers answer /api/v1/search with a bare HTTP 404.
-  expect(backendForms.linkwarden.formConfig[0]?.label).toContain("Linkwarden 2.10 or later");
+  expect(backendForms.linkwarden.formConfig[0]?.label).toBe(
+    "Instance URL (needs Linkwarden 2.10 or later)",
+  );
 });

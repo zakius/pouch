@@ -450,3 +450,20 @@ test("Karakeep options form labels the URL field as Instance URL", async () => {
     "Instance URL must be a valid http:// or https:// URL",
   );
 });
+
+test("Linkwarden options form labels the URL field as Instance URL (needs Linkwarden 2.10 or later)", async () => {
+  await domReadyHandler?.();
+  await selectBackend("linkwarden");
+
+  const labels = el("config-container").querySelectorAll("label");
+  const urlLabel = labels.find((label) => label.htmlFor === "url");
+  expect(urlLabel?.textContent).toBe("Instance URL (needs Linkwarden 2.10 or later)");
+
+  el("url").value = "not-a-url";
+  el("token").value = "token";
+  clickButton("save");
+  expect(sentMessages).toEqual([]);
+  expect(el("status").textContent).toContain(
+    "Instance URL (needs Linkwarden 2.10 or later) must be a valid http:// or https:// URL",
+  );
+});

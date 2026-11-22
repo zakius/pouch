@@ -126,7 +126,7 @@ export const backendForms: Record<
     displayName: "Linkwarden",
     formConfig: [
       // Sync uses /api/v1/search, which older servers answer with HTTP 404.
-      { name: "url", label: "API URL (needs Linkwarden 2.10 or later)" },
+      { name: "url", label: "Instance URL (needs Linkwarden 2.10 or later)" },
       { name: "token", label: "API Token" },
     ],
   },

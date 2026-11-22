@@ -407,17 +407,20 @@ export class ArticlesRepository {
       account.pending = [];
       const api = yield* this.adapter(account);
       const timestamps = yield* this.timestamps(account);
+      const cachedArticles = yield* this.articles(account);
       const syncOptions: SyncOptions = {
         ...options,
         lastSyncTimestamp: timestamps.last ?? undefined,
         lastFullSyncTimestamp: timestamps.full ?? undefined,
         isBrowserIdle: options?.isBrowserIdle ?? (yield* Effect.promise(() => isBrowserIdle())),
+        maxKnownNumericId: options?.maxKnownNumericId ?? maxNumericIdOf(cachedArticles),
       };
       logger.info("Starting cache sync with API", {
         providedMode: options?.mode,
         lastSync: timestamps.last,
         lastFullSync: timestamps.full ? new Date(timestamps.full).toISOString() : null,
         isBrowserIdle: syncOptions.isBrowserIdle,
+        maxKnownNumericId: syncOptions.maxKnownNumericId,
       });
 
       const fetchStartedAt = new Date().toISOString();
@@ -715,6 +718,22 @@ export class ArticlesRepository {
       Effect.tap(() => Effect.sync(() => (account.timestamps = timestamps))),
     );
   }
+}
+
+function maxNumericIdOf(articles: readonly Article[]): number | undefined {
+  let max: number | undefined;
+  for (const article of articles) {
+    let numeric: number | undefined;
+    if (typeof article.id === "number") {
+      numeric = article.id;
+    } else if (/^\d+$/.test(article.id)) {
+      numeric = Number(article.id);
+    }
+    if (numeric !== undefined && Number.isSafeInteger(numeric) && numeric > 0) {
+      if (max === undefined || numeric > max) max = numeric;
+    }
+  }
+  return max;
 }
 
 function merge(settings: Settings, existingArticles: Article[], newArticles: Article[]): Article[] {

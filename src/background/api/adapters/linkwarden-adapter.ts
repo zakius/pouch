@@ -3,6 +3,7 @@ import * as v from "valibot";
 import { linkwardenConfigSchema, linkwardenSettingsSchema } from "../../../utils/settings-schemas";
 export { linkwardenConfigSchema, linkwardenSettingsSchema };
 import type { Article } from "../../../types/common";
+import { logger } from "../../../utils/logger";
 import { requestJson, validate } from "../effect-api-client";
 import {
   ConfigurationFailure,
@@ -11,11 +12,17 @@ import {
   storageHealthy,
   type AcquisitionError,
   type EffectAdapter,
+  type TransportError,
 } from "../effect-adapter";
-import type { SavingArticle, SyncOptions } from "../read-it-later-adapter";
+import type { SavingArticle, SyncMode, SyncOptions } from "../read-it-later-adapter";
 
 export type LinkwardenSettings = v.InferInput<typeof linkwardenSettingsSchema>;
 export type LinkwardenConfig = v.InferInput<typeof linkwardenConfigSchema>;
+
+const LINKWARDEN_MAX_NAME_LENGTH = 2048;
+const FULL_SYNC_IDLE_MS = 86_400_000;
+const FULL_SYNC_OVERDUE_MS = 2 * FULL_SYNC_IDLE_MS;
+const LINKWARDEN_COLLECTION_NOT_ACCESSIBLE = "Collection is not accessible.";
 
 /** Linkwarden's Prisma `Link`: uploaded PDFs and images have no `url`. */
 const linkwardenLinkSchema = v.object({
@@ -42,6 +49,30 @@ type LinkwardenLink = v.InferOutput<typeof linkwardenLinkSchema>;
 const providerFailure = (operation: string) => (data: unknown) =>
   v.is(linkwardenErrorSchema, data) ? new ProviderFailure(operation) : undefined;
 
+/**
+ * Linkwarden returns HTTP 401 with `"Collection is not accessible."` when deleting a link
+ * in a shared collection without delete permission or one already deleted remotely.
+ */
+const deleteUnauthorizedFailure = (data: unknown) =>
+  v.is(linkwardenErrorSchema, data) && data.response === LINKWARDEN_COLLECTION_NOT_ACCESSIBLE
+    ? new ProviderFailure("linkwarden.delete", 401)
+    : undefined;
+
+const normalizeApiUrl = (rawUrl: string): string | undefined => {
+  let url: URL;
+  try {
+    url = new URL(rawUrl.trim());
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+  url.search = "";
+  url.hash = "";
+  const pathname = url.pathname.replace(/\/+$/, "").replace(/\/api\/v1$/i, "");
+  url.pathname = `${pathname}/api/v1`;
+  return url.toString();
+};
+
 const toArticle = (item: LinkwardenLink, url: string): Article => ({
   id: item.id,
   title: item.name,
@@ -55,11 +86,10 @@ export const createLinkwardenAdapter = Effect.fn("linkwarden.acquire")(function*
 ) {
   const parsed = v.safeParse(linkwardenSettingsSchema, settings);
   const token = parsed.success ? parsed.output.apiConfig.token.trim() : "";
-  // A missing token must not degrade into an unauthenticated request.
-  if (!parsed.success || !token || /[\r\n]/.test(token))
+  const apiUrl = parsed.success ? normalizeApiUrl(parsed.output.apiConfig.url) : undefined;
+  // A missing token or non-HTTP(S) URL must not degrade into an unauthenticated or unsafe request.
+  if (!parsed.success || !token || /[\r\n]/.test(token) || !apiUrl)
     return yield* Effect.fail(new ConfigurationFailure("linkwarden.acquire"));
-  // The configured URL is the instance root, for example https://host.
-  const apiUrl = `${parsed.output.apiConfig.url.replace(/\/+$/, "")}/api/v1`;
   const authorization = Effect.succeed(`Bearer ${token}`);
 
   const request = (
@@ -70,6 +100,7 @@ export const createLinkwardenAdapter = Effect.fn("linkwarden.acquire")(function*
       mutation?: "save" | "delete";
       timeoutMs?: number;
       confirms?: v.GenericSchema;
+      classifyUnauthorized?: (data: unknown) => TransportError | undefined;
     } = {},
   ) => {
     const { confirms } = options;
@@ -81,12 +112,14 @@ export const createLinkwardenAdapter = Effect.fn("linkwarden.acquire")(function*
       timeoutMs: options.timeoutMs,
       authorization,
       providerFailure: providerFailure(operation),
+      classifyUnauthorized: options.classifyUnauthorized,
       confirms: confirms && ((data) => v.is(confirms, data)),
     });
   };
 
   const adapter: EffectAdapter = {
     saveArticle: Effect.fn("linkwarden.save")(function* (article: SavingArticle) {
+      const name = article.title.trim().slice(0, LINKWARDEN_MAX_NAME_LENGTH);
       // A duplicate URL is a 409 rejection when the user prevents duplicate links.
       const data = yield* request("linkwarden.save", "/links", {
         mutation: "save",
@@ -94,7 +127,7 @@ export const createLinkwardenAdapter = Effect.fn("linkwarden.acquire")(function*
         init: {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url: article.url, name: article.title }),
+          body: JSON.stringify({ url: article.url, ...(name ? { name } : {}) }),
         },
       });
       const saved = yield* validate(linkwardenLinkResponseSchema, data, "linkwarden.save");
@@ -104,47 +137,120 @@ export const createLinkwardenAdapter = Effect.fn("linkwarden.acquire")(function*
       yield* request("linkwarden.delete", `/links/${encodeURIComponent(String(id))}`, {
         mutation: "delete",
         confirms: linkwardenLinkResponseSchema,
+        classifyUnauthorized: deleteUnauthorizedFailure,
         init: { method: "DELETE" },
       });
     }),
     /**
-     * Linkwarden's search has no created-since or modified-since filter
-     * (https://docs.linkwarden.app/api/search-links), so every sync walks the whole
-     * cursor-paginated listing and returns overwrite mode regardless of the requested mode.
-     * Uploaded files without a URL are not articles.
+     * Linkwarden Hybrid Incremental Sync
+     *
+     * Linkwarden's `GET /api/v1/search?sort=0` orders strictly by `id desc` (no pinned-first
+     * ordering) and has no created-since or modified-since filter. Incremental sync stops
+     * paginating early as soon as any link on a page has `id <= maxKnownNumericId`.
+     *
+     * LIMITATIONS:
+     * - Incremental sync only catches newly created links (not deletions or edits to older links)
+     * - Periodic full syncs run at 24h when idle (or forced at 48h) to reconcile deletions
+     * - Uploaded files without a URL are not articles
      */
-    sync: Effect.fn("linkwarden.sync")(function* (_options?: SyncOptions) {
-      const query = new URLSearchParams();
-      const seen = new Set<number>();
-      const articles: Article[] = [];
-      for (let page = 0; ; page++) {
-        // Keeps the one-request-per-second pacing of the shared client this replaces.
-        if (page > 0) yield* Effect.sleep(1000);
+    sync: Effect.fn("linkwarden.sync")(function* (options?: SyncOptions) {
+      const maxKnownNumericId =
+        typeof options?.maxKnownNumericId === "number" &&
+        Number.isSafeInteger(options.maxKnownNumericId) &&
+        options.maxKnownNumericId > 0
+          ? options.maxKnownNumericId
+          : undefined;
+      const lastFullSyncTimestamp = options?.lastFullSyncTimestamp;
+      const elapsed =
+        typeof lastFullSyncTimestamp === "number" &&
+        Number.isFinite(lastFullSyncTimestamp) &&
+        lastFullSyncTimestamp > 0
+          ? Date.now() - lastFullSyncTimestamp
+          : undefined;
+      // Full syncs wait for idle, but not past 48h: an always-active browser would never reconcile deletions.
+      const overdue = elapsed !== undefined && elapsed >= FULL_SYNC_OVERDUE_MS;
+
+      let mode: SyncMode;
+      let reason: string;
+      if (options?.mode === "overwrite") {
+        mode = "overwrite";
+        reason = "explicit_mode";
+      } else if (options?.mode === "update") {
+        if (maxKnownNumericId !== undefined) {
+          mode = "update";
+          reason = "explicit_mode";
+        } else {
+          mode = "overwrite";
+          reason = "missing_known_id";
+        }
+      } else if (elapsed === undefined || maxKnownNumericId === undefined) {
+        mode = "overwrite";
+        reason = "first_sync";
+      } else if (overdue) {
+        mode = "overwrite";
+        reason = "48h_overdue";
+      } else if (elapsed >= FULL_SYNC_IDLE_MS && options?.isBrowserIdle) {
+        mode = "overwrite";
+        reason = "24h_idle";
+      } else {
+        mode = "update";
+        reason = "incremental";
+      }
+
+      logger.info("Linkwarden sync mode decision", {
+        mode,
+        reason,
+        timeSinceLastFullSync: elapsed,
+        isBrowserIdle: options?.isBrowserIdle,
+        maxKnownNumericId,
+      });
+
+      const stopAtId = mode === "update" ? maxKnownNumericId : undefined;
+      const query = new URLSearchParams({ sort: "0" });
+      const seenCursors = new Set<number>();
+      const articlesById = new Map<number, Article>();
+      for (;;) {
         const data = yield* request("linkwarden.sync", `/search?${query.toString()}`);
         const result = yield* validate(linkwardenPageSchema, data, "linkwarden.sync");
-        for (const item of result.data.links)
-          if (item.url) articles.push(toArticle(item, item.url));
+        let reachedKnown = false;
+        for (const item of result.data.links) {
+          if (stopAtId !== undefined && item.id <= stopAtId) {
+            reachedKnown = true;
+            continue;
+          }
+          if (item.url) articlesById.set(item.id, toArticle(item, item.url));
+        }
+        if (reachedKnown) break;
         const cursor = result.data.nextCursor;
         if (cursor === null) break;
         // A revisited cursor would never end; overwriting from a partial listing would drop articles.
-        if (seen.has(cursor))
+        if (seenCursors.has(cursor))
           return yield* Effect.fail(new IncompleteSnapshotFailure("linkwarden.sync"));
-        seen.add(cursor);
+        seenCursors.add(cursor);
         query.set("cursor", String(cursor));
       }
+      const articles = [...articlesById.values()];
       return {
         articles,
-        mode: "overwrite" as const,
+        mode,
         metadata: {
           totalFetched: articles.length,
           totalProcessed: articles.length,
           lastSyncTimestamp: new Date().toISOString(),
           apiVersion: "1.0",
+          syncDecision: {
+            reason,
+            wasFullSync: mode === "overwrite",
+            timeSinceLastFullSync: elapsed,
+            isBrowserIdle: options?.isBrowserIdle,
+          },
         },
       };
     }),
     testConnection: Effect.gen(function* () {
-      const data = yield* request("linkwarden.testConnection", "/search", { timeoutMs: 10000 });
+      const data = yield* request("linkwarden.testConnection", "/search?pinnedOnly=true", {
+        timeoutMs: 10000,
+      });
       yield* validate(linkwardenPageSchema, data, "linkwarden.testConnection");
       yield* storageHealthy;
       return true as const;

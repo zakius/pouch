@@ -30,4 +30,5 @@ export interface SyncOptions {
   lastSyncTimestamp?: string;
   lastFullSyncTimestamp?: number;
   isBrowserIdle?: boolean;
+  maxKnownNumericId?: number;
 }

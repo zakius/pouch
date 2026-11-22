@@ -108,6 +108,11 @@ export interface EffectRequest {
     status: number,
   ) => ProviderFailure | RateLimitFailure | undefined;
   /**
+   * Optional classifier for HTTP 401 JSON responses when a provider reuses 401 for a
+   * non-credential rejection. Returning a failure bypasses `onAuthRejected` and `CredentialsFailure`.
+   */
+  readonly classifyUnauthorized?: (data: unknown) => TransportError | undefined;
+  /**
    * A parsed body this rejects is an invalid response; a mutation's outcome stays unknown.
    * A body it accepts is a confirmed success, even if it carries an `error` key.
    */
@@ -165,6 +170,13 @@ export const requestJson = Effect.fn("transport.request")(function* (request: Ef
       if (mutation && !response.ok && response.status < 500) yield* recordMutationOutcome();
       if (!response.ok) yield* storageHealthy;
       if (response.status === 401) {
+        if (request.classifyUnauthorized) {
+          const data = yield* Effect.tryPromise(
+            async (): Promise<unknown> => JSON.parse(await response.text()),
+          ).pipe(Effect.orElseSucceed(() => undefined));
+          const classified = request.classifyUnauthorized(data);
+          if (classified) return yield* Effect.fail(classified);
+        }
         if (request.onAuthRejected) yield* request.onAuthRejected(authorization);
         return yield* Effect.fail(new CredentialsFailure(operation, true));
       }

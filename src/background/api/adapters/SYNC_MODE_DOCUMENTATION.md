@@ -8,7 +8,7 @@
 | Wallabag   | ✅ Yes (since)                          | ❌ No             | Periodic full syncs (24h)                |
 | Raindrop   | ⚠️ Partial (`sort=-created` early-stop) | ❌ No             | Periodic full syncs (24h idle / 48h max) |
 | LinkAce    | ❌ No                                   | N/A               | Full sync only                           |
-| Linkwarden | ❓ Uncertain                            | ❓ Unknown        | Needs testing/verification               |
+| Linkwarden | ⚠️ Partial (`sort=0` ID early-stop)     | ❌ No             | Periodic full syncs (24h idle / 48h max) |
 | KaraKeep   | ❌ No                                   | N/A               | Full sync only                           |
 | Bookmarks  | ❌ No                                   | N/A               | Full sync only                           |
 
@@ -137,30 +137,36 @@ params.set("since", unixTimestamp.toString());
 
 ---
 
-### 5. Linkwarden ❌ UNCERTAIN - NEEDS TESTING
+### 5. Linkwarden ⚠️ INCREMENTAL VIA `sort=0` ID EARLY-STOP
 
 - **API:** https://docs.linkwarden.app/api/
-- **Method:** Unknown - docs incomplete
-- **Current code assumes:** `createdAfter` parameter
-- **Status:** ⚠️ UNVERIFIED - May not work as expected
-- **Action needed:** Test and document actual behavior
-- **Implementation:** `linkwarden-adapter.ts:187-225`
+- **Endpoint:** `GET /api/v1/search?sort=0` (cursor-paginated via `cursor=<nextCursor>`)
+- **Method:** Paginate `GET /api/v1/search?sort=0` (ordered strictly by `id desc`, without pinned-first ordering) and stop early client-side once any link on the page has `id <= maxKnownNumericId`
+- **Deletions:** ❌ No - incremental sync only captures newly created links
+- **Strategy:** Hybrid incremental sync + periodic full syncs (24h when idle, forced at 48h)
+- **Implementation:** `linkwarden-adapter.ts`
 
-**Problem:**
+**How it works:**
 
-- Old endpoint `/api/v1/links` is DEPRECATED
-- New endpoint `/api/v1/search` recommended
-- But documentation doesn't specify search query parameters
-- Current implementation assumes `createdAfter` parameter exists (UNVERIFIED!)
+1. Requests pages ordered strictly by descending numeric ID (`sort=0`) — `/api/v1/search` has no `createdAfter` or `modifiedSince` parameter
+2. `ArticlesRepository.syncAccount` computes `maxKnownNumericId` from cached articles so incremental sync survives Chromium MV3 service worker restarts
+3. In `"update"` mode, keeps only links with `link.id > maxKnownNumericId` and stops paginating early as soon as any link on the page has `link.id <= maxKnownNumericId`
+4. In `"overwrite"` mode, walks all pages, deduplicates links by `id`, and fails with `IncompleteSnapshotFailure` if `nextCursor` repeats
+5. Falls back to `"overwrite"` on first sync, when `maxKnownNumericId` is missing, after 24h when idle, or after 48h overdue
 
-**Recommended Action:**
+**Limitations:**
 
-1. Test if `/api/v1/links` or `/api/v1/search` accepts `createdAfter` parameter
-2. If yes: Use incremental sync with periodic full syncs
-3. If no: Fall back to full sync only
+- Only captures newly created links during incremental sync
+- Does NOT track deletions (reconciled on periodic full syncs)
+- Does NOT track updates to older existing links (reconciled on periodic full syncs)
+- Requires Linkwarden 2.10 or later (`/api/v1/search`; older `/api/v1/links` is deprecated)
 
-**WARNING:**
-The `createdAfter` parameter may not actually work as expected. If the parameter is ignored, the API will return all results every time.
+**Hybrid Strategy:**
+
+- First sync or missing `maxKnownNumericId` → FULL (`overwrite`)
+- Last full sync ≥ 48h ago → FULL (`overwrite`)
+- Last full sync ≥ 24h ago + browser idle → FULL (`overwrite`)
+- Otherwise → INCREMENTAL (`update`)
 
 ---
 
@@ -225,7 +231,7 @@ The `createdAfter` parameter may not actually work as expected. If the parameter
 - Full sync only on first run or explicit user request
 - No periodic full syncs needed
 
-### For Backends with Partial Incremental Support (Wallabag, Raindrop)
+### For Backends with Partial Incremental Support (Wallabag, Raindrop, Linkwarden)
 
 - Use hybrid approach:
   - Incremental sync for speed (every 30 min - 2 hours)
@@ -237,11 +243,11 @@ The `createdAfter` parameter may not actually work as expected. If the parameter
 
 - **Wallabag:** Full sync every 24h (uses hybrid approach internally)
 - **Raindrop:** Full sync every 24h when idle, or 48h max (uses hybrid approach internally)
+- **Linkwarden:** Full sync every 24h when idle, or 48h max (uses hybrid ID-based early-stop internally)
 
-### For Backends with No/Uncertain Incremental Support (LinkAce, KaraKeep, Bookmarks, Linkwarden)
+### For Backends with No Incremental Support (LinkAce, KaraKeep, Bookmarks)
 
 - Always use full sync
-- For Linkwarden: Test and verify actual capabilities
 - Consider client-side caching to reduce perceived latency
 
 ---
@@ -260,18 +266,14 @@ All adapters should:
 
 ## Testing Checklist
 
-For each backend with uncertain or partial incremental support:
+For each backend with partial incremental support:
 
-- [ ] Verify incremental sync parameters work as documented
+- [ ] Verify incremental sync parameters / early-stop conditions work as documented
 - [ ] Test if deletions are tracked in incremental mode
 - [ ] Test if updates to existing items are returned
-- [ ] Verify timestamp format (ISO 8601 vs Unix seconds)
+- [ ] Verify cursor / timestamp format (ID vs ISO 8601 vs Unix seconds)
 - [ ] Document actual vs expected behavior
 - [ ] Update implementation based on findings
-
-**Priority for testing:**
-
-1. **Linkwarden** - Uncertain if incremental sync works at all
 
 ---
 
@@ -283,7 +285,7 @@ For each backend with uncertain or partial incremental support:
 | Wallabag   | Unix seconds                      | `1704067200`           |
 | Raindrop   | ISO 8601 (client-side early-stop) | `2024-01-01T00:00:00Z` |
 | LinkAce    | N/A (full sync only)              | N/A                    |
-| Linkwarden | ISO 8601 (unverified)             | `2024-01-01T00:00:00Z` |
+| Linkwarden | N/A (numeric ID early-stop)       | `12345`                |
 | KaraKeep   | N/A (full sync only)              | N/A                    |
 | Bookmarks  | N/A (full sync only)              | N/A                    |
 
