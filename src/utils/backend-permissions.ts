@@ -15,7 +15,9 @@ export function originPatternFromUrl(url: string | undefined): string | null {
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
-    return `${parsed.protocol}//${parsed.host}/*`;
+    // WebExtension match patterns forbid explicit ports; URL.hostname strips
+    // :port while preserving IPv6 brackets (e.g. [::1]).
+    return `${parsed.protocol}//${parsed.hostname}/*`;
   } catch {
     return null;
   }

@@ -95,7 +95,13 @@ test("origin patterns reject non-http URLs and unparseable input", () => {
   expect(originPatternFromUrl("ftp://files.example.com")).toBeNull();
   expect(originPatternFromUrl("not a url")).toBeNull();
   expect(originPatternFromUrl(undefined)).toBeNull();
-  expect(originPatternFromUrl("http://10.0.0.8:8080/wallabag")).toBe("http://10.0.0.8:8080/*");
+});
+
+test("origin patterns strip non-default ports and preserve IPv6 brackets", () => {
+  expect(originPatternFromUrl("http://10.0.0.8:8080/wallabag")).toBe("http://10.0.0.8/*");
+  expect(originPatternFromUrl("https://wallabag.lan:8443/")).toBe("https://wallabag.lan/*");
+  expect(originPatternFromUrl("http://[::1]:3000/")).toBe("http://[::1]/*");
+  expect(originPatternFromUrl("https://[2001:db8::1]/app")).toBe("https://[2001:db8::1]/*");
 });
 
 test("manifest requires no host permissions; all host origins are optional", () => {
