@@ -56,6 +56,24 @@ const event = (name: string) => ({
     events[name] = listener;
   },
 });
+const sendExternal = (
+  listener: (...args: any[]) => any,
+  msg: unknown,
+  sender: { id: string },
+): Promise<any> =>
+  new Promise((resolve) => {
+    let settled = false;
+    const sendResponse = (response?: unknown) => {
+      if (settled) return;
+      settled = true;
+      resolve(response);
+    };
+    const result = listener(msg, sender, sendResponse);
+    if (result !== true && !settled) {
+      settled = true;
+      resolve(result);
+    }
+  });
 const quota = new DOMException(
   "QUOTA_BYTES exceeded https://user:secret@example.com token=SECRET",
   "QuotaExceededError",
@@ -879,7 +897,8 @@ switch (scenario) {
     await import("../../src/quick-actions/background");
     const quickListener = events.external;
     holding = true;
-    const fatal = quickListener(
+    const fatal = sendExternal(
+      quickListener,
       { type: "fatalStorage", error: "Previous worker stopped" },
       { id: POUCH_ID },
     );
@@ -887,10 +906,10 @@ switch (scenario) {
     await import("../../src/background/background");
     const pouchListener = events.external;
     (browser.runtime.sendMessage as any) = async (target: string, message: any) => {
-      if (target === POUCH_ID) return pouchListener(message, { id: QUICK_ACTIONS_ID });
-      if (target === QUICK_ACTIONS_ID) return quickListener(message, { id: POUCH_ID });
+      if (target === POUCH_ID) return sendExternal(pouchListener, message, { id: QUICK_ACTIONS_ID });
+      if (target === QUICK_ACTIONS_ID) return sendExternal(quickListener, message, { id: POUCH_ID });
     };
-    await quickListener({ type: "pageState", tabId: 1, saved: true }, { id: POUCH_ID });
+    await sendExternal(quickListener, { type: "pageState", tabId: 1, saved: true }, { id: POUCH_ID });
     assert.equal(
       state.enabled,
       true,
@@ -952,23 +971,24 @@ switch (scenario) {
     await import("../../src/quick-actions/background");
     const quickListener = events.external;
     holding = true;
-    const normal = quickListener({ type: "pageState", tabId: 1, saved: true }, { id: POUCH_ID });
+    const normal = sendExternal(
+      quickListener,
+      { type: "pageState", tabId: 1, saved: true },
+      { id: POUCH_ID },
+    );
     await ready;
-    await quickListener({ type: "fatalStorage", error: "Pouch stopped" }, { id: POUCH_ID });
+    await sendExternal(quickListener, { type: "fatalStorage", error: "Pouch stopped" }, { id: POUCH_ID });
     holding = false;
     release();
     await normal;
     assert.deepEqual(state, { enabled: false, badge: "!", title: "Pouch stopped" });
     break;
   }
-  case "startup-token-get-race":
-  case "startup-token-create-race":
   case "startup-refresh-create-race":
   case "startup-menu-create-race":
   case "startup-page-menu-create-race":
   case "startup-filter-alarm-create-race":
   case "startup-remove-all-race":
-  case "startup-token-get-race-chromium":
   case "startup-menu-create-race-chromium": {
     const ordering = scenario.replace("-chromium", "");
     store.api_tokens = [["service", { ...baseToken, serviceName: "service" }]];
@@ -985,13 +1005,9 @@ switch (scenario) {
         release = resolve;
       });
     };
-    (browser.alarms.get as any) = async () => {
-      if (ordering === "startup-token-get-race") await hold();
-      return undefined;
-    };
+    (browser.alarms.get as any) = async () => undefined;
     (browser.alarms.create as any) = async (name: string) => {
       if (
-        (ordering === "startup-token-create-race" && name === "token-refresh-check") ||
         (ordering === "startup-refresh-create-race" && name === "refresh") ||
         (ordering === "startup-filter-alarm-create-race" && name === "refresh-filters")
       )
@@ -1037,15 +1053,7 @@ switch (scenario) {
     );
     assert.equal(alarms.has("refresh"), ordering === "startup-filter-alarm-create-race");
     assert.equal(alarms.has("refresh-filters"), false);
-    assert.equal(
-      alarms.has("token-refresh-check"),
-      [
-        "startup-refresh-create-race",
-        "startup-menu-create-race",
-        "startup-page-menu-create-race",
-        "startup-filter-alarm-create-race",
-      ].includes(ordering),
-    );
+    assert.equal(alarms.has("token-refresh-check"), false);
     // The listener boundary logs the fatal failure; no listener starts new work.
     const counts = [remoteReads, fetches, writes, menus.size, alarms.size];
     await events.startup();
@@ -1075,7 +1083,8 @@ switch (scenario) {
     });
     await import("../../src/quick-actions/background");
     const quickListener = events.external;
-    await quickListener(
+    await sendExternal(
+      quickListener,
       { type: "fatalStorage", error: "Previous worker stopped" },
       { id: POUCH_ID },
     );
@@ -1099,21 +1108,26 @@ switch (scenario) {
     await ready;
     const before = writes;
     assert.equal(
-      await pouchListener({ type: "getStorageDiagnostic" }, { id: "untrusted" }),
+      await sendExternal(pouchListener, { type: "getStorageDiagnostic" }, { id: "untrusted" }),
       undefined,
     );
     assert.equal(writes, before, "unauthorized diagnostic request must not write storage");
     (browser.runtime.sendMessage as any) = async (target: string, message: any) => {
-      if (target === POUCH_ID) return pouchListener(message, { id: QUICK_ACTIONS_ID });
-      if (target === QUICK_ACTIONS_ID) return quickListener(message, { id: POUCH_ID });
+      if (target === POUCH_ID) return sendExternal(pouchListener, message, { id: QUICK_ACTIONS_ID });
+      if (target === QUICK_ACTIONS_ID) return sendExternal(quickListener, message, { id: POUCH_ID });
     };
-    const pending = quickListener({ type: "pageState", tabId: 1, saved: true }, { id: POUCH_ID });
+    const pending = sendExternal(
+      quickListener,
+      { type: "pageState", tabId: 1, saved: true },
+      { id: POUCH_ID },
+    );
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.deepEqual(enabled, [], "page state alone cannot recover before the health check");
     if (scenario === "external-fatal") rejectSet = true;
     release();
     await pending;
-    const diagnostic = await pouchListener(
+    const diagnostic = await sendExternal(
+      pouchListener,
       { type: "getStorageDiagnostic" },
       { id: QUICK_ACTIONS_ID },
     );
@@ -1131,7 +1145,7 @@ switch (scenario) {
       (browser.runtime.sendMessage as any) = async (target: string, message: any) => {
         if (target === QUICK_ACTIONS_ID) resent.push(message);
       };
-      await pouchListener({ type: "refreshUi" }, { id: QUICK_ACTIONS_ID });
+      await sendExternal(pouchListener, { type: "refreshUi" }, { id: QUICK_ACTIONS_ID });
       assert.equal(resent.at(-1)?.type, "fatalStorage", "a request after shutdown resends the stop");
     }
     break;

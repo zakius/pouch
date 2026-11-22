@@ -104,13 +104,12 @@ export interface TokenManagerConfig {
   refreshCooldownMs: number;
   checkIntervalMinutes: number;
   expirationThresholdChecks: number;
-  /** False keeps tokens in memory only: no storage writes and no refresh alarm. */
+  /** False keeps tokens in memory only: no storage writes or alarm changes. */
   persist: boolean;
 }
 
 export class TokenManager {
   private tokens: Map<string, TokenMetadata> = new Map();
-  private alarmInitialized: boolean = false;
   private config: TokenManagerConfig;
   private refreshConfigProviders: Map<string, () => TokenRefreshConfig | null> = new Map();
   private refreshEffects = new Map<string, Effect.Effect<TokenRefreshResult, TransportError>>();
@@ -212,42 +211,21 @@ export class TokenManager {
     };
   }
 
-  public readonly initializeAlarm: Effect.Effect<void, TransportError> = Effect.gen(
-    { self: this },
-    function* () {
-      yield* storageHealthy;
-      if (this.alarmInitialized || !this.config.persist) return;
-      // Chromium keeps alarms while its service worker sleeps: recreating
-      // the alarm on every wake would push it back each time. The background
-      // script's onAlarm listener calls checkAndRefreshTokens.
-      const created = yield* Effect.tryPromise(async () => {
-        const existing = await browser.alarms.get(TOKEN_CHECK_ALARM_NAME);
-        if (getStorageDiagnostic()) return false;
-        if (existing?.periodInMinutes !== this.config.checkIntervalMinutes) {
-          await browser.alarms.create(TOKEN_CHECK_ALARM_NAME, {
-            periodInMinutes: this.config.checkIntervalMinutes,
-          });
-          if (getStorageDiagnostic()) await browser.alarms.clear(TOKEN_CHECK_ALARM_NAME);
-        }
-        return true;
-      }).pipe(
-        // An alarm created while shutdown starts is cleared before shutdown completes.
-        Effect.uninterruptible,
-        Effect.catch((error) =>
-          Effect.sync(() => {
-            logger.error("Failed to initialize token refresh alarm:", error);
-            return false;
-          }),
-        ),
-      );
-      yield* storageHealthy;
-      if (!created) return;
-      this.alarmInitialized = true;
-      logger.info("Token refresh alarm initialized", {
-        interval: `${this.config.checkIntervalMinutes} minutes`,
-      });
-    },
-  );
+  /** Clears any legacy repeating token-check alarm left over from older versions. */
+  public readonly clearLegacyAlarm: Effect.Effect<void> = Effect.gen({ self: this }, function* () {
+    if (!this.config.persist || getStorageDiagnostic()) return;
+    if (typeof browser.alarms?.clear !== "function") return;
+    yield* Effect.tryPromise(() =>
+      Promise.resolve(browser.alarms.clear(TOKEN_CHECK_ALARM_NAME)),
+    ).pipe(
+      Effect.uninterruptible,
+      Effect.catch((error) =>
+        Effect.sync(() => {
+          logger.debug("Failed to clear legacy token refresh alarm:", error);
+        }),
+      ),
+    );
+  });
 
   public storeToken(
     serviceName: string,
@@ -281,7 +259,6 @@ export class TokenManager {
           });
         }),
       ),
-      Effect.andThen(this.initializeAlarm),
     );
   }
 
@@ -482,6 +459,7 @@ export class TokenManager {
           logger.info(`Token cleared for ${serviceName}`);
         }),
       ),
+      Effect.andThen(this.clearLegacyAlarm),
     );
   }
 
@@ -497,6 +475,7 @@ export class TokenManager {
           }),
         ),
       );
+      yield* this.clearLegacyAlarm;
       const storedTokens = result[this.config.storageKey];
       if (storedTokens === undefined || storedTokens === null) return;
       if (!Array.isArray(storedTokens)) {
@@ -521,7 +500,6 @@ export class TokenManager {
       }
       this.tokens = loaded;
       logger.info(`Loaded ${this.tokens.size} tokens from storage`);
-      if (this.tokens.size > 0) yield* this.initializeAlarm;
     },
   );
 

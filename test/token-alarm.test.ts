@@ -5,6 +5,8 @@ import { expect, test } from "bun:test";
 type AlarmListener = (alarm: { name: string }) => Promise<void>;
 const alarmListeners: AlarmListener[] = [];
 const fetchCalls: string[] = [];
+const createdAlarms: string[] = [];
+const clearedAlarms: string[] = [];
 const event = { addListener: () => {} };
 const settings = {
   backend: "wallabag",
@@ -56,7 +58,13 @@ Object.assign(globalThis, {
       },
     },
     alarms: {
-      create: async () => {},
+      create: async (name: string) => {
+        createdAlarms.push(name);
+      },
+      clear: async (name: string) => {
+        clearedAlarms.push(name);
+        return true;
+      },
       get: async () => ({ name: "token-refresh-check", periodInMinutes: 5 }),
       onAlarm: { addListener: (l: AlarmListener) => alarmListeners.push(l) },
     },
@@ -76,7 +84,7 @@ Object.assign(globalThis, {
   }) as typeof fetch,
 });
 
-test("the token alarm in a freshly woken background neither logs in nor drops tokens", async () => {
+test("the token alarm in a freshly woken background neither logs in nor drops tokens and clears any leftover alarm", async () => {
   await import("../src/background/background.ts");
   // Filter lists are fetched too; count only the backend.
   fetchCalls.length = 0;
@@ -86,4 +94,6 @@ test("the token alarm in a freshly woken background neither logs in nor drops to
   await Bun.sleep(10);
   expect(fetchCalls.filter((url) => url.startsWith("https://wallabag.example.com"))).toEqual([]);
   expect(local.api_tokens).toEqual([["wallabag", expiring]]);
+  expect(createdAlarms).not.toContain("token-refresh-check");
+  expect(clearedAlarms).toContain("token-refresh-check");
 });

@@ -8,6 +8,7 @@ import {
 
 interface AlarmsMock {
   create: ReturnType<typeof mock>;
+  clear: ReturnType<typeof mock>;
   existing?: { name: string; periodInMinutes: number };
 }
 
@@ -15,6 +16,7 @@ function setupBrowser() {
   const storage: Record<string, unknown> = {};
   const alarms: AlarmsMock = {
     create: mock(() => ({})),
+    clear: mock(async () => true),
   };
   Object.assign(globalThis, {
     browser: {
@@ -29,6 +31,7 @@ function setupBrowser() {
       },
       alarms: {
         create: alarms.create,
+        clear: alarms.clear,
         get: async () => alarms.existing,
       },
     },
@@ -86,29 +89,53 @@ test("getAccessToken refreshes an expiring token with supplied configuration", a
   expect(String(init.body)).toContain("refresh_token=refresh-token");
 });
 
-test("the periodic alarm refreshes an expiring token without deleting credentials", async () => {
+test("checkAndRefreshTokens refreshes an expiring token without creating a repeating alarm", async () => {
   const { alarms, storage } = setupBrowser();
   const manager = new TokenManager({ refreshBufferMs: 0 });
   manager.setRefreshConfigProvider("wallabag", () => refreshConfig);
   await runOperation(manager.storeToken("wallabag", { ...baseToken, expiresAt: Date.now() + 60 * 1000 }));
 
   const fetchMock = spyOn(globalThis, "fetch").mockResolvedValue(tokenResponse());
-  // The alarm waits for the refresh, so an MV3 worker stays alive until it is stored.
   await runOperation(manager.checkAndRefreshTokens);
 
   expect(fetchMock).toHaveBeenCalledTimes(1);
   const metadata = manager.getTokenMetadata("wallabag");
   expect(metadata?.accessToken).toBe("new-access");
   expect(Array.from(storage.api_tokens as [string, TokenMetadata][])).toHaveLength(1);
-  expect(alarms.create).toHaveBeenCalledWith("token-refresh-check", { periodInMinutes: 5 });
+  expect(alarms.create).not.toHaveBeenCalled();
 });
 
-test("loading tokens keeps a running refresh alarm, as when Chromium's worker wakes", async () => {
+test("storeToken does not schedule token-refresh-check, and loadTokens and clearToken clear leftover alarms", async () => {
   const { alarms, storage } = setupBrowser();
   storage.api_tokens = [["wallabag", { ...baseToken, serviceName: "wallabag" }]];
   alarms.existing = { name: "token-refresh-check", periodInMinutes: 5 };
+
+  const manager = new TokenManager();
+  await runOperation(manager.loadTokens);
+  expect(alarms.create).not.toHaveBeenCalled();
+  expect(alarms.clear).toHaveBeenCalledWith("token-refresh-check");
+
+  alarms.clear.mockClear();
+  await runOperation(manager.storeToken("wallabag", baseToken));
+  expect(alarms.create).not.toHaveBeenCalled();
+
+  await runOperation(manager.clearToken("wallabag"));
+  expect(alarms.clear).toHaveBeenCalledWith("token-refresh-check");
+
+  // Even with no stored tokens, loadTokens clears any leftover alarm.
+  alarms.clear.mockClear();
+  delete storage.api_tokens;
   await runOperation(new TokenManager().loadTokens);
   expect(alarms.create).not.toHaveBeenCalled();
+  expect(alarms.clear).toHaveBeenCalledWith("token-refresh-check");
+
+  // Non-persisting TokenManager (e.g. testConnection draft) never touches browser alarms.
+  alarms.clear.mockClear();
+  const ephemeral = new TokenManager({ persist: false });
+  await runOperation(ephemeral.storeToken("wallabag", baseToken));
+  await runOperation(ephemeral.clearToken("wallabag"));
+  expect(alarms.create).not.toHaveBeenCalled();
+  expect(alarms.clear).not.toHaveBeenCalled();
 });
 
 test("concurrent refresh callers share a single request and result", async () => {

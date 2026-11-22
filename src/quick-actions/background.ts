@@ -73,8 +73,7 @@ browser.action.onClicked.addListener((tab) => {
   }
 });
 
-browser.runtime.onMessageExternal.addListener(async (message: QuickActionStateMessage, sender) => {
-  if (sender.id !== POUCH_ID) return;
+async function handleExternalMessage(message: QuickActionStateMessage): Promise<void> {
   if (message?.type === "fatalStorage") {
     fatalError = message.error;
     pageStates.clear();
@@ -95,11 +94,31 @@ browser.runtime.onMessageExternal.addListener(async (message: QuickActionStateMe
   pageStates.set(message.tabId, { saved: message.saved });
   generation++;
   await render(message.tabId);
-});
+}
+
+browser.runtime.onMessageExternal.addListener(
+  (
+    message: QuickActionStateMessage,
+    sender: browser.runtime.MessageSender,
+    sendResponse: (response?: unknown) => void,
+  ): boolean | undefined => {
+    if (sender.id !== POUCH_ID) return undefined;
+    void handleExternalMessage(message).then(
+      () => sendResponse(undefined),
+      () => sendResponse(undefined),
+    );
+    return true;
+  },
+);
 browser.tabs.onRemoved.addListener((tabId) => {
   pageStates.delete(tabId);
   generation++;
 });
 
-// Pouch may have started first: ask it for the active tab's state.
-browser.runtime.sendMessage(POUCH_ID, { type: "refreshUi" }).catch(() => {});
+function requestRefreshUi(): void {
+  // Pouch may have started first: ask it for the active tab's state.
+  void browser.runtime.sendMessage(POUCH_ID, { type: "refreshUi" }).catch(() => {});
+}
+
+browser.runtime.onInstalled?.addListener(requestRefreshUi);
+browser.runtime.onStartup?.addListener(requestRefreshUi);

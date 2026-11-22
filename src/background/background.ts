@@ -519,35 +519,46 @@ const togglePageSave = (tab: Tab) =>
     );
   });
 if (IS_CHROMIUM) {
-  browser.runtime.onMessageExternal.addListener((message: QuickActionMessage, sender) => {
-    if (sender.id !== QUICK_ACTIONS_ID) return undefined;
-    // After shutdown the diagnostic is answered without the stopped runtime.
-    const diagnostic = getStorageDiagnostic();
-    if (message?.type === "getStorageDiagnostic")
-      return runOperation(readStorageDiagnostic).catch(
-        () => getStorageDiagnostic() ?? { error: "Storage initialization failed" },
-      );
-    if (diagnostic)
-      return browser.runtime
-        .sendMessage(QUICK_ACTIONS_ID, { type: "fatalStorage", error: diagnostic.error })
-        .then(
-          () => undefined,
-          () => undefined,
-        );
-    return run(
-      "Quick Actions",
-      Effect.gen(function* () {
-        if (message?.type === "togglePage") {
-          const tab = yield* browserCall("read tab", () => browser.tabs.get(message.tabId));
-          yield* togglePageSave(tab);
-        } else if (message?.type === "refreshUi") {
-          yield* refreshActiveTabUi;
-        }
-        return undefined;
-      }),
-      notifyToggleFailure,
-    );
-  });
+  browser.runtime.onMessageExternal.addListener(
+    (
+      message: QuickActionMessage,
+      sender: browser.runtime.MessageSender,
+      sendResponse: (response?: unknown) => void,
+    ): boolean | undefined => {
+      if (sender.id !== QUICK_ACTIONS_ID) return undefined;
+      // After shutdown the diagnostic is answered without the stopped runtime.
+      const diagnostic = getStorageDiagnostic();
+      if (message?.type === "getStorageDiagnostic") {
+        void runOperation(readStorageDiagnostic)
+          .catch(() => getStorageDiagnostic() ?? { error: "Storage initialization failed" })
+          .then((result) => sendResponse(result));
+        return true;
+      }
+      if (diagnostic) {
+        void browser.runtime
+          .sendMessage(QUICK_ACTIONS_ID, { type: "fatalStorage", error: diagnostic.error })
+          .then(
+            () => sendResponse(undefined),
+            () => sendResponse(undefined),
+          );
+        return true;
+      }
+      void run(
+        "Quick Actions",
+        Effect.gen(function* () {
+          if (message?.type === "togglePage") {
+            const tab = yield* browserCall("read tab", () => browser.tabs.get(message.tabId));
+            yield* togglePageSave(tab);
+          } else if (message?.type === "refreshUi") {
+            yield* refreshActiveTabUi;
+          }
+          return undefined;
+        }),
+        notifyToggleFailure,
+      ).then(() => sendResponse(undefined));
+      return true;
+    },
+  );
 } else {
   browser.pageAction.onClicked.addListener((tab) => {
     void run("Page action", togglePageSave(tab), notifyToggleFailure);
@@ -754,9 +765,9 @@ browser.alarms.onAlarm.addListener((alarm) =>
       yield* startup;
       yield* storageHealthy;
       if (alarm.name === TOKEN_CHECK_ALARM_NAME) {
-        // Refreshes the tokens of the backends in use since the background
-        // started. A Chromium service worker that this alarm woke has none: its
-        // adapter logs in or refreshes when the backend is next used.
+        // Clear any legacy repeating alarm from earlier versions; checkAndRefreshTokens
+        // stays safe (no password login, no token drop) if invoked before cleanup.
+        yield* tokenManager.clearLegacyAlarm;
         yield* tokenManager.checkAndRefreshTokens;
       } else if (alarm.name === "refresh") {
         const repository = yield* getArticlesRepository;

@@ -32,21 +32,28 @@ const deleteConfirmMs = 4000;
 let deleteArmTimer: ReturnType<typeof setTimeout> | undefined;
 async function initializePopup(): Promise<void> {
   try {
+    if (savePageButton) {
+      savePageButton.disabled = true;
+    }
+    savedArticleForCurrentPage = undefined;
     document.body.addEventListener("click", handleBodyClick);
     await initializeStorageDiagnostics((message) => showError(message));
     if (isStorageStopped()) return;
     logger.debug("Initializing popup...");
 
-    const tabs = await browser.tabs.query({
-      active: true,
-      currentWindow: true,
-    });
-    currentTab = tabs[0];
     if (!searchInput || !pageSelect) return;
     searchInput.addEventListener("input", handleSearch);
     pageSelect.addEventListener("change", handlePageSelect);
-    await loadRecentArticles();
-    await updateSavePageButtonState();
+    const tabAndButtonReady = browser.tabs
+      .query({
+        active: true,
+        currentWindow: true,
+      })
+      .then((tabs) => {
+        currentTab = tabs[0];
+        return updateSavePageButtonState();
+      });
+    await Promise.all([loadRecentArticles(), tabAndButtonReady]);
   } catch (error: unknown) {
     logger.error("Error initializing popup:", error);
     if (isStorageStopped()) return;
@@ -54,11 +61,11 @@ async function initializePopup(): Promise<void> {
     showError(`Could not load articles. ${errorMessage}`, true);
   }
 }
-async function loadRecentArticles(): Promise<void> {
-  if (isStorageStopped()) return;
+async function loadRecentArticles(): Promise<boolean> {
+  if (isStorageStopped()) return false;
   if (isLoadingArticles) {
     pendingReload = true;
-    return;
+    return true;
   }
   isLoadingArticles = true;
   const requestId = ++latestRequestId;
@@ -77,25 +84,31 @@ async function loadRecentArticles(): Promise<void> {
         perPage: itemsPerPage,
         search: searchTerm,
       },
-    })) as {
-      items?: Article[];
-      page?: number;
-      pages?: number;
-      total?: number;
-      error?: string;
-    };
+    })) as
+      | {
+          items?: Article[];
+          page?: number;
+          pages?: number;
+          total?: number;
+          error?: string;
+        }
+      | undefined;
 
     if (requestId !== latestRequestId) {
       logger.debug("Discarding stale articles response:", requestId);
-      return;
+      return true;
     }
 
     logger.debug("Received response from background:", response);
 
-    if (showStorageDiagnostic(response) || isStorageStopped()) return;
+    if (showStorageDiagnostic(response) || isStorageStopped()) return false;
+    if (!response) {
+      throw new Error("No response from background service.");
+    }
     if (response.error) {
       logger.error("Background script reported error:", response.error);
-      throw new Error(response.error);
+      showError(response.error, true);
+      return false;
     }
 
     const newTotalPages = response.pages ?? 0;
@@ -104,8 +117,7 @@ async function loadRecentArticles(): Promise<void> {
     if (newTotalPages > 0 && requestedPage > newTotalPages) {
       currentPage = newTotalPages;
       isLoadingArticles = false;
-      await loadRecentArticles();
-      return;
+      return await loadRecentArticles();
     }
 
     totalPages = newTotalPages || 1;
@@ -115,15 +127,15 @@ async function loadRecentArticles(): Promise<void> {
     if ((response.items?.length ?? 0) === 0 && responsePages >= 1 && currentPage > responsePages) {
       currentPage = responsePages;
       isLoadingArticles = false;
-      await loadRecentArticles();
-      return;
+      return await loadRecentArticles();
     }
     await displayArticles(response.items || []);
+    return true;
   } catch (error) {
     logger.error("Runtime error:", error);
-    if (isStorageStopped()) return;
+    if (isStorageStopped()) return false;
     showError("Could not connect to the background service.", false);
-    throw new Error("Could not connect to the background service.", { cause: error });
+    return false;
   } finally {
     isLoadingArticles = false;
     if (articleListContainer) {
@@ -321,11 +333,13 @@ async function handleDeleteArticle(button: HTMLButtonElement): Promise<void> {
     });
     logger.debug("Article deleted, reloading list");
     await updateSavePageButtonState();
-    await loadRecentArticles();
-    // The re-render dropped the focused row; keep keyboard users in the list.
-    const links = articlesContainer?.querySelectorAll<HTMLElement>(".article-content");
-    (links?.[Math.min(rowIndex, links.length - 1)] ?? searchInput)?.focus();
-    announce("Article deleted.");
+    const reloaded = await loadRecentArticles();
+    if (reloaded) {
+      // The re-render dropped the focused row; keep keyboard users in the list.
+      const links = articlesContainer?.querySelectorAll<HTMLElement>(".article-content");
+      (links?.[Math.min(rowIndex, links.length - 1)] ?? searchInput)?.focus();
+      announce("Article deleted.");
+    }
   } catch (error) {
     logger.error("Error deleting article:", error);
     const { text, needsSettings } = errorMessageFor(
@@ -511,6 +525,7 @@ async function handleSavePageClick(): Promise<void> {
   savePageButton.disabled = true;
   savePageButton.classList.add("is-busy");
   savePageButton.setAttribute("aria-busy", "true");
+  const wasSaved = Boolean(savedArticleForCurrentPage);
   try {
     if (savedArticleForCurrentPage) {
       const savedId = savedArticleForCurrentPage.id;
@@ -528,8 +543,8 @@ async function handleSavePageClick(): Promise<void> {
       });
       logger.debug("Article deleted, reloading list and button state");
       await updateSavePageButtonState();
-      await loadRecentArticles();
-      announce("Page removed.");
+      const reloaded = await loadRecentArticles();
+      if (reloaded) announce("Page removed.");
     } else {
       await sendBackgroundMessage({
         type: "saveArticle",
@@ -537,12 +552,12 @@ async function handleSavePageClick(): Promise<void> {
       });
       logger.debug("Article saved, reloading list and button state");
       await updateSavePageButtonState();
-      await loadRecentArticles();
-      announce("Page saved.");
+      const reloaded = await loadRecentArticles();
+      if (reloaded) announce("Page saved.");
     }
   } catch (error) {
     logger.error("Error saving/deleting article:", error);
-    const action = savedArticleForCurrentPage ? "delete" : "save";
+    const action = wasSaved ? "delete" : "save";
     const { text, needsSettings } = errorMessageFor(
       error,
       `Failed to ${action} article. Please try again.`,

@@ -472,3 +472,130 @@ test("concurrent togglePageSave calls on the same tab/URL coalesce into a single
   mockWindows = new Map();
   if (originalBrowser) Object.defineProperty(globalThis, "browser", originalBrowser);
 });
+
+test("Chromium onMessageExternal uses sendResponse + return true for QUICK_ACTIONS_ID and returns undefined for foreign senders", () => {
+  const script = `
+    import assert from "node:assert/strict";
+
+    let externalListener;
+    let savedBookmarks = [];
+    const sentExternal = [];
+    const syncStore = {
+      backend: "bookmarks",
+      logLevel: 3,
+      normalizeOnSave: false,
+      normalizeOnCompare: false,
+      apiConfig: {},
+    };
+    const localStore = {};
+    const event = { addListener: () => {} };
+
+    globalThis.chrome = {
+      runtime: {
+        getURL: (p) => p,
+        onMessage: event,
+        onInstalled: event,
+        onStartup: event,
+        onMessageExternal: {
+          addListener: (l) => {
+            externalListener = l;
+          },
+        },
+        sendMessage: async (target, msg) => {
+          sentExternal.push({ target, msg });
+        },
+      },
+      storage: {
+        sync: {
+          get: async (keys) => {
+            const names = typeof keys === "string" ? [keys] : keys;
+            const out = {};
+            for (const k of names) if (k in syncStore) out[k] = syncStore[k];
+            return out;
+          },
+          set: async (v) => Object.assign(syncStore, v),
+        },
+        local: {
+          get: async (keys) => {
+            if (keys === null) return { ...localStore };
+            const names = typeof keys === "string" ? [keys] : keys;
+            const out = {};
+            for (const k of names) if (k in localStore) out[k] = localStore[k];
+            return out;
+          },
+          set: async (v) => Object.assign(localStore, v),
+          remove: async (keys) => {
+            for (const k of typeof keys === "string" ? [keys] : keys) delete localStore[k];
+          },
+        },
+      },
+      bookmarks: {
+        getTree: async () => [{ id: "1", title: "Pouch", children: [] }],
+        getChildren: async () => savedBookmarks,
+        create: async (details) => {
+          const item = { id: "bm-1", title: details.title ?? "", url: details.url ?? "" };
+          savedBookmarks.push(item);
+          return item;
+        },
+        remove: async () => {},
+      },
+      alarms: { clear: async () => true, create: async () => {}, get: async () => undefined, onAlarm: event },
+      contextMenus: { create: (_d, cb) => cb?.(), update: async () => {}, onClicked: event, removeAll: async () => {} },
+      idle: { queryState: async () => "active" },
+      notifications: { create: async () => {}, onClicked: event },
+      permissions: { onRemoved: event, contains: async () => true },
+      windows: { WINDOW_ID_NONE: -1, get: async () => ({ id: 1, focused: true }), onFocusChanged: event },
+      commands: { onCommand: event },
+      tabs: {
+        query: async () => [{ id: 5, url: "https://example.com/ext", title: "Ext", active: true, windowId: 1 }],
+        get: async () => ({ id: 5, url: "https://example.com/ext", title: "Ext", active: true, windowId: 1 }),
+        onUpdated: event,
+        onActivated: event,
+      },
+    };
+
+    const { QUICK_ACTIONS_ID } = await import("./src/utils/chromium.ts");
+    await import("./src/background/background.ts");
+    assert.equal(typeof externalListener, "function");
+
+    let foreignCalled = false;
+    const foreignReturn = externalListener(
+      { type: "getStorageDiagnostic" },
+      { id: "untrusted-extension" },
+      () => {
+        foreignCalled = true;
+      },
+    );
+    assert.equal(foreignReturn, undefined);
+    assert.equal(foreignCalled, false);
+
+    const callTrusted = (msg) =>
+      new Promise((resolve) => {
+        const ret = externalListener(msg, { id: QUICK_ACTIONS_ID }, (resp) => resolve({ ret, resp }));
+        assert.equal(ret, true, "trusted onMessageExternal must return true, not a Promise");
+      });
+
+    const diag = await callTrusted({ type: "getStorageDiagnostic" });
+    assert.equal(diag.ret, true);
+    assert.equal(diag.resp, null);
+
+    const refresh = await callTrusted({ type: "refreshUi" });
+    assert.equal(refresh.ret, true);
+    assert.equal(refresh.resp, undefined);
+    assert.ok(sentExternal.some((e) => e.target === QUICK_ACTIONS_ID && e.msg?.type === "pageState"));
+
+    const toggle = await callTrusted({ type: "togglePage", tabId: 5 });
+    assert.equal(toggle.ret, true);
+    assert.equal(toggle.resp, undefined);
+    assert.equal(savedBookmarks.length, 1);
+  `;
+  const result = Bun.spawnSync([process.execPath, "-e", script], {
+    cwd: process.cwd(),
+    env: { ...process.env, POUCH_TARGET: "chromium" },
+    timeout: 10_000,
+  });
+  expect({
+    status: result.exitCode,
+    stderr: result.stderr.toString(),
+  }).toEqual({ status: 0, stderr: "" });
+});

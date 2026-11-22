@@ -563,9 +563,12 @@ export class ArticlesRepository {
     perPage: number = 30,
     search?: string,
   ) {
-    const articles = this.filterBySearch(yield* this.getAllArticles, search).sort((a, b) =>
-      b.created_at > a.created_at ? 1 : -1,
-    );
+    const filtered = this.filterBySearch(yield* this.getAllArticles, search);
+    const articles = [...filtered].sort((a, b) => {
+      if (b.created_at > a.created_at) return 1;
+      if (b.created_at < a.created_at) return -1;
+      return 0;
+    });
     const articlesNumber = articles.length;
     const pages = Math.ceil(articlesNumber / perPage);
     // Clamp page into [1, pages]; an empty result set has no pages, so report page 1
@@ -620,25 +623,43 @@ export class ArticlesRepository {
 }
 
 function merge(settings: Settings, existingArticles: Article[], newArticles: Article[]): Article[] {
-  const existingMap = new Map(existingArticles.map((article) => [article.id, article]));
   const compareKeyOf = (article: Article): string =>
     settings.normalizeOnCompare ? article.canonicalUrl || article.url : article.url;
-  const existingCanonicalMap = new Map(
-    existingArticles.map((article) => [compareKeyOf(article), article]),
-  );
+  const existingMap = new Map<string, Article>();
+  const existingCanonicalMap = new Map<string, Article>();
+
+  for (const article of existingArticles) {
+    const id = String(article.id);
+    const compareKey = compareKeyOf(article);
+    const existingByCanonical = existingCanonicalMap.get(compareKey);
+    if (existingByCanonical && String(existingByCanonical.id) !== id) {
+      existingMap.delete(String(existingByCanonical.id));
+    }
+    existingMap.set(id, article);
+    existingCanonicalMap.set(compareKey, article);
+  }
 
   for (const newArticle of newArticles) {
+    const newId = String(newArticle.id);
     const compareKey = compareKeyOf(newArticle);
-    const existingByCanonical = existingCanonicalMap.get(compareKey);
 
-    if (existingByCanonical && existingByCanonical.id !== newArticle.id) {
-      const existingById = existingMap.get(existingByCanonical.id);
-      if (existingById && existingById.id === existingByCanonical.id) {
-        continue;
+    const existingById = existingMap.get(newId);
+    if (existingById) {
+      const oldCompareKey = compareKeyOf(existingById);
+      if (
+        oldCompareKey !== compareKey &&
+        existingCanonicalMap.get(oldCompareKey) === existingById
+      ) {
+        existingCanonicalMap.delete(oldCompareKey);
       }
     }
 
-    existingMap.set(newArticle.id, newArticle);
+    const existingByCanonical = existingCanonicalMap.get(compareKey);
+    if (existingByCanonical && String(existingByCanonical.id) !== newId) {
+      existingMap.delete(String(existingByCanonical.id));
+    }
+
+    existingMap.set(newId, newArticle);
     existingCanonicalMap.set(compareKey, newArticle);
   }
 
