@@ -118,11 +118,23 @@ for (const [variant, body] of [
     expect(JSON.parse(String(init?.body))).toEqual({
       url: "https://example.com/1",
       title: "Link 1",
-      visibility: 1,
-      check_disabled: false,
     });
   });
 }
+
+test("save omits blank title and never sends visibility or check_disabled", async () => {
+  for (const title of ["", "   "]) {
+    const fetchMock = api(() => json({ data: link(1) }));
+    const adapter = await acquire();
+    await runOperation(adapter.saveArticle({ url: "https://example.com/1", title }));
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as Record<string, unknown>;
+    expect(body).toEqual({ url: "https://example.com/1" });
+    expect("title" in body).toBe(false);
+    expect("visibility" in body).toBe(false);
+    expect("check_disabled" in body).toBe(false);
+    mock.restore();
+  }
+});
 
 test("delete and connection test use their endpoints with the static token", async () => {
   // LinkAce answers a successful delete with an empty array.
@@ -133,8 +145,9 @@ test("delete and connection test use their endpoints with the static token", asy
   const [remove, probe] = fetchMock.mock.calls;
   expect(String(remove[0])).toBe(`${base}/7`);
   expect(remove[1]?.method).toBe("DELETE");
-  expect(new Headers(remove[1]?.headers).has("Content-Type")).toBe(false);
+  expect(new Headers(remove[1]?.headers).get("Content-Type")).toBe("application/json");
   expect(String(probe[0])).toBe(`${base}?per_page=1`);
+  expect(new Headers(probe[1]?.headers).has("Content-Type")).toBe(false);
   for (const [, init] of fetchMock.mock.calls)
     expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer TOKEN");
 });
@@ -192,7 +205,7 @@ test("the static token never enters TokenManager or refresh, and rejection is ne
 for (const [name, response] of [
   [
     "a validation rejection",
-    () => json({ message: "SECRET", errors: { url: ["SECRET is taken"] } }, 422),
+    () => json({ message: "SECRET", errors: { title: ["SECRET is invalid"] } }, 422),
   ],
   ["a success-status message envelope", () => json({ message: "SECRET" })],
 ] as const) {
@@ -336,14 +349,22 @@ test("a rate-limited save was not processed, so it retries and succeeds once", a
 });
 
 for (const [name, total, pageBody] of [
-  ["meta.last_page", 65, (ids: number[]) => ({ data: ids.map(link), meta: { last_page: 3 } })],
-  ["flat last_page", 65, (ids: number[]) => ({ data: ids.map(link), last_page: 3 })],
-  ["no metadata and a short last page", 65, (ids: number[]) => ({ data: ids.map(link) })],
+  [
+    "meta.last_page",
+    405,
+    (ids: number[], page: number) => ({ data: ids.map(link), meta: { current_page: page, last_page: 3 } }),
+  ],
+  [
+    "flat last_page",
+    405,
+    (ids: number[], page: number) => ({ data: ids.map(link), current_page: page, last_page: 3 }),
+  ],
+  ["no metadata and a short last page", 405, (ids: number[]) => ({ data: ids.map(link) })],
 ] as const) {
   test(`multi-page sync follows ${name} and preserves order and totals`, async () => {
     const fetchMock = api((url) => {
       const page = Number(url.searchParams.get("page"));
-      return json(pageBody(range((page - 1) * 30 + 1, Math.min(page * 30, total))));
+      return json(pageBody(range((page - 1) * 200 + 1, Math.min(page * 200, total)), page));
     });
     const result = await runOperation((await acquire()).sync({ mode: "overwrite" }));
     expect(result.articles.map((a) => a.id)).toEqual(range(1, total));
@@ -357,7 +378,9 @@ for (const [name, total, pageBody] of [
     expect(urls.map((url) => url.searchParams.get("page"))).toEqual(["1", "2", "3"]);
     for (const url of urls) {
       expect(url.pathname).toBe("/sub/api/v2/links");
-      expect(url.searchParams.get("per_page")).toBe("30");
+      expect(url.searchParams.get("per_page")).toBe("200");
+      expect(url.searchParams.get("order_by")).toBe("id");
+      expect(url.searchParams.get("order_dir")).toBe("asc");
       expect(url.searchParams.has("created_after")).toBe(false);
     }
   });
@@ -365,21 +388,21 @@ for (const [name, total, pageBody] of [
 
 test("without metadata a full last page needs one empty page to end the listing", async () => {
   const fetchMock = api((url) =>
-    json({ data: url.searchParams.get("page") === "1" ? range(1, 30).map(link) : [] }),
+    json({ data: url.searchParams.get("page") === "1" ? range(1, 200).map(link) : [] }),
   );
   const result = await runOperation((await acquire()).sync());
-  expect(result.articles).toHaveLength(30);
+  expect(result.articles).toHaveLength(200);
   expect(fetchMock).toHaveBeenCalledTimes(2);
 });
 
 test("a page total overrides a full page", async () => {
-  const fetchMock = api(() => json({ data: range(1, 30).map(link), meta: { last_page: 1 } }));
+  const fetchMock = api(() => json({ data: range(1, 200).map(link), meta: { last_page: 1 } }));
   await runOperation((await acquire()).sync());
   expect(fetchMock).toHaveBeenCalledTimes(1);
 });
 
 test("a server that ignores the page parameter fails as an incomplete snapshot instead of looping", async () => {
-  const fetchMock = api(() => json({ data: range(1, 30).map(link) }));
+  const fetchMock = api(() => json({ data: range(1, 200).map(link) }));
   const result = await failure(await run("sync"));
   expect(result).toMatchObject({
     code: "IncompleteSnapshotFailure",
@@ -388,24 +411,85 @@ test("a server that ignores the page parameter fails as an incomplete snapshot i
   expect(fetchMock).toHaveBeenCalledTimes(2);
 });
 
-test("update sync sends created_after verbatim; overwrite sync ignores the timestamp", async () => {
+for (const [name, secondPage] of [
+  ["meta.current_page", { data: [link(2)], meta: { current_page: 1, last_page: 2 } }],
+  ["flat current_page", { data: [link(2)], current_page: 1, last_page: 2 }],
+] as const) {
+  test(`mismatched ${name} fails as an incomplete snapshot`, async () => {
+    const fetchMock = api((url) =>
+      json(
+        url.searchParams.get("page") === "1"
+          ? { data: [link(1)], meta: { current_page: 1, last_page: 2 } }
+          : secondPage,
+      ),
+    );
+    const result = await failure(await run("sync"));
+    expect(result).toMatchObject({
+      code: "IncompleteSnapshotFailure",
+      details: { operation: "linkace.sync" },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+}
+
+test("sync deduplicates duplicate link IDs across and within pages", async () => {
+  const fetchMock = api((url) => {
+    const page = url.searchParams.get("page");
+    return json(
+      page === "1"
+        ? { data: [link(1), link(2), link(2)], meta: { current_page: 1, last_page: 2 } }
+        : { data: [link(2), link(3)], meta: { current_page: 2, last_page: 2 } },
+    );
+  });
+  const result = await runOperation((await acquire()).sync());
+  expect(result.articles.map((a) => a.id)).toEqual([1, 2, 3]);
+  expect(result.metadata).toMatchObject({ totalFetched: 3, totalProcessed: 3 });
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+});
+
+test("sync never sends created_after and always returns overwrite mode even when update is requested", async () => {
   const fetchMock = api(() => json({ data: [link(3)] }));
   const adapter = await acquire();
   const lastSyncTimestamp = "2023-11-14T22:13:20.999Z";
   const update = await runOperation(adapter.sync({ mode: "update", lastSyncTimestamp }));
   const full = await runOperation(adapter.sync({ mode: "overwrite", lastSyncTimestamp }));
-  expect(update.mode).toBe("update");
+  expect(update.mode).toBe("overwrite");
   expect(full.mode).toBe("overwrite");
-  const [incremental, overwrite] = fetchMock.mock.calls.map(urlOf);
-  expect(incremental.searchParams.get("created_after")).toBe(lastSyncTimestamp);
-  expect(overwrite.searchParams.has("created_after")).toBe(false);
+  for (const url of fetchMock.mock.calls.map(urlOf)) {
+    expect(url.searchParams.get("per_page")).toBe("200");
+    expect(url.searchParams.get("order_by")).toBe("id");
+    expect(url.searchParams.get("order_dir")).toBe("asc");
+    expect(url.searchParams.has("created_after")).toBe(false);
+  }
 });
+
+for (const [inputUrl, expectedBase] of [
+  ["https://links.example.com", "https://links.example.com"],
+  ["https://links.example.com/", "https://links.example.com"],
+  ["https://links.example.com/api/v2", "https://links.example.com"],
+  ["https://links.example.com/api/v2/", "https://links.example.com"],
+  ["  https://links.example.com/API/V2///  ", "https://links.example.com"],
+  ["https://links.example.com/linkace", "https://links.example.com/linkace"],
+  ["https://links.example.com/linkace/", "https://links.example.com/linkace"],
+  ["https://links.example.com/linkace/api/v2", "https://links.example.com/linkace"],
+  ["https://links.example.com/linkace/api/v2/", "https://links.example.com/linkace"],
+] as const) {
+  test(`normalizes base URL ${JSON.stringify(inputUrl)} -> ${expectedBase}`, async () => {
+    const fetchMock = api(() => json({ data: [] }));
+    const adapter = await acquire({
+      ...settings,
+      apiConfig: { url: inputUrl, token: "TOKEN" },
+    });
+    expect(await runOperation(adapter.testConnection)).toBe(true);
+    expect(String(fetchMock.mock.calls[0][0])).toBe(`${expectedBase}/api/v2/links?per_page=1`);
+  });
+}
 
 test("cancellation during the page wait stops pagination without another request", async () => {
   const seen = deferred<void>();
   const fetchMock = api(() => {
     seen.resolve();
-    return json({ data: range(1, 30).map(link), meta: { last_page: 2 } });
+    return json({ data: range(1, 200).map(link), meta: { last_page: 2 } });
   });
   const adapter = await acquire();
   const controller = new AbortController();
@@ -469,9 +553,10 @@ test("repository save, delete, overwrite and update sync commit LinkAce outcomes
   expect(ids()).toEqual([2, 3]);
   listed = [4];
   await runOperation(repo.syncWithAPI({ mode: "update" }));
-  expect(ids()).toEqual([2, 3, 4]);
-  await runOperation(repo.syncWithAPI({ mode: "overwrite" }));
   expect(ids()).toEqual([4]);
+  listed = [4, 5];
+  await runOperation(repo.syncWithAPI({ mode: "overwrite" }));
+  expect(ids()).toEqual([4, 5]);
   expect(typeof storage[keys.lastSyncTimestamp]).toBe("string");
 });
 
@@ -501,3 +586,141 @@ for (const operation of ["save", "delete"] as const) {
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method !== undefined)).toHaveLength(1);
   });
 }
+
+for (const [trashVariant, trashBody, restoreVariant, restoreResponse] of [
+  ["paginated trash", { data: [link(2), link(1)] }, "empty array", () => json([])],
+  ["bare-array trash", [link(2), link(1)], "message envelope", () => json({ message: "Restored" })],
+  ["paginated trash", { data: [link(1)] }, "204 no content", () => new Response(null, { status: 204 })],
+  [
+    "paginated trash",
+    { data: [link(1)] },
+    "restored link payload",
+    () => json({ data: { ...link(1), title: "Restored Link 1" } }),
+  ],
+] as const) {
+  test(`save restores a trashed link on 422 URL conflict (${trashVariant}, ${restoreVariant})`, async () => {
+    const fetchMock = api((url, init) => {
+      if (url.pathname === "/sub/api/v2/links" && init?.method === "POST") {
+        return json(
+          {
+            message: "The url has already been taken.",
+            errors: { url: ["The url has already been taken."] },
+          },
+          422,
+        );
+      }
+      if (url.pathname === "/sub/api/v2/trash/links") return json(trashBody);
+      if (url.pathname === "/sub/api/v2/trash/restore" && init?.method === "PATCH")
+        return restoreResponse();
+      throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url.pathname}`);
+    });
+    const saved = await runOperation(await run("save"));
+    expect(saved).toEqual({
+      id: 1,
+      title: restoreVariant === "restored link payload" ? "Restored Link 1" : "Link 1",
+      url: "https://example.com/1",
+      created_at: link(1).created_at,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const [, trashCall, restoreCall] = fetchMock.mock.calls;
+    expect(new Headers(trashCall[1]?.headers).has("Content-Type")).toBe(false);
+    expect(urlOf(restoreCall).pathname).toBe("/sub/api/v2/trash/restore");
+    expect(restoreCall[1]?.method).toBe("PATCH");
+    const restoreHeaders = new Headers(restoreCall[1]?.headers);
+    expect(restoreHeaders.get("Content-Type")).toBe("application/json");
+    expect(restoreHeaders.get("Accept")).toBe("application/json");
+    expect(restoreHeaders.get("Authorization")).toBe("Bearer TOKEN");
+    expect(JSON.parse(String(restoreCall[1]?.body))).toEqual({ model: "link", id: 1 });
+  });
+}
+
+test("save paginates through trash on 422 URL conflict to find and restore a trashed link", async () => {
+  const fetchMock = api((url, init) => {
+    if (url.pathname === "/sub/api/v2/links" && init?.method === "POST") {
+      return json({ message: "Duplicate", errors: { url: ["Duplicate"] } }, 422);
+    }
+    if (url.pathname === "/sub/api/v2/trash/links") {
+      const page = Number(url.searchParams.get("page"));
+      return json({
+        data: page === 1 ? [link(2), link(3)] : [link(1)],
+        last_page: 2,
+      });
+    }
+    if (url.pathname === "/sub/api/v2/trash/restore" && init?.method === "PATCH") return json([]);
+    throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url.pathname}`);
+  });
+  const saved = await runOperation(await run("save"));
+  expect(saved.id).toBe(1);
+  expect(fetchMock).toHaveBeenCalledTimes(4);
+  expect(fetchMock.mock.calls.slice(1, 3).map((call) => urlOf(call).searchParams.get("page"))).toEqual(
+    ["1", "2"],
+  );
+});
+
+for (const [scenario, trashResponse] of [
+  ["URL is not in trash", () => json({ data: [link(2)] })],
+  ["trash is empty", () => json({ data: [] })],
+  ["trash endpoint returns 404", () => json({ message: "SECRET not found" }, 404)],
+  ["trash endpoint returns 500", () => json({ message: "SECRET server error" }, 500)],
+] as const) {
+  test(`save fails cleanly with ProviderFailure when 422 URL conflict ${scenario}`, async () => {
+    const fetchMock = api((url, init) => {
+      if (url.pathname === "/sub/api/v2/links" && init?.method === "POST") {
+        return json({ message: "SECRET", errors: { url: ["SECRET is taken"] } }, 422);
+      }
+      if (url.pathname === "/sub/api/v2/trash/links") return trashResponse();
+      throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url.pathname}`);
+    });
+    const result = await failure(await run("save"));
+    expect(result.code).toBe("ProviderFailure");
+    expect(result.details).toEqual({ operation: "linkace.save" });
+    expect(JSON.stringify(result)).not.toContain("SECRET");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+}
+
+for (const kind of ["network", "server"] as const) {
+  test(`save marks unknown outcome when trash restore fails with ${kind} error`, async () => {
+    const fetchMock = api((url, init) => {
+      if (url.pathname === "/sub/api/v2/links" && init?.method === "POST") {
+        return json({ message: "Duplicate", errors: { url: ["Duplicate"] } }, 422);
+      }
+      if (url.pathname === "/sub/api/v2/trash/links") return json({ data: [link(1)] });
+      if (url.pathname === "/sub/api/v2/trash/restore" && init?.method === "PATCH") {
+        if (kind === "network") throw new TypeError("SECRET network");
+        return json({ message: "SECRET server error" }, 500);
+      }
+      throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url.pathname}`);
+    });
+    const result = await failure(await run("save"));
+    expect(result.code).toBe(kind === "network" ? "NetworkFailure" : "ProviderFailure");
+    expect(result.details).toMatchObject({
+      operation: "linkace.save",
+      remoteOperation: "save",
+      remoteOutcome: "unknown",
+    });
+    expect(result.error).toContain("Do not repeat it");
+    expect(JSON.stringify(result)).not.toContain("SECRET");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+}
+
+test("repository save commits restored trashed link and tracks mutation success", async () => {
+  setFilterListSources([{ name: "empty", url: "data:text/plain,! empty" }]);
+  await initializeUrlCanonizer();
+  const keys = getAccountStorageKeys(settings);
+  api((url, init) => {
+    if (url.pathname === "/sub/api/v2/links" && init?.method === "POST") {
+      return json({ message: "Duplicate", errors: { url: ["Duplicate"] } }, 422);
+    }
+    if (url.pathname === "/sub/api/v2/trash/links") return json({ data: [link(1)] });
+    if (url.pathname === "/sub/api/v2/trash/restore" && init?.method === "PATCH") return json([]);
+    return json({ data: [] });
+  });
+  const repo = new ArticlesRepository(new TokenManager({ persist: false }));
+  await repo.initialize(settings);
+  await runOperation(repo.syncWithAPI({ mode: "overwrite" }));
+  const saved = await runOperation(repo.saveArticle({ url: "https://example.com/1", title: "Link 1" }));
+  expect(saved.id).toBe(1);
+  expect((storage[keys.articles] as { id: number }[]).map((a) => a.id)).toEqual([1]);
+});

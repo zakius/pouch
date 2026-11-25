@@ -139,9 +139,94 @@ test("delete (204) and connection test use their endpoints with the static token
   const [remove, probe] = fetchMock.mock.calls;
   expect(String(remove[0])).toBe(`${base}/bm%2F7`);
   expect(remove[1]?.method).toBe("DELETE");
-  expect(String(probe[0])).toBe(`${base}?limit=1`);
+  expect(String(probe[0])).toBe(`${base}?limit=1&includeContent=false`);
   for (const [, init] of fetchMock.mock.calls)
     expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer TOKEN");
+});
+
+test("save omits empty or whitespace titles, truncates >1000-char titles, and falls back past empty response strings", async () => {
+  const fetchMock = api((_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { url: string; title?: string };
+    return json(
+      {
+        ...bookmark(1),
+        title: "   ",
+        content: {
+          type: "link",
+          url: "",
+          title: body.title ? "   " : "Crawled Title",
+        },
+      },
+      201,
+    );
+  });
+  const adapter = await acquire();
+
+  const bare = await runOperation(
+    adapter.saveArticle({ url: "https://example.com/bare", title: "" }),
+  );
+  const whitespace = await runOperation(
+    adapter.saveArticle({ url: "https://example.com/ws", title: "   \t\n  " }),
+  );
+  const longTitle = `  ${"a".repeat(1050)}  `;
+  const truncated = await runOperation(
+    adapter.saveArticle({ url: "https://example.com/long", title: longTitle }),
+  );
+
+  expect(bare).toMatchObject({
+    id: "bm1",
+    title: "Crawled Title",
+    url: "https://example.com/bare",
+  });
+  expect(whitespace).toMatchObject({
+    id: "bm1",
+    title: "Crawled Title",
+    url: "https://example.com/ws",
+  });
+  expect(truncated).toMatchObject({
+    id: "bm1",
+    title: "https://example.com/long",
+    url: "https://example.com/long",
+  });
+
+  const bodies = fetchMock.mock.calls.map(([, init]) => JSON.parse(String(init?.body)));
+  expect(bodies).toEqual([
+    { type: "link", url: "https://example.com/bare" },
+    { type: "link", url: "https://example.com/ws" },
+    { type: "link", url: "https://example.com/long", title: "a".repeat(1000) },
+  ]);
+  expect("title" in bodies[0]).toBe(false);
+  expect("title" in bodies[1]).toBe(false);
+});
+
+test("base URL normalization appends /api/v1 when absent and preserves existing /api/v1 paths", async () => {
+  const cases = [
+    ["https://keep.example.com", "https://keep.example.com/api/v1/bookmarks?limit=1&includeContent=false"],
+    ["https://keep.example.com/", "https://keep.example.com/api/v1/bookmarks?limit=1&includeContent=false"],
+    ["https://host.example/karakeep", "https://host.example/karakeep/api/v1/bookmarks?limit=1&includeContent=false"],
+    ["https://host.example/karakeep/", "https://host.example/karakeep/api/v1/bookmarks?limit=1&includeContent=false"],
+    ["https://keep.example.com/api/v1", "https://keep.example.com/api/v1/bookmarks?limit=1&includeContent=false"],
+    [
+      "https://keep.example.com/api/v1///?foo=bar#section",
+      "https://keep.example.com/api/v1/bookmarks?limit=1&includeContent=false",
+    ],
+    [
+      "https://host.example/karakeep/API/V1/?foo=bar#hash",
+      "https://host.example/karakeep/API/V1/bookmarks?limit=1&includeContent=false",
+    ],
+    ["http://localhost:3000/subpath?x=1#y", "http://localhost:3000/subpath/api/v1/bookmarks?limit=1&includeContent=false"],
+  ] as const;
+
+  for (const [configuredUrl, expectedUrl] of cases) {
+    const fetchMock = api(() => json(page([])));
+    const adapter = await acquire({
+      ...settings,
+      apiConfig: { url: configuredUrl, token: "TOKEN" },
+    });
+    expect(await runOperation(adapter.testConnection)).toBe(true);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(expectedUrl);
+    mock.restore();
+  }
 });
 
 test("missing, header-unsafe, or invalid settings fail acquisition before any request", async () => {
@@ -151,6 +236,9 @@ test("missing, header-unsafe, or invalid settings fail acquisition before any re
     { url: settings.apiConfig.url, token: "  " },
     { url: settings.apiConfig.url, token: "a\r\nX-Injected: 1" },
     { url: "not a url", token: "TOKEN" },
+    { url: "ftp://keep.example.com", token: "TOKEN" },
+    { url: "javascript:alert(1)", token: "TOKEN" },
+    { url: "file:///etc/passwd", token: "TOKEN" },
   ])
     expect((await failure(createKarakeepAdapter({ ...settings, apiConfig }))).code).toBe(
       "ConfigurationFailure",
@@ -336,8 +424,19 @@ for (const body of [
 
 test("rate-limited requests retry three times, then report the exhausted budget", async () => {
   const fetchMock = api(() => new Response("Too many requests", { status: 429 }));
-  const result = await failure(await run("sync"));
-  expect(result).toMatchObject({
+  const pending = await run("sync");
+  const flush = () => Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+  const error = await Effect.runPromise(
+    Effect.gen(function* () {
+      const fiber = yield* Effect.forkChild(Effect.flip(pending));
+      for (const delayMs of [1000, 2000, 4000]) {
+        yield* flush();
+        yield* TestClock.adjust(delayMs);
+      }
+      return yield* Fiber.join(fiber);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+  expect(errorResponse(error)).toMatchObject({
     code: "RateLimitFailure",
     details: { operation: "karakeep.sync" },
   });
@@ -353,7 +452,7 @@ test("a rate-limited save was not processed, so it retries and succeeds once", a
   expect(fetchMock).toHaveBeenCalledTimes(2);
 });
 
-test("sync follows nextCursor through every page and preserves order and totals", async () => {
+test("sync follows nextCursor through every page without inter-page sleep and preserves order and totals", async () => {
   const cursors = [null, "bm100_2026-01-01T00:00:00.000Z", "bm200_2026-01-02T00:00:00.000Z"];
   const fetchMock = api((url) => {
     const index = cursors.indexOf(url.searchParams.get("cursor"));
@@ -361,7 +460,11 @@ test("sync follows nextCursor through every page and preserves order and totals"
       page(range(index * 100 + 1, Math.min((index + 1) * 100, 230)), cursors[index + 1] ?? null),
     );
   });
-  const result = await runOperation((await acquire()).sync({ mode: "overwrite" }));
+  const adapter = await acquire();
+  // Providing TestClock without advancing it verifies pagination never sleeps between pages.
+  const result = await Effect.runPromise(
+    adapter.sync({ mode: "overwrite" }).pipe(Effect.provide(TestClock.layer())),
+  );
   expect(result.articles.map((a) => a.id)).toEqual(range(1, 230).map((id) => `bm${id}`));
   expect(result.mode).toBe("overwrite");
   expect(result.metadata).toMatchObject({ totalFetched: 230, totalProcessed: 230 });
@@ -370,7 +473,67 @@ test("sync follows nextCursor through every page and preserves order and totals"
   for (const url of urls) {
     expect(url.pathname).toBe("/api/v1/bookmarks");
     expect(url.searchParams.get("limit")).toBe("100");
+    expect(url.searchParams.get("includeContent")).toBe("false");
+    expect(url.searchParams.get("archived")).toBe("false");
   }
+});
+
+test("sync excludes archived bookmarks by default and includes them when includeArchived is true", async () => {
+  const fetchMock = api(() => json(page([1])));
+  const defaultAdapter = await acquire();
+  await runOperation(defaultAdapter.sync());
+  const includeAdapter = await acquire({
+    ...settings,
+    apiConfig: { ...settings.apiConfig, includeArchived: true },
+  });
+  await runOperation(includeAdapter.sync());
+
+  const [defaultUrl, includeUrl] = fetchMock.mock.calls.map(urlOf);
+  expect(defaultUrl.searchParams.get("archived")).toBe("false");
+  expect(includeUrl.searchParams.has("archived")).toBe(false);
+});
+
+test("save unarchives a 200 archived duplicate when includeArchived is false, and skips PATCH when includeArchived is true", async () => {
+  const archivedBookmark = { ...bookmark(1), archived: true };
+  const fetchMock = api((_url, init) => {
+    if (init?.method === "POST") return json(archivedBookmark, 200);
+    if (init?.method === "PATCH") return json({ id: "bm1", archived: false }, 200);
+    return json(page([]));
+  });
+
+  const defaultAdapter = await acquire();
+  const savedDefault = await runOperation(
+    defaultAdapter.saveArticle({ url: "https://example.com/1", title: "Bookmark 1" }),
+  );
+  expect(savedDefault.id).toBe("bm1");
+  expect(fetchMock.mock.calls).toHaveLength(2);
+  const [, patchCall] = fetchMock.mock.calls;
+  expect(String(patchCall[0])).toBe(`${base}/bm1`);
+  expect(patchCall[1]?.method).toBe("PATCH");
+  expect(JSON.parse(String(patchCall[1]?.body))).toEqual({ archived: false });
+
+  fetchMock.mockClear();
+  const includeAdapter = await acquire({
+    ...settings,
+    apiConfig: { ...settings.apiConfig, includeArchived: true },
+  });
+  const savedIncluded = await runOperation(
+    includeAdapter.saveArticle({ url: "https://example.com/1", title: "Bookmark 1" }),
+  );
+  expect(savedIncluded.id).toBe("bm1");
+  expect(fetchMock.mock.calls).toHaveLength(1);
+  expect(fetchMock.mock.calls[0]?.[1]?.method).toBe("POST");
+});
+
+test("sync deduplicates bookmark IDs appearing across pages", async () => {
+  api((url) =>
+    url.searchParams.get("cursor")
+      ? json(page([2, 3]))
+      : json(page([1, 2], "bm2_2026-01-03T00:00:00.000Z")),
+  );
+  const result = await runOperation((await acquire()).sync());
+  expect(result.articles.map((a) => a.id)).toEqual(["bm1", "bm2", "bm3"]);
+  expect(result.metadata).toMatchObject({ totalFetched: 3, totalProcessed: 3 });
 });
 
 test("sync maps text and asset source URLs, title fallbacks, and skips notes without a URL", async () => {
@@ -384,6 +547,18 @@ test("sync maps text and asset source URLs, title fallbacks, and skips notes wit
           id: "crawled",
           title: null,
           content: { type: "link", url: "https://b.example/", title: "Crawled" },
+        },
+        {
+          ...item,
+          id: "empty-title",
+          title: "",
+          content: { type: "link", url: "https://d.example/", title: "From Content" },
+        },
+        {
+          ...item,
+          id: "blank-titles",
+          title: "   ",
+          content: { type: "link", url: "https://e.example/", title: "  " },
         },
         { ...item, id: "note", content: { type: "text", text: "SECRET", sourceUrl: null } },
         {
@@ -404,6 +579,8 @@ test("sync maps text and asset source URLs, title fallbacks, and skips notes wit
   expect(result.articles.map(({ id, title, url }) => ({ id, title, url }))).toEqual([
     { id: "link", title: "https://a.example/", url: "https://a.example/" },
     { id: "crawled", title: "Crawled", url: "https://b.example/" },
+    { id: "empty-title", title: "From Content", url: "https://d.example/" },
+    { id: "blank-titles", title: "https://e.example/", url: "https://e.example/" },
     { id: "pdf", title: "Bookmark 1", url: "https://c.example/" },
   ]);
 });
@@ -417,8 +594,8 @@ test("update sync is still a complete overwrite listing without filters", async 
   expect(update.mode).toBe("overwrite");
   expect(full.mode).toBe("overwrite");
   const [incremental, overwrite] = fetchMock.mock.calls.map(urlOf);
-  expect(incremental.search).toBe("?limit=100");
-  expect(overwrite.search).toBe("?limit=100");
+  expect(incremental.search).toBe("?limit=100&includeContent=false&archived=false");
+  expect(overwrite.search).toBe("?limit=100&includeContent=false&archived=false");
 });
 
 test("a repeated cursor fails as an incomplete snapshot instead of looping", async () => {
@@ -448,20 +625,25 @@ test("a cursor cycle fails as an incomplete snapshot instead of paging forever",
   ]);
 });
 
-test("cancellation during the page wait stops pagination without another request", async () => {
-  const seen = deferred<void>();
-  const fetchMock = api(() => {
-    seen.resolve();
-    return json(page([1], "next_2026-01-01T00:00:00.000Z"));
+test("cancellation aborts an in-flight second page fetch and stops pagination", async () => {
+  const pageTwoStarted = deferred<void>();
+  let pageTwoSignal: AbortSignal | undefined;
+  const fetchMock = api((url, init) => {
+    if (!url.searchParams.get("cursor")) {
+      return json(page([1], "next_2026-01-01T00:00:00.000Z"));
+    }
+    pageTwoSignal = init?.signal ?? undefined;
+    pageTwoStarted.resolve();
+    return new Promise<Response>(() => {});
   });
   const adapter = await acquire();
   const controller = new AbortController();
   const result = failure(adapter.sync(), controller.signal);
-  await seen.promise;
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await pageTwoStarted.promise;
   controller.abort();
   expect((await result).code).toBe("OPERATION_INTERRUPTED");
-  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(pageTwoSignal?.aborted).toBe(true);
 });
 
 test("cancellation aborts an in-flight delete and reports an unknown outcome", async () => {

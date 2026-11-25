@@ -1,9 +1,14 @@
 import { runOperation } from "../src/background/api/effect-adapter";
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
-import { type TokenMetadata, TokenManager } from "../src/background/token-manager";
+import {
+  hashAccountIdentity,
+  type TokenMetadata,
+  TokenManager,
+} from "../src/background/token-manager";
 
 interface AlarmsMock {
   create: ReturnType<typeof mock>;
+  clear: ReturnType<typeof mock>;
   existing?: { name: string; periodInMinutes: number };
 }
 
@@ -11,6 +16,7 @@ function setupBrowser() {
   const storage: Record<string, unknown> = {};
   const alarms: AlarmsMock = {
     create: mock(() => ({})),
+    clear: mock(async () => true),
   };
   Object.assign(globalThis, {
     browser: {
@@ -25,6 +31,7 @@ function setupBrowser() {
       },
       alarms: {
         create: alarms.create,
+        clear: alarms.clear,
         get: async () => alarms.existing,
       },
     },
@@ -82,29 +89,53 @@ test("getAccessToken refreshes an expiring token with supplied configuration", a
   expect(String(init.body)).toContain("refresh_token=refresh-token");
 });
 
-test("the periodic alarm refreshes an expiring token without deleting credentials", async () => {
+test("checkAndRefreshTokens refreshes an expiring token without creating a repeating alarm", async () => {
   const { alarms, storage } = setupBrowser();
   const manager = new TokenManager({ refreshBufferMs: 0 });
   manager.setRefreshConfigProvider("wallabag", () => refreshConfig);
   await runOperation(manager.storeToken("wallabag", { ...baseToken, expiresAt: Date.now() + 60 * 1000 }));
 
   const fetchMock = spyOn(globalThis, "fetch").mockResolvedValue(tokenResponse());
-  // The alarm waits for the refresh, so an MV3 worker stays alive until it is stored.
   await runOperation(manager.checkAndRefreshTokens);
 
   expect(fetchMock).toHaveBeenCalledTimes(1);
   const metadata = manager.getTokenMetadata("wallabag");
   expect(metadata?.accessToken).toBe("new-access");
   expect(Array.from(storage.api_tokens as [string, TokenMetadata][])).toHaveLength(1);
-  expect(alarms.create).toHaveBeenCalledWith("token-refresh-check", { periodInMinutes: 5 });
+  expect(alarms.create).not.toHaveBeenCalled();
 });
 
-test("loading tokens keeps a running refresh alarm, as when Chromium's worker wakes", async () => {
+test("storeToken does not schedule token-refresh-check, and loadTokens and clearToken clear leftover alarms", async () => {
   const { alarms, storage } = setupBrowser();
   storage.api_tokens = [["wallabag", { ...baseToken, serviceName: "wallabag" }]];
   alarms.existing = { name: "token-refresh-check", periodInMinutes: 5 };
+
+  const manager = new TokenManager();
+  await runOperation(manager.loadTokens);
+  expect(alarms.create).not.toHaveBeenCalled();
+  expect(alarms.clear).toHaveBeenCalledWith("token-refresh-check");
+
+  alarms.clear.mockClear();
+  await runOperation(manager.storeToken("wallabag", baseToken));
+  expect(alarms.create).not.toHaveBeenCalled();
+
+  await runOperation(manager.clearToken("wallabag"));
+  expect(alarms.clear).toHaveBeenCalledWith("token-refresh-check");
+
+  // Even with no stored tokens, loadTokens clears any leftover alarm.
+  alarms.clear.mockClear();
+  delete storage.api_tokens;
   await runOperation(new TokenManager().loadTokens);
   expect(alarms.create).not.toHaveBeenCalled();
+  expect(alarms.clear).toHaveBeenCalledWith("token-refresh-check");
+
+  // Non-persisting TokenManager (e.g. testConnection draft) never touches browser alarms.
+  alarms.clear.mockClear();
+  const ephemeral = new TokenManager({ persist: false });
+  await runOperation(ephemeral.storeToken("wallabag", baseToken));
+  await runOperation(ephemeral.clearToken("wallabag"));
+  expect(alarms.create).not.toHaveBeenCalled();
+  expect(alarms.clear).not.toHaveBeenCalled();
 });
 
 test("concurrent refresh callers share a single request and result", async () => {
@@ -252,4 +283,126 @@ test("refresh without configuration fails without deleting the token", async () 
   expect(result.success).toBe(false);
   expect(result.requiresReauth).toBe(false);
   expect(manager.getTokenMetadata("wallabag")?.accessToken).toBe("old-access");
+});
+
+test("cold-start TokenManager evicts persisted Account A token when binding Account B and hashes identity", async () => {
+  const { storage } = setupBrowser();
+  const identityA = JSON.stringify({
+    url: "https://a.example",
+    username: "alice",
+    password: "SECRET_PASSWORD_A",
+  });
+  const identityB = JSON.stringify({
+    url: "https://b.example",
+    username: "bob",
+    password: "SECRET_PASSWORD_B",
+  });
+
+  const first = new TokenManager({ refreshBufferMs: 0 });
+  await runOperation(first.bindAccount("wallabag", identityA));
+  await runOperation(
+    first.storeToken("wallabag", { ...baseToken, accessToken: "token-a", expiresAt: Date.now() + 3600_000 }),
+  );
+
+  // Persisted token contains SHA-256 hash, never raw credentials.
+  const storedJson = JSON.stringify(storage.api_tokens);
+  expect(storedJson).toContain(await hashAccountIdentity(identityA));
+  expect(storedJson).not.toContain("SECRET_PASSWORD_A");
+  expect(storedJson).not.toContain("alice");
+
+  // Same account survives cold start.
+  const sameAccount = new TokenManager({ refreshBufferMs: 0 });
+  await runOperation(sameAccount.loadTokens);
+  await runOperation(sameAccount.bindAccount("wallabag", identityA));
+  expect(sameAccount.getTokenMetadata("wallabag")?.accessToken).toBe("token-a");
+
+  // Different account on cold start evicts Account A's token from memory and storage.local.
+  const differentAccount = new TokenManager({ refreshBufferMs: 0 });
+  await runOperation(differentAccount.loadTokens);
+  expect(differentAccount.getTokenMetadata("wallabag")?.accessToken).toBe("token-a");
+  await runOperation(differentAccount.bindAccount("wallabag", identityB));
+  expect(differentAccount.getTokenMetadata("wallabag")).toBeNull();
+  expect(storage.api_tokens).toEqual([]);
+});
+
+test("loadTokens handles corrupt or non-iterable api_tokens without throwing", async () => {
+  const { storage } = setupBrowser();
+  for (const corrupt of [42, "not-an-array", { wallabag: baseToken }, true]) {
+    storage.api_tokens = corrupt;
+    const manager = new TokenManager();
+    await runOperation(manager.loadTokens);
+    expect(manager.getTokenMetadata("wallabag")).toBeNull();
+  }
+
+  // Partially corrupt array skips malformed entries and keeps valid ones.
+  const validEntry: [string, TokenMetadata] = [
+    "wallabag",
+    { ...baseToken, serviceName: "wallabag", accessToken: "valid-token" },
+  ];
+  storage.api_tokens = [
+    "not-a-tuple",
+    ["", { ...baseToken, serviceName: "empty-key" }],
+    ["missing-access", { ...baseToken, serviceName: "missing-access", accessToken: "" }],
+    ["nan-expiry", { ...baseToken, serviceName: "nan-expiry", expiresAt: Number.NaN }],
+    ["negative-count", { ...baseToken, serviceName: "negative-count", refreshCount: -1 }],
+    validEntry,
+  ];
+  const manager = new TokenManager();
+  await runOperation(manager.loadTokens);
+  expect(manager.getTokenMetadata("wallabag")?.accessToken).toBe("valid-token");
+  expect(manager.getTokenMetadata("missing-access")).toBeNull();
+  expect(manager.getTokenMetadata("nan-expiry")).toBeNull();
+  expect(manager.getTokenMetadata("negative-count")).toBeNull();
+});
+
+test("transient refresh failure does not perform unnecessary storage.local.set writes", async () => {
+  setupBrowser();
+  const setSpy = spyOn(browser.storage.local, "set");
+  const manager = new TokenManager({ refreshCooldownMs: 0 });
+  manager.setRefreshConfigProvider("wallabag", () => refreshConfig);
+  await runOperation(manager.storeToken("wallabag", baseToken));
+  setSpy.mockClear();
+
+  spyOn(globalThis, "fetch").mockRejectedValueOnce(new TypeError("Offline"));
+  const networkResult = await runOperation(manager.refreshToken("wallabag"));
+  expect(networkResult.success).toBe(false);
+  expect(networkResult.requiresReauth).toBe(false);
+  expect(setSpy).not.toHaveBeenCalled();
+  expect(manager.getTokenMetadata("wallabag")?.refreshCount).toBe(1);
+
+  spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response("busy", { status: 503 }));
+  const serverResult = await runOperation(manager.refreshToken("wallabag"));
+  expect(serverResult.success).toBe(false);
+  expect(serverResult.requiresReauth).toBe(false);
+  expect(setSpy).not.toHaveBeenCalled();
+  expect(manager.getTokenMetadata("wallabag")?.refreshCount).toBe(2);
+});
+
+test("refreshless token is preserved before expiry and discarded with requiresReauth once expired without cooldown lag", async () => {
+  const { storage } = setupBrowser();
+  const manager = new TokenManager({ refreshCooldownMs: 60_000 });
+  await runOperation(
+    manager.storeToken("wallabag", {
+      ...baseToken,
+      refreshToken: "",
+      expiresAt: Date.now() + 5_000,
+    }),
+  );
+
+  // Unexpired refreshless token is preserved and does not cache the failure across expiry.
+  const beforeExpiry = await runOperation(manager.refreshToken("wallabag"));
+  expect(beforeExpiry.success).toBe(false);
+  expect(beforeExpiry.requiresReauth).toBe(false);
+  expect(beforeExpiry.error).toBe("No refresh token available");
+  expect(manager.getTokenMetadata("wallabag")?.accessToken).toBe("old-access");
+
+  // Once expired, refreshToken immediately discards the token from memory and storage and signals reauth.
+  const metadata = manager.getTokenMetadata("wallabag")!;
+  metadata.expiresAt = Date.now() - 1;
+  const afterExpiry = await runOperation(manager.refreshToken("wallabag"));
+  expect(afterExpiry.success).toBe(false);
+  expect(afterExpiry.requiresReauth).toBe(true);
+  expect(afterExpiry.failure?._tag).toBe("CredentialsFailure");
+  expect(manager.getTokenMetadata("wallabag")).toBeNull();
+  expect(storage.api_tokens).toEqual([]);
 });

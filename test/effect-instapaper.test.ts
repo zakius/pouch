@@ -1,12 +1,12 @@
-import { createHmac } from "node:crypto";
 import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
-import { Effect } from "effect";
+import { Effect, Fiber } from "effect";
+import { TestClock } from "effect/testing";
 import { createInstapaperAdapter } from "../src/background/api/adapters/instapaper-adapter";
 import { runOperation } from "../src/background/api/effect-adapter";
 import { errorResponse } from "../src/background/runtime-message";
 import { TokenManager } from "../src/background/token-manager";
 import { ArticlesRepository, getAccountStorageKeys } from "../src/background/articles-repository";
-import { DEFAULT_SETTINGS } from "../src/utils/settings";
+import { DEFAULT_SETTINGS, getSettings } from "../src/utils/settings";
 import { initializeUrlCanonizer } from "../src/utils/url-helpers";
 import { resetFilterListSources, setFilterListSources } from "../src/utils/filter-list-manager";
 import type { InstapaperSettings } from "../src/utils/settings-schemas";
@@ -15,33 +15,49 @@ const settings: InstapaperSettings = {
   ...DEFAULT_SETTINGS,
   backend: "instapaper",
   apiConfig: {
-    consumerKey: "key",
-    consumerSecret: "secret",
-    username: "user",
-    password: "PASSWORD",
+    token: "v2-bearer-token",
   },
 };
-const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
-const bookmark = (id: number) => ({
-  type: "bookmark",
-  bookmark_id: id,
+
+const json = (body: unknown, status = 200, headers?: Record<string, string>) =>
+  new Response(JSON.stringify(body), { status, headers });
+
+const bookmark = (
+  id: number,
+  overrides: Partial<{
+    url: string | null;
+    title: string | null;
+    time: number | null;
+    archived: boolean;
+  }> = {},
+) => ({
+  id,
   url: `https://example.com/${id}`,
   title: `Article ${id}`,
-  time: 1700000000,
+  time: 1700000000 + id,
+  archived: false,
+  ...overrides,
 });
-const syncResponse = (bookmarks: number[], deleteIds?: number[]) => ({
-  user: { type: "user", user_id: 1, username: "test" },
-  bookmarks: bookmarks.map(bookmark),
-  ...(deleteIds ? { delete_ids: deleteIds } : {}),
+
+const listResponse = (
+  bookmarks: ReturnType<typeof bookmark>[],
+  total = bookmarks.length,
+  deletedIds?: number[],
+) => ({
+  bookmarks,
+  total,
+  ...(deletedIds !== undefined ? { deleted_ids: deletedIds } : {}),
 });
-const full = Array.from({ length: 500 }, (_, i) => i + 1);
-const tokenBody = "oauth_token=token&oauth_token_secret=token-secret";
-const isAuth = (url: unknown) => String(url).endsWith("/oauth/access_token");
-const bodyOf = (init?: RequestInit) => new URLSearchParams(String(init?.body));
+
+const v2Error = (code: number, message = "SECRET provider message") => ({
+  error: { code, message },
+});
 
 const originalBrowser = Object.getOwnPropertyDescriptor(globalThis, "browser");
 let storage: Record<string, unknown>;
+let syncStore: Record<string, unknown>;
 let rejectReads: boolean;
+
 function deferred<A>() {
   let resolve!: (value: A) => void;
   const promise = new Promise<A>((done) => {
@@ -49,13 +65,23 @@ function deferred<A>() {
   });
   return { promise, resolve };
 }
+
 beforeEach(() => {
   storage = {};
+  syncStore = {};
   rejectReads = false;
   Object.assign(globalThis, {
     browser: {
       permissions: { contains: async () => true },
       storage: {
+        sync: {
+          get: async (keys: string | string[]) =>
+            Object.fromEntries(
+              (Array.isArray(keys) ? keys : [keys])
+                .filter((key) => key in syncStore)
+                .map((key) => [key, syncStore[key]]),
+            ),
+        },
         local: {
           get: async (keys: string | string[]) => {
             if (rejectReads) throw new Error("SECRET private://payload");
@@ -73,6 +99,7 @@ beforeEach(() => {
     },
   });
 });
+
 afterEach(() => {
   mock.restore();
   resetFilterListSources();
@@ -80,17 +107,20 @@ afterEach(() => {
   else Reflect.deleteProperty(globalThis, "browser");
 });
 
-/** xAuth succeeds; API requests go to `handler` with their 1-based API call number. */
 const api = (
-  handler: (call: number, body: URLSearchParams, url: string) => Response | Promise<Response>,
+  handler: (call: number, url: URL, init?: RequestInit) => Response | Promise<Response>,
 ) => {
   let calls = 0;
-  return spyOn(globalThis, "fetch").mockImplementation(async (url, init) =>
-    isAuth(url) ? new Response(tokenBody) : handler(++calls, bodyOf(init), String(url)),
+  return spyOn(globalThis, "fetch").mockImplementation(async (input, init) =>
+    handler(++calls, new URL(String(input)), init),
   );
 };
-const acquire = (tokens = new TokenManager({ persist: false })) =>
-  runOperation(createInstapaperAdapter(settings, tokens));
+
+const acquire = (
+  overrideSettings: InstapaperSettings = settings,
+  tokens = new TokenManager({ persist: false }),
+) => runOperation(createInstapaperAdapter(overrideSettings, tokens));
+
 const failure = async (operation: Effect.Effect<unknown, unknown>, signal?: AbortSignal) => {
   try {
     await runOperation(operation, signal);
@@ -99,174 +129,421 @@ const failure = async (operation: Effect.Effect<unknown, unknown>, signal?: Abor
     return errorResponse(error);
   }
 };
-const apiCalls = (fetchMock: ReturnType<typeof api>) =>
-  fetchMock.mock.calls.filter(([url]) => !isAuth(url));
 
-/** Recomputes the OAuth signature from pre-encoded `key=value` request params. */
-const expectValidSignature = (
-  [url, init]: [unknown, RequestInit?],
-  requestParams: string[],
-  token?: { key: string; secret: string },
-) => {
-  const auth = new Headers(init?.headers).get("Authorization")!;
-  expect(auth).toStartWith("OAuth ");
-  const header = Object.fromEntries(
-    [...auth.matchAll(/(\w+)="([^"]*)"/g)].map(([, k, v]) => [k, decodeURIComponent(v)]),
-  );
-  expect(header.oauth_token).toBe(token?.key);
-  const params = [
-    ...requestParams,
-    "oauth_consumer_key=key",
-    `oauth_nonce=${header.oauth_nonce}`,
-    "oauth_signature_method=HMAC-SHA1",
-    `oauth_timestamp=${header.oauth_timestamp}`,
-    ...(token ? [`oauth_token=${token.key}`] : []),
-    "oauth_version=1.0",
-  ]
-    .sort()
-    .join("&");
-  const base = `POST&${encodeURIComponent(String(url))}&${encodeURIComponent(params)}`;
-  const expected = createHmac("sha1", `secret&${token?.secret ?? ""}`)
-    .update(base)
-    .digest("base64");
-  expect(header.oauth_signature).toBe(expected);
-  expect(init?.method).toBe("POST");
-  expect(new Headers(init?.headers).get("Content-Type")).toBe("application/x-www-form-urlencoded");
-};
-const userToken = { key: "token", secret: "token-secret" };
-
-test("xAuth access_token request is a signed POST without an access token", async () => {
-  const fetchMock = api(() => json(syncResponse([])));
+test("acquires with Bearer token without calling xAuth or storing in TokenManager", async () => {
+  const fetchMock = api(() => json(listResponse([bookmark(1)])));
   const tokens = new TokenManager({ persist: false });
-  await acquire(tokens);
-  const auth = fetchMock.mock.calls[0];
-  expect(String(auth[0])).toBe("https://www.instapaper.com/api/1/oauth/access_token");
-  expect(Object.fromEntries(bodyOf(auth[1]))).toEqual({
-    x_auth_username: "user",
-    x_auth_password: "PASSWORD",
-    x_auth_mode: "client_auth",
-  });
-  expectValidSignature(auth, [
-    "x_auth_mode=client_auth",
-    "x_auth_password=PASSWORD",
-    "x_auth_username=user",
-  ]);
-  expect(tokens.getTokenMetadata("instapaper")).toMatchObject({
-    accessToken: "token",
-    tokenType: "OAuth",
-  });
-  expect(JSON.stringify(tokens.getTokenMetadata("instapaper"))).not.toContain("token-secret");
-});
-
-test("saveArticle signs RFC 3986-encoded params so URLs with ( ) verify", async () => {
-  const fetchMock = api(() => json([bookmark(1)]));
-  const adapter = await acquire();
-  const saved = await runOperation(
-    adapter.saveArticle({ url: "https://en.wikipedia.org/wiki/Foo_(bar)", title: "t!" }),
+  const adapter = await acquire(
+    { ...settings, apiConfig: { token: "  trimmed-v2-token  " } },
+    tokens,
   );
-  expect(saved.id).toBe(1);
-  expectValidSignature(
-    apiCalls(fetchMock)[0],
-    ["title=t%21", "url=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FFoo_%28bar%29"],
-    userToken,
-  );
-});
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(tokens.getTokenMetadata("instapaper")).toBeNull();
+  expect(storage.api_tokens).toBeUndefined();
 
-test("delete and connection test are signed POSTs", async () => {
-  const fetchMock = api((call) => (call === 1 ? json([]) : json(syncResponse([1]))));
-  const adapter = await acquire();
-  await runOperation(adapter.deleteArticle(7));
   expect(await runOperation(adapter.testConnection)).toBe(true);
-  const [remove, list] = apiCalls(fetchMock);
-  expect(String(remove[0])).toEndWith("/api/1/bookmarks/delete");
-  expectValidSignature(remove, ["bookmark_id=7"], userToken);
-  expectValidSignature(list, ["limit=1"], userToken);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  const [url, init] = fetchMock.mock.calls[0];
+  expect(String(url)).toBe("https://www.instapaper.com/api/2/bookmarks?limit=1");
+  expect(init?.method).toBeUndefined();
+  const headers = new Headers(init?.headers);
+  expect(headers.get("Authorization")).toBe("Bearer trimmed-v2-token");
+  expect(headers.get("Accept")).toBe("application/json");
 });
 
-test("sync returns an empty snapshot for an empty account", async () => {
-  api(() => json(syncResponse([])));
-  const result = await runOperation((await acquire()).sync({ mode: "overwrite" }));
-  expect(result.articles).toEqual([]);
-  expect(result.mode).toBe("overwrite");
-  expect(result.metadata?.totalFetched).toBe(0);
+test("rejects missing, whitespace, or non-ASCII tokens with ConfigurationFailure before any request", async () => {
+  const fetchMock = spyOn(globalThis, "fetch");
+  const tokens = new TokenManager({ persist: false });
+  for (const apiConfig of [
+    {},
+    { token: "" },
+    { token: "   " },
+    { token: "bad token" },
+    { token: "bad\ntoken" },
+    { token: "bad\rtoken" },
+    { token: "tökén" },
+  ]) {
+    const result = await failure(createInstapaperAdapter({ ...settings, apiConfig }, tokens));
+    expect(result).toMatchObject({
+      code: "ConfigurationFailure",
+      details: { operation: "instapaper.acquire" },
+    });
+  }
+  expect(fetchMock).not.toHaveBeenCalled();
 });
 
-test("sync stops after a short page", async () => {
-  const fetchMock = api(() => json(syncResponse([1, 2, 3])));
-  const result = await runOperation((await acquire()).sync());
-  expect(result.articles.map((a) => a.id)).toEqual([1, 2, 3]);
-  expect(result.mode).toBe("overwrite");
-  expect(apiCalls(fetchMock)).toHaveLength(1);
+test("legacy v1 settings seamlessly reuse stored oauth_token from TokenManager as v2 Bearer token", async () => {
+  const legacySettings: InstapaperSettings = {
+    ...DEFAULT_SETTINGS,
+    backend: "instapaper",
+    apiConfig: {
+      consumerKey: "legacy-ck",
+      consumerSecret: "legacy-cs",
+      username: "legacy-user",
+      password: "legacy-password",
+    },
+  };
+  Object.assign(syncStore, legacySettings);
+  expect(await getSettings()).toEqual(legacySettings);
+
+  const tokens = new TokenManager({ persist: false });
+  await runOperation(
+    tokens.storeToken("instapaper", {
+      accessToken: "legacy-oauth-token-123",
+      refreshToken: "",
+      tokenType: "OAuth",
+      expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000,
+      issuedAt: Date.now(),
+      refreshCount: 0,
+    }),
+  );
+
+  const fetchMock = api(() => json(listResponse([bookmark(1)])));
+  const adapter = await acquire(legacySettings, tokens);
+  expect(await runOperation(adapter.testConnection)).toBe(true);
+  expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get("Authorization")).toBe(
+    "Bearer legacy-oauth-token-123",
+  );
+
+  // Explicit v2 token takes precedence over any legacy token still in TokenManager.
+  const v2Adapter = await acquire(settings, tokens);
+  expect(await runOperation(v2Adapter.testConnection)).toBe(true);
+  expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get("Authorization")).toBe(
+    "Bearer v2-bearer-token",
+  );
 });
 
-test("sync requests the next page after an exactly-500 page", async () => {
-  const fetchMock = api((call) => json(syncResponse(call === 1 ? full : [])));
-  const result = await runOperation((await acquire()).sync({ mode: "overwrite" }));
-  expect(result.articles).toHaveLength(500);
-  expect(apiCalls(fetchMock)).toHaveLength(2);
-});
+test("legacy v1 settings fail with ConfigurationFailure if TokenManager has no valid oauth_token", async () => {
+  const fetchMock = spyOn(globalThis, "fetch");
+  const legacySettings: InstapaperSettings = {
+    ...DEFAULT_SETTINGS,
+    backend: "instapaper",
+    apiConfig: {
+      consumerKey: "legacy-ck",
+      consumerSecret: "legacy-cs",
+      username: "legacy-user",
+      password: "legacy-password",
+    },
+  };
 
-test("sync dedupes bookmarks repeated across pages", async () => {
-  const fetchMock = api((call) => json(syncResponse(call === 1 ? full : [500, 501])));
-  const result = await runOperation((await acquire()).sync({ mode: "overwrite" }));
-  expect(result.articles.map((a) => a.id)).toEqual([...full, 501]);
-  expect(apiCalls(fetchMock)).toHaveLength(2);
-});
-
-test("sync ignores delete_ids it cannot apply and still returns the snapshot", async () => {
-  api(() => json(syncResponse([1, 2], [1])));
-  const result = await runOperation((await acquire()).sync({ mode: "update" }));
-  expect(result.articles.map((a) => a.id)).toEqual([1, 2]);
-  expect(result.mode).toBe("update");
-});
-
-test("sync pages past 500 bookmarks by sending seen ids as a signed have param", async () => {
-  const all = Array.from({ length: 1234 }, (_, i) => i + 1);
-  const fetchMock = api((_call, body) => {
-    const have = new Set(body.get("have")?.split(","));
-    return json(syncResponse(all.filter((id) => !have.has(String(id))).slice(0, 500)));
+  // Empty TokenManager
+  const emptyTokens = new TokenManager({ persist: false });
+  expect(await failure(createInstapaperAdapter(legacySettings, emptyTokens))).toMatchObject({
+    code: "ConfigurationFailure",
+    details: { operation: "instapaper.acquire" },
   });
-  const result = await runOperation((await acquire()).sync({ mode: "overwrite" }));
-  expect(result.articles.map((a) => a.id)).toEqual(all);
-  const [first, second] = apiCalls(fetchMock);
-  expect(apiCalls(fetchMock)).toHaveLength(3);
-  expect(bodyOf(first[1]).has("have")).toBe(false);
-  expect(bodyOf(second[1]).get("have")).toBe(all.slice(0, 500).join(","));
-  expectValidSignature(second, [`have=${all.slice(0, 500).join("%2C")}`, "limit=500"], userToken);
+
+  // Invalid non-ASCII stored legacy token
+  const badTokens = new TokenManager({ persist: false });
+  await runOperation(
+    badTokens.storeToken("instapaper", {
+      accessToken: "invalid\ntoken",
+      refreshToken: "",
+      tokenType: "OAuth",
+      expiresAt: Date.now() + 60_000,
+      issuedAt: Date.now(),
+      refreshCount: 0,
+    }),
+  );
+  expect(await failure(createInstapaperAdapter(legacySettings, badTokens))).toMatchObject({
+    code: "ConfigurationFailure",
+    details: { operation: "instapaper.acquire" },
+  });
+  expect(fetchMock).not.toHaveBeenCalled();
 });
 
-test("a full page with no new IDs fails as an incomplete snapshot", async () => {
-  const fetchMock = api(() => json(syncResponse(full)));
-  const result = await failure((await acquire()).sync({ mode: "overwrite" }));
-  expect(result).toMatchObject({
+test("saveArticle sends JSON POST /api/2/bookmarks with canonicalize, omits blank titles, and applies nullable fallbacks", async () => {
+  const fetchMock = api((call) => {
+    if (call === 1) {
+      return json(
+        bookmark(10, {
+          url: "https://en.wikipedia.org/wiki/Foo_(bar)",
+          title: "Foo Title",
+        }),
+      );
+    }
+    return json(bookmark(11, { url: null, title: null, time: null }));
+  });
+  const adapter = await acquire();
+
+  const first = await runOperation(
+    adapter.saveArticle({
+      url: "https://en.wikipedia.org/wiki/Foo_(bar)",
+      title: "Foo Title",
+    }),
+  );
+  expect(first).toMatchObject({
+    id: 10,
+    url: "https://en.wikipedia.org/wiki/Foo_(bar)",
+    title: "Foo Title",
+  });
+  const [url1, init1] = fetchMock.mock.calls[0];
+  expect(String(url1)).toBe("https://www.instapaper.com/api/2/bookmarks");
+  expect(init1?.method).toBe("POST");
+  expect(new Headers(init1?.headers).get("Content-Type")).toBe("application/json");
+  expect(new Headers(init1?.headers).get("Accept")).toBe("application/json");
+  expect(JSON.parse(String(init1?.body))).toEqual({
+    url: "https://en.wikipedia.org/wiki/Foo_(bar)",
+    canonicalize: false,
+    title: "Foo Title",
+  });
+
+  const second = await runOperation(
+    adapter.saveArticle({
+      url: "https://example.com/redirect",
+      title: "   ",
+      resolveFinalUrl: true,
+    }),
+  );
+  expect(second).toMatchObject({
+    id: 11,
+    url: "https://example.com/redirect",
+    title: "https://example.com/redirect",
+  });
+  const [, init2] = fetchMock.mock.calls[1];
+  expect(JSON.parse(String(init2?.body))).toEqual({
+    url: "https://example.com/redirect",
+    canonicalize: true,
+  });
+});
+
+test("deleteArticle sends DELETE /api/2/bookmarks/{id}, accepts 200 empty, 204, and idempotent 404", async () => {
+  const fetchMock = api((call) => {
+    if (call === 1) return new Response("", { status: 200 });
+    if (call === 2) return new Response(null, { status: 204 });
+    if (call === 3) return new Response("", { status: 404 });
+    return json(v2Error(404, "Bookmark not found"), 404);
+  });
+  const adapter = await acquire();
+
+  await runOperation(adapter.deleteArticle(7));
+  await runOperation(adapter.deleteArticle("8"));
+  await runOperation(adapter.deleteArticle(9));
+  await runOperation(adapter.deleteArticle("10/extra"));
+
+  expect(fetchMock.mock.calls.map(([u, init]) => [String(u), init?.method])).toEqual([
+    ["https://www.instapaper.com/api/2/bookmarks/7", "DELETE"],
+    ["https://www.instapaper.com/api/2/bookmarks/8", "DELETE"],
+    ["https://www.instapaper.com/api/2/bookmarks/9", "DELETE"],
+    ["https://www.instapaper.com/api/2/bookmarks/10%2Fextra", "DELETE"],
+  ]);
+});
+
+test("sync full overwrite handles empty account and multi-page offset/total pagination past 500 bookmarks", async () => {
+  const page1 = Array.from({ length: 500 }, (_, i) => bookmark(i + 1));
+  const page2 = Array.from({ length: 250 }, (_, i) => bookmark(501 + i));
+  const fetchMock = api((call, url) => {
+    if (call === 1) return json(listResponse([], 0));
+    if (url.searchParams.get("offset") === "0") return json(listResponse(page1, 750));
+    if (url.searchParams.get("offset") === "500") return json(listResponse(page2, 750));
+    throw new Error(`Unexpected offset: ${url.toString()}`);
+  });
+  const adapter = await acquire();
+
+  const empty = await runOperation(adapter.sync({ mode: "overwrite" }));
+  expect(empty.articles).toEqual([]);
+  expect(empty.mode).toBe("overwrite");
+  expect(empty.deletedIds).toBeUndefined();
+  expect(empty.metadata?.apiVersion).toBe("2.0");
+
+  const multi = await runOperation(adapter.sync({ mode: "overwrite" }));
+  expect(multi.articles).toHaveLength(750);
+  expect(multi.articles[0].id).toBe(1);
+  expect(multi.articles[749].id).toBe(750);
+  expect(multi.mode).toBe("overwrite");
+  expect(multi.deletedIds).toBeUndefined();
+
+  const [, req1, req2] = fetchMock.mock.calls;
+  expect(new URL(String(req1[0])).searchParams.toString()).toBe("limit=500&offset=0&section=home");
+  expect(new URL(String(req2[0])).searchParams.toString()).toBe(
+    "limit=500&offset=500&section=home",
+  );
+});
+
+test("sync dedupes duplicate bookmark IDs, skips null-URL private items, and accepts extra OpenAPI fields", async () => {
+  api(() =>
+    json({
+      bookmarks: [
+        {
+          id: 10,
+          url: "https://example.com/null-title",
+          title: null,
+          description: "Opening text",
+          image: null,
+          progress: { percent: 0.5, timestamp: 1700000010 },
+          liked: false,
+          archived: false,
+          time: 1700000000,
+          pubtime: null,
+          author: "Author",
+          folder_id: null,
+          tags: [{ id: 1, name: "tech" }],
+          private_source: null,
+          category: 0,
+        },
+        bookmark(10, { url: "https://example.com/dup-ignored", title: "Dup" }),
+        bookmark(11, { url: "https://example.com/blank-title", title: "   " }),
+        bookmark(12, { url: null, title: "Private note without URL" }),
+      ],
+      total: 4,
+    }),
+  );
+  const result = await runOperation((await acquire()).sync({ mode: "overwrite" }));
+  expect(result.articles.map((a) => ({ id: a.id, title: a.title, url: a.url }))).toEqual([
+    { id: 10, title: "https://example.com/null-title", url: "https://example.com/null-title" },
+    { id: 11, title: "https://example.com/blank-title", url: "https://example.com/blank-title" },
+  ]);
+});
+
+test("sync fails with IncompleteSnapshotFailure if pagination repeats without advancing or returns empty before total", async () => {
+  // Repeating the same page when offset < total
+  api(() => json(listResponse([bookmark(1), bookmark(2)], 5)));
+  expect(await failure((await acquire()).sync({ mode: "overwrite" }))).toMatchObject({
     code: "IncompleteSnapshotFailure",
     details: { operation: "instapaper.sync" },
   });
-  expect(result.error).toContain("kept the previous articles");
-  expect(apiCalls(fetchMock)).toHaveLength(2);
-});
 
-test("cancellation during the page wait stops pagination without another request", async () => {
-  const seen = deferred<void>();
-  const fetchMock = api(() => {
-    seen.resolve();
-    return json(syncResponse(full));
+  // Empty page when total > 0
+  api(() => json(listResponse([], 10)));
+  expect(await failure((await acquire()).sync({ mode: "overwrite" }))).toMatchObject({
+    code: "IncompleteSnapshotFailure",
+    details: { operation: "instapaper.sync" },
   });
-  const adapter = await acquire();
-  const controller = new AbortController();
-  const result = failure(adapter.sync(), controller.signal);
-  await seen.promise;
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  controller.abort();
-  expect((await result).code).toBe("OPERATION_INTERRUPTED");
-  expect(apiCalls(fetchMock)).toHaveLength(1);
 });
 
-test("cancellation aborts an in-flight page request", async () => {
+test("sync selects hybrid mode based on timestamps and browser idle state", async () => {
+  const fetchMock = api(() => json(listResponse([], 0)));
+  const adapter = await acquire();
+  const now = Date.now();
+  const recentIso = new Date(now - 10 * 60 * 1000).toISOString();
+
+  // First sync -> overwrite
+  const first = await runOperation(adapter.sync());
+  expect(first.mode).toBe("overwrite");
+  expect(first.metadata?.syncDecision?.reason).toBe("first_sync");
+
+  // Recent full sync -> incremental update with since (120s overlap, no section)
+  const inc = await runOperation(
+    adapter.sync({
+      lastSyncTimestamp: recentIso,
+      lastFullSyncTimestamp: now - 3600_000,
+      isBrowserIdle: false,
+    }),
+  );
+  expect(inc.mode).toBe("update");
+  expect(inc.metadata?.syncDecision?.reason).toBe("incremental");
+  const incUrl = new URL(String(fetchMock.mock.calls[1][0]));
+  expect(incUrl.searchParams.has("section")).toBe(false);
+  expect(incUrl.searchParams.get("since")).toBe(
+    String(Math.floor(Date.parse(recentIso) / 1000) - 120),
+  );
+
+  // >= 24h while active -> still incremental
+  const active24h = await runOperation(
+    adapter.sync({
+      lastSyncTimestamp: recentIso,
+      lastFullSyncTimestamp: now - 25 * 3600_000,
+      isBrowserIdle: false,
+    }),
+  );
+  expect(active24h.mode).toBe("update");
+
+  // >= 24h while idle -> overwrite
+  const idle24h = await runOperation(
+    adapter.sync({
+      lastSyncTimestamp: recentIso,
+      lastFullSyncTimestamp: now - 25 * 3600_000,
+      isBrowserIdle: true,
+    }),
+  );
+  expect(idle24h.mode).toBe("overwrite");
+  expect(idle24h.metadata?.syncDecision?.reason).toBe("24h_idle");
+
+  // >= 48h overdue even when active -> overwrite
+  const overdue48h = await runOperation(
+    adapter.sync({
+      lastSyncTimestamp: recentIso,
+      lastFullSyncTimestamp: now - 49 * 3600_000,
+      isBrowserIdle: false,
+    }),
+  );
+  expect(overdue48h.mode).toBe("overwrite");
+  expect(overdue48h.metadata?.syncDecision?.reason).toBe("48h_overdue");
+
+  // Explicit update without lastSyncTimestamp -> falls back to overwrite
+  const missingLast = await runOperation(adapter.sync({ mode: "update" }));
+  expect(missingLast.mode).toBe("overwrite");
+  expect(missingLast.metadata?.syncDecision?.reason).toBe("missing_last_sync");
+});
+
+test("incremental since sync paginates by bookmarks + deleted_ids and reconciles deletions and archives in ArticlesRepository", async () => {
+  setFilterListSources([{ name: "empty", url: "data:text/plain,! empty" }]);
+  await initializeUrlCanonizer();
+  const keys = getAccountStorageKeys(settings);
+  const now = Date.now();
+  storage[keys.articles] = [
+    { id: 1, title: "Keep", url: "https://example.com/1", created_at: "2026-01-01T00:00:00.000Z" },
+    {
+      id: 2,
+      title: "Delete me",
+      url: "https://example.com/2",
+      created_at: "2026-01-01T00:00:00.000Z",
+    },
+    {
+      id: 3,
+      title: "Archive me",
+      url: "https://example.com/3",
+      created_at: "2026-01-01T00:00:00.000Z",
+    },
+  ];
+  storage[keys.lastSyncTimestamp] = new Date(now - 600_000).toISOString();
+  storage[keys.lastFullSyncTimestamp] = now - 3600_000;
+
+  // Multi-page since response: page 1 has 400 bookmarks + 100 deleted_ids (500 combined);
+  // page 2 has 1 archived bookmark + 1 new bookmark + 1 deleted_id.
+  const page1Bookmarks = Array.from({ length: 400 }, (_, i) => bookmark(1000 + i));
+  const page1Deleted = Array.from({ length: 100 }, (_, i) => 5000 + i);
+  const fetchMock = api((_call, url) => {
+    const offset = url.searchParams.get("offset");
+    expect(url.searchParams.has("since")).toBe(true);
+    if (offset === "0") {
+      return json(listResponse(page1Bookmarks, 503, page1Deleted));
+    }
+    if (offset === "500") {
+      return json(
+        listResponse(
+          [bookmark(3, { archived: true }), bookmark(4, { archived: false, title: "New 4" })],
+          503,
+          [2],
+        ),
+      );
+    }
+    throw new Error(`Unexpected offset: ${offset}`);
+  });
+
+  const repo = new ArticlesRepository(new TokenManager({ persist: false }));
+  await repo.initialize(settings);
+  const synced = await runOperation(repo.syncWithAPI());
+
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(synced.syncResult.mode).toBe("update");
+  expect(synced.syncResult.deletedIds).toContain(2);
+  expect(synced.syncResult.deletedIds).toContain(3);
+
+  const ids = new Set(synced.items.map((a) => a.id));
+  expect(ids.has(1)).toBe(true);
+  expect(ids.has(4)).toBe(true);
+  expect(ids.has(1000)).toBe(true);
+  expect(ids.has(1399)).toBe(true);
+  expect(ids.has(2)).toBe(false);
+  expect(ids.has(3)).toBe(false);
+  expect(synced.items).toHaveLength(402);
+});
+
+test("cancellation aborts an in-flight sync request", async () => {
   const seen = deferred<void>();
   let signal: AbortSignal | undefined;
-  spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
-    if (isAuth(url)) return new Response(tokenBody);
+  spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
     signal = init?.signal ?? undefined;
     seen.resolve();
     return new Promise<Response>(() => {});
@@ -280,42 +557,67 @@ test("cancellation aborts an in-flight page request", async () => {
   expect(signal?.aborted).toBe(true);
 });
 
-for (const [name, response] of [
-  [
-    "a success-status error envelope",
-    () => json([{ type: "error", error_code: 1240, message: "SECRET" }]),
-  ],
-  ["a rejected request", () => json([{ type: "error", error_code: 1240, message: "SECRET" }], 400)],
+for (const [label, payload] of [
+  ["empty array", []],
+  ["plain object", {}],
+  ["missing id", { url: "https://example.com/1", title: "No id" }],
 ] as const) {
-  test(`save maps ${name} to a safe provider code without claiming success`, async () => {
+  test(`saveArticle rejects unexpected 200 OK JSON (${label}) as unknown outcome without retrying`, async () => {
+    const fetchMock = api(() => json(payload));
+    const result = await failure(
+      (await acquire()).saveArticle({ url: "https://example.com/1", title: "A" }),
+    );
+    expect(result).toMatchObject({
+      code: "InvalidResponseFailure",
+      details: {
+        operation: "instapaper.save",
+        remoteOperation: "save",
+        remoteOutcome: "unknown",
+      },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+}
+
+for (const [name, response] of [
+  ["a 400 v2 error envelope", () => json(v2Error(400, "SECRET invalid URL"), 400)],
+  ["a 200 v2 error envelope", () => json(v2Error(400, "SECRET invalid URL"), 200)],
+] as const) {
+  test(`save maps ${name} to a safe ProviderFailure without leaking message or claiming unknown outcome`, async () => {
     const fetchMock = api(() => response());
     const result = await failure((await acquire()).saveArticle({ url: "https://a", title: "a" }));
     expect(result).toMatchObject({
       code: "ProviderFailure",
-      details: { operation: "instapaper.save", providerCode: 1240 },
+      details: { operation: "instapaper.save", providerCode: 400 },
     });
     expect(result.details).not.toHaveProperty("remoteOutcome");
     expect(JSON.stringify(result)).not.toContain("SECRET");
-    expect(apiCalls(fetchMock)).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 }
 
-const rateLimited = (status: number) =>
-  json([{ type: "error", error_code: 1040, message: "SECRET" }], status);
-for (const [operation, status] of [
-  ["save", 400],
-  ["delete", 200],
-  ["sync", 500],
-] as const) {
-  test(`${operation} rate limit (1040, HTTP ${status}) was not applied, so it retries`, async () => {
+for (const status of [401, 403] as const) {
+  test(`HTTP ${status} fails as CredentialsFailure without exposing provider message`, async () => {
+    api(() => json(v2Error(status, "SECRET token detail"), status));
+    const result = await failure((await acquire()).testConnection);
+    expect(result).toMatchObject({
+      code: "CredentialsFailure",
+      details: { operation: "instapaper.testConnection" },
+    });
+    expect(JSON.stringify(result)).not.toContain("SECRET");
+  });
+}
+
+for (const operation of ["save", "delete", "sync"] as const) {
+  test(`${operation} retries on HTTP 429 rate limit and succeeds`, async () => {
     const fetchMock = api((call) =>
       call === 1
-        ? rateLimited(status)
+        ? json(v2Error(429, "SECRET rate limit"), 429, { "Retry-After": "0" })
         : operation === "save"
-          ? json([bookmark(1)])
+          ? json(bookmark(1))
           : operation === "delete"
-            ? json([])
-            : json(syncResponse([1])),
+            ? new Response("", { status: 200 })
+            : json(listResponse([bookmark(1)])),
     );
     const adapter = await acquire();
     await runOperation(
@@ -325,13 +627,25 @@ for (const [operation, status] of [
           ? adapter.deleteArticle(1)
           : adapter.sync(),
     );
-    expect(apiCalls(fetchMock)).toHaveLength(2);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 }
 
-test("a persistent rate limit fails as a definite rate-limit rejection", async () => {
-  const fetchMock = api(() => rateLimited(500));
-  const result = await failure((await acquire()).saveArticle({ url: "https://a", title: "a" }));
+test("a persistent 429 rate limit fails as a definite RateLimitFailure", async () => {
+  const fetchMock = api(() => json(v2Error(429, "SECRET rate limit"), 429));
+  const pending = (await acquire()).saveArticle({ url: "https://a", title: "a" });
+  const flush = () => Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+  const error = await Effect.runPromise(
+    Effect.gen(function* () {
+      const fiber = yield* Effect.forkChild(Effect.flip(pending));
+      for (const delayMs of [1000, 2000, 4000]) {
+        yield* flush();
+        yield* TestClock.adjust(delayMs);
+      }
+      return yield* Fiber.join(fiber);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+  const result = errorResponse(error);
   expect(result).toMatchObject({
     code: "RateLimitFailure",
     error: "The server rate limit is reached. Wait and try again later.",
@@ -339,7 +653,7 @@ test("a persistent rate limit fails as a definite rate-limit rejection", async (
   });
   expect(result.details).not.toHaveProperty("remoteOutcome");
   expect(JSON.stringify(result)).not.toContain("SECRET");
-  expect(apiCalls(fetchMock)).toHaveLength(4);
+  expect(fetchMock).toHaveBeenCalledTimes(4);
 });
 
 for (const kind of ["network", "server", "provider-server"] as const) {
@@ -349,7 +663,7 @@ for (const kind of ["network", "server", "provider-server"] as const) {
         if (kind === "network") throw new TypeError("SECRET request payload");
         return kind === "server"
           ? json({}, 503)
-          : json([{ type: "error", error_code: 1500, message: "SECRET" }], 500);
+          : json(v2Error(500, "SECRET server error"), 500);
       });
       const adapter = await acquire();
       const result = await failure(
@@ -363,157 +677,51 @@ for (const kind of ["network", "server", "provider-server"] as const) {
       });
       expect(result.error).toContain("Do not repeat it");
       expect(JSON.stringify(result)).not.toContain("SECRET");
-      expect(apiCalls(fetchMock)).toHaveLength(1);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
   }
 }
 
-test("rejected xAuth credentials fail acquisition without exposing the response", async () => {
-  spyOn(globalThis, "fetch").mockResolvedValue(
-    new Response("SECRET Invalid xAuth", { status: 401 }),
-  );
-  const tokens = new TokenManager({ persist: false });
-  const result = await failure(createInstapaperAdapter(settings, tokens));
-  expect(result).toMatchObject({
-    code: "CredentialsFailure",
-    details: { operation: "instapaper.authenticate" },
-  });
-  expect(JSON.stringify(result)).not.toContain("SECRET");
-  expect(tokens.getTokenMetadata("instapaper")).toBeNull();
-});
-
-test("signed request rejection is a credential failure", async () => {
-  api(() => new Response("SECRET", { status: 403 }));
-  expect((await failure((await acquire()).sync())).code).toBe("CredentialsFailure");
-});
-
-for (const body of ["oauth_token=only", "<html>SECRET</html>"]) {
-  test(`xAuth response ${JSON.stringify(body)} is an invalid token response`, async () => {
-    spyOn(globalThis, "fetch").mockResolvedValue(new Response(body));
-    const result = await failure(createInstapaperAdapter(settings));
-    expect(result).toMatchObject({
-      code: "InvalidResponseFailure",
-      details: { responseKind: "token" },
-    });
-    expect(JSON.stringify(result)).not.toContain("SECRET");
-  });
-}
-
-test("malformed list response is an invalid response, not a snapshot", async () => {
-  api(() => json({ bookmarks: "SECRET" }));
-  const result = await failure((await acquire()).sync());
-  expect(result).toMatchObject({
-    code: "InvalidResponseFailure",
-    details: { responseKind: "response" },
-  });
-  expect(JSON.stringify(result)).not.toContain("SECRET");
-});
-
-test("browser crypto failure is a signing failure and sends nothing", async () => {
-  const fetchMock = spyOn(globalThis, "fetch");
-  spyOn(crypto.subtle, "importKey").mockRejectedValue(new Error("SECRET key material"));
-  const result = await failure(createInstapaperAdapter(settings));
-  expect(result).toMatchObject({
-    code: "BrowserFailure",
-    details: { operation: "instapaper.authenticate", reason: "crypto" },
-  });
-  expect(JSON.stringify(result)).not.toContain("SECRET");
-  expect(fetchMock).not.toHaveBeenCalled();
-});
-
-test("missing configuration fails acquisition before any request", async () => {
-  const fetchMock = spyOn(globalThis, "fetch");
-  const result = await failure(
-    createInstapaperAdapter({ ...settings, apiConfig: { ...settings.apiConfig, consumerKey: "" } }),
-  );
-  expect(result.code).toBe("ConfigurationFailure");
-  expect(fetchMock).not.toHaveBeenCalled();
-});
-
-test("a late xAuth response cannot publish credentials after account replacement", async () => {
-  const tokens = new TokenManager();
-  const started = deferred<void>();
-  const release = deferred<Response>();
-  spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
-    if (bodyOf(init).get("x_auth_username") === "user") {
-      started.resolve();
-      return release.promise;
-    }
-    return new Response("oauth_token=replacement&oauth_token_secret=s");
-  });
-  const pending = failure(createInstapaperAdapter(settings, tokens));
-  await started.promise;
-  await runOperation(
-    createInstapaperAdapter(
-      { ...settings, apiConfig: { ...settings.apiConfig, username: "other" } },
-      tokens,
-    ),
-  );
-  release.resolve(new Response(tokenBody));
-  expect((await pending).code).toBe("CredentialsFailure");
-  expect(tokens.getTokenMetadata("instapaper")?.accessToken).toBe("replacement");
-  expect(storage.api_tokens).toEqual([
-    ["instapaper", expect.objectContaining({ accessToken: "replacement" })],
-  ]);
-});
-
-test("a replaced account's ready adapter cannot sign further requests", async () => {
-  const tokens = new TokenManager({ persist: false });
-  const fetchMock = api(() => json(syncResponse([])));
-  const stale = await acquire(tokens);
-  await acquire(tokens);
-  await runOperation(
-    createInstapaperAdapter(
-      { ...settings, apiConfig: { ...settings.apiConfig, username: "other" } },
-      tokens,
-    ),
-  );
-  const before = fetchMock.mock.calls.length;
-  expect((await failure(stale.sync())).code).toBe("CredentialsFailure");
-  expect(fetchMock.mock.calls.length).toBe(before);
-});
-
-test("draft connection test uses its own tokens and leaves the active account untouched", async () => {
-  const active = new TokenManager();
-  api(() => json(syncResponse([1])));
-  await acquire(active);
-  const stored = structuredClone(storage.api_tokens);
-  const repo = new ArticlesRepository(new TokenManager({ persist: false }));
-  await repo.initialize({ ...settings, apiConfig: { ...settings.apiConfig, username: "draft" } });
-  expect(await runOperation(repo.testConnection)).toBe(true);
-  expect(storage.api_tokens).toEqual(stored);
-  expect(active.getTokenMetadata("instapaper")?.accessToken).toBe("token");
-});
-
-test("repository keeps the previous cache when the snapshot is incomplete", async () => {
+test("repository keeps the previous cache when sync fails with an invalid response or incomplete snapshot", async () => {
   const keys = getAccountStorageKeys(settings);
   const previous = [{ id: 9, title: "Kept", url: "https://kept.example", created_at: "2026" }];
   storage[keys.articles] = previous;
-  api(() => json(syncResponse(full)));
+  api(() => json({ bookmarks: "SECRET" }));
   const repo = new ArticlesRepository(new TokenManager({ persist: false }));
   await repo.initialize(settings);
-  const result = await runOperation(repo.syncWithAPI()).catch((error: unknown) => errorResponse(error));
-  expect(result).toMatchObject({ code: "IncompleteSnapshotFailure" });
+  const result = await runOperation(repo.syncWithAPI()).catch((error: unknown) =>
+    errorResponse(error),
+  );
+  expect(result).toMatchObject({ code: "InvalidResponseFailure" });
+  expect(JSON.stringify(result)).not.toContain("SECRET");
   expect(storage[keys.articles]).toEqual(previous);
   expect(storage[keys.lastSyncTimestamp]).toBeUndefined();
   expect(await runOperation(repo.getAllArticles)).toEqual(previous);
 });
 
-test("repository save, delete, and sync commit Instapaper outcomes to the account cache", async () => {
+test("repository save, delete, and sync commit Instapaper v2 outcomes to the account cache", async () => {
   setFilterListSources([{ name: "empty", url: "data:text/plain,! empty" }]);
   await initializeUrlCanonizer();
   const keys = getAccountStorageKeys(settings);
-  spyOn(globalThis, "fetch").mockImplementation(async (url) => {
-    if (isAuth(url)) return new Response(tokenBody);
-    if (String(url).endsWith("/add")) return json([bookmark(3)]);
-    if (String(url).endsWith("/delete")) return json([]);
-    return json(syncResponse([1, 2]));
+  const fetchMock = api((_call, _url, init) => {
+    if (init?.method === "POST") return json(bookmark(3));
+    if (init?.method === "DELETE") return new Response("", { status: 200 });
+    return json(listResponse([bookmark(1), bookmark(2)]));
   });
   const repo = new ArticlesRepository(new TokenManager({ persist: false }));
   await repo.initialize(settings);
+
   expect((await runOperation(repo.syncWithAPI())).items.map((a) => a.id)).toEqual([1, 2]);
-  await runOperation(repo.saveArticle({ url: "https://example.com/3", title: "Article 3" }));
+  await runOperation(
+    repo.saveArticle({ url: "https://example.com/3", title: "", resolveFinalUrl: true }),
+  );
   expect((storage[keys.articles] as { id: number }[]).map((a) => a.id)).toEqual([3, 1, 2]);
+  const saveCall = fetchMock.mock.calls.find(([, init]) => init?.method === "POST")!;
+  expect(JSON.parse(String(saveCall[1]?.body))).toEqual({
+    url: "https://example.com/3",
+    canonicalize: true,
+  });
+
   await runOperation(repo.deleteArticle(1));
   expect((storage[keys.articles] as { id: number }[]).map((a) => a.id)).toEqual([3, 2]);
   expect(typeof storage[keys.lastSyncTimestamp]).toBe("string");
@@ -523,10 +731,11 @@ for (const operation of ["save", "delete"] as const) {
   test(`confirmed ${operation} survives post-mutation local-read failure with safe runtime advice`, async () => {
     setFilterListSources([{ name: "empty", url: "data:text/plain,! empty" }]);
     await initializeUrlCanonizer();
-    const fetchMock = api(() => json(operation === "save" ? [bookmark(1)] : []));
+    const fetchMock = api(() =>
+      operation === "save" ? json(bookmark(1)) : new Response("", { status: 200 }),
+    );
     const repo = new ArticlesRepository(new TokenManager({ persist: false }));
     await repo.initialize(settings);
-    await runOperation(repo.testConnection).catch(() => {});
     rejectReads = true;
     const result = await failure(
       operation === "save"
@@ -540,6 +749,6 @@ for (const operation of ["save", "delete"] as const) {
     });
     expect(result.error).toContain("Do not repeat it");
     expect(JSON.stringify(result)).not.toContain("SECRET");
-    expect(apiCalls(fetchMock).filter(([url]) => !String(url).endsWith("/list"))).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 }

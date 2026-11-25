@@ -11,6 +11,7 @@ import {
   setFilterListSources,
 } from "../src/utils/filter-list-manager";
 import { initializeWithRawFilterLists } from "../src/utils/filter-list-url-cleaner";
+import * as urlHelpers from "../src/utils/url-helpers";
 import {
   canonicalizeUrl,
   clearCanonicalUrlCache,
@@ -176,16 +177,68 @@ test("Duplicate detection follows the comparison setting", async () => {
   canonicalStorage[keys.articles] = [existing];
   const canonicalRepository = new ArticlesRepository();
   await canonicalRepository.initialize({ ...DEFAULT_SETTINGS, normalizeOnCompare: true });
-  useAdapter(() => ({
-    id: 3,
-    url: "https://youtu.be/abc123",
-    title: "Video",
-    created_at: "2026-01-02",
-  }));
-  await runOperation(canonicalRepository.saveArticle({ url: "https://youtu.be/abc123", title: "Video" }));
+  let canonicalAdapterSaves = 0;
+  useAdapter(() => {
+    canonicalAdapterSaves++;
+    return {
+      id: 3,
+      url: "https://youtu.be/abc123",
+      title: "Video",
+      created_at: "2026-01-02",
+    };
+  });
+  const canonicalResult = await runOperation(
+    canonicalRepository.saveArticle({ url: "https://youtu.be/abc123", title: "Video" }),
+  );
   const articles = (await runOperation(canonicalRepository.getAllArticles)) as Article[];
+  expect(canonicalAdapterSaves).toBe(0);
+  expect(canonicalResult).toEqual(existing);
   expect(articles.length).toBe(1);
   expect(articles[0].id).toBe(1);
+});
+
+test("saveArticle returns existing cached article without duplicate API call", async () => {
+  const { storage } = withStorage();
+  const existing: Article = {
+    id: 42,
+    url: "https://www.youtube.com/watch?v=abc123",
+    title: "Existing Video",
+    created_at: "2026-01-01",
+  };
+  storage[keys.articles] = [existing];
+
+  let adapterSaveCalls = 0;
+  useAdapter((input) => {
+    adapterSaveCalls++;
+    return {
+      id: 99,
+      url: input.url,
+      title: input.title,
+      created_at: "2026-01-02",
+    };
+  });
+
+  // Exact match with normalizeOnCompare: false
+  const exactRepo = new ArticlesRepository();
+  exactRepo.initialize({ ...DEFAULT_SETTINGS, normalizeOnCompare: false, normalizeOnSave: false });
+  const exactResult = await runOperation(
+    exactRepo.saveArticle({ url: "https://www.youtube.com/watch?v=abc123", title: "Dup" }),
+  );
+  expect(exactResult).toEqual(existing);
+  expect(adapterSaveCalls).toBe(0);
+
+  // Normalized URL already cached when normalizeOnSave: true and normalizeOnCompare: false
+  const normalizeSaveRepo = new ArticlesRepository();
+  normalizeSaveRepo.initialize({
+    ...DEFAULT_SETTINGS,
+    normalizeOnCompare: false,
+    normalizeOnSave: true,
+  });
+  const normalizedSaveResult = await runOperation(
+    normalizeSaveRepo.saveArticle({ url: "https://youtu.be/abc123", title: "Dup" }),
+  );
+  expect(normalizedSaveResult).toEqual(existing);
+  expect(adapterSaveCalls).toBe(0);
 });
 
 test("Saving honors normalizeOnSave independently", async () => {
@@ -315,4 +368,222 @@ test("Twitter and X subdomains canonicalize to x.com", async () => {
   ]) {
     expect(await canonicalizeUrl(url)).toBe("https://x.com/a/status/1");
   }
+});
+
+test("findSaved with >1000 articles indexes once, avoids thrashing, and invalidates on filter refresh", async () => {
+  const { storage } = withStorage();
+  const articleCount = 1200;
+  const articles: Article[] = Array.from({ length: articleCount - 1 }, (_, i) => ({
+    id: i + 1,
+    url: `https://example.com/post-${i}`,
+    title: `Post ${i}`,
+    created_at: "2026-01-01",
+  }));
+  const trackedArticle: Article = {
+    id: articleCount,
+    url: "https://cache.test/page?track=1&keep=1",
+    canonicalUrl: "https://cache.test/page?keep=1",
+    title: "Tracked",
+    created_at: "2026-01-01",
+  };
+  articles.push(trackedArticle);
+  storage[keys.articles] = articles;
+
+  setFilterListSources([{ name: "rules", url: dataUrl("$removeparam=track\n$removeparam=other") }]);
+  await initializeWithRawFilterLists([
+    { name: "rules", content: "$removeparam=track\n$removeparam=other" },
+  ]);
+  clearCanonicalUrlCache();
+
+  const repository = new ArticlesRepository();
+  repository.initialize({ ...DEFAULT_SETTINGS, normalizeOnCompare: true });
+
+  const canonicalizeSpy = spyOn(urlHelpers, "canonicalizeUrl");
+
+  // First lookup computes target once and builds the canonical index once across all articles.
+  const firstMatch = await runOperation(
+    repository.findSaved("https://example.com/post-1198?track=abc"),
+  );
+  expect(firstMatch?.id).toBe(1199);
+  expect(canonicalizeSpy).toHaveBeenCalledTimes(articleCount + 1);
+
+  // Subsequent lookups only canonicalize the target URL once (O(1) index lookup).
+  canonicalizeSpy.mockClear();
+  expect(
+    (await runOperation(repository.findSaved("https://example.com/post-0?track=xyz")))?.id,
+  ).toBe(1);
+  expect(canonicalizeSpy).toHaveBeenCalledTimes(1);
+
+  expect(
+    (await runOperation(repository.findSaved("https://cache.test/page?keep=1")))?.id,
+  ).toBe(articleCount);
+  expect(canonicalizeSpy).toHaveBeenCalledTimes(2);
+
+  expect(
+    await runOperation(repository.findSaved("https://example.com/not-saved?track=1")),
+  ).toBeUndefined();
+  expect(canonicalizeSpy).toHaveBeenCalledTimes(3);
+
+  // Saving a new article does not re-canonicalize all 1,200 existing articles.
+  useAdapter((input) => ({
+    id: articleCount + 1,
+    url: input.url,
+    title: input.title,
+    created_at: "2026-01-02",
+  }));
+  canonicalizeSpy.mockClear();
+  await runOperation(
+    repository.saveArticle({ url: "https://example.com/new-post?track=1", title: "New" }),
+  );
+  // 1 in saveArticle + 1 in apply (no O(N) scan)
+  expect(canonicalizeSpy.mock.calls.length).toBeLessThanOrEqual(2);
+
+  // Lookup after save reuses known canonicals for all articles and only canonicalizes the target.
+  canonicalizeSpy.mockClear();
+  expect(
+    (await runOperation(repository.findSaved("https://example.com/new-post")))?.id,
+  ).toBe(articleCount + 1);
+  expect(canonicalizeSpy).toHaveBeenCalledTimes(1);
+
+  // Refreshing filter lists clears the canonical cache and invalidates the repository index.
+  setFilterListSources([
+    { name: "rules", url: dataUrl("$removeparam=other\n@@||cache.test^$removeparam=track") },
+  ]);
+  await refreshFilterLists();
+
+  canonicalizeSpy.mockClear();
+  expect(
+    (await runOperation(repository.findSaved("https://cache.test/page?track=1&keep=1")))?.id,
+  ).toBe(articleCount);
+  // Stale canonical URL no longer matches under the updated exception rule.
+  expect(
+    await runOperation(repository.findSaved("https://cache.test/page?keep=1")),
+  ).toBeUndefined();
+
+  // Once rebuilt under the new rules, lookups again canonicalize only the target URL.
+  canonicalizeSpy.mockClear();
+  expect(
+    (await runOperation(repository.findSaved("https://cache.test/page?track=1&keep=1")))?.id,
+  ).toBe(articleCount);
+  expect(canonicalizeSpy).toHaveBeenCalledTimes(1);
+});
+
+test("findSaved with normalizeOnCompare false skips canonicalizeUrl completely", async () => {
+  const { storage } = withStorage();
+  storage[keys.articles] = Array.from({ length: 1050 }, (_, i) => ({
+    id: i + 1,
+    url: `https://example.com/raw-${i}`,
+    title: `Raw ${i}`,
+    created_at: "2026-01-01",
+  }));
+
+  const repository = new ArticlesRepository();
+  repository.initialize({ ...DEFAULT_SETTINGS, normalizeOnCompare: false });
+
+  const canonicalizeSpy = spyOn(urlHelpers, "canonicalizeUrl");
+  expect((await runOperation(repository.findSaved("https://example.com/raw-1049")))?.id).toBe(
+    1050,
+  );
+  expect(await runOperation(repository.findSaved("https://example.com/raw-missing"))).toBeUndefined();
+  expect(canonicalizeSpy).toHaveBeenCalledTimes(0);
+});
+
+test("givenUrl index never shadows a primary url match, cleans up on merge, and invalidates on filter refresh", async () => {
+  const { storage } = withStorage();
+  const redirected: Article = {
+    id: "1",
+    url: "https://dest.example/post?track=1",
+    givenUrl: "https://shared.example/page?track=1",
+    title: "Redirected",
+    created_at: "2026-01-01",
+  };
+  const primary: Article = {
+    id: "2",
+    url: "https://shared.example/page?track=1",
+    title: "Primary",
+    created_at: "2026-01-02",
+  };
+  storage[keys.articles] = [redirected, primary];
+
+  // Primary URL takes precedence over another article's givenUrl in raw mode.
+  const rawRepo = new ArticlesRepository();
+  rawRepo.initialize({ ...DEFAULT_SETTINGS, normalizeOnCompare: false });
+  expect(
+    (await runOperation(rawRepo.findSaved("https://shared.example/page?track=1")))?.id,
+  ).toBe("2");
+  expect(
+    (await runOperation(rawRepo.findSaved("https://dest.example/post?track=1")))?.id,
+  ).toBe("1");
+
+  // Primary URL also takes precedence in canonical mode.
+  setFilterListSources([{ name: "rules", url: dataUrl("$removeparam=track\n$removeparam=other") }]);
+  await initializeWithRawFilterLists([
+    { name: "rules", content: "$removeparam=track\n$removeparam=other" },
+  ]);
+  clearCanonicalUrlCache();
+
+  const canonicalRepo = new ArticlesRepository();
+  canonicalRepo.initialize({ ...DEFAULT_SETTINGS, normalizeOnCompare: true });
+  expect((await runOperation(canonicalRepo.findSaved("https://shared.example/page")))?.id).toBe(
+    "2",
+  );
+  expect((await runOperation(canonicalRepo.findSaved("https://dest.example/post")))?.id).toBe("1");
+
+  // Updating an entry via incremental sync removes stale givenUrl keys.
+  const trackedRedirected: Article = {
+    id: "10",
+    url: "https://dest.example/updated",
+    givenUrl: "https://cache.test/old-given?track=1&keep=1",
+    title: "Tracked Redirect",
+    created_at: "2026-01-03",
+  };
+  storage[keys.articles] = [trackedRedirected];
+  const syncRepo = new ArticlesRepository();
+  syncRepo.initialize({ ...DEFAULT_SETTINGS, normalizeOnCompare: true });
+  expect(
+    (await runOperation(syncRepo.findSaved("https://cache.test/old-given?keep=1")))?.id,
+  ).toBe("10");
+
+  // Filter refresh invalidates cached canonical givenUrl.
+  setFilterListSources([
+    { name: "rules", url: dataUrl("$removeparam=other\n@@||cache.test^$removeparam=track") },
+  ]);
+  await refreshFilterLists();
+  expect(
+    await runOperation(syncRepo.findSaved("https://cache.test/old-given?keep=1")),
+  ).toBeUndefined();
+  expect(
+    (await runOperation(syncRepo.findSaved("https://cache.test/old-given?track=1&keep=1")))?.id,
+  ).toBe("10");
+
+  // Incremental sync replacing id "10" with a new givenUrl cleans up the old givenUrl key.
+  spyOn(factory, "getReadyAdapter").mockReturnValue(
+    Effect.succeed({
+      sync: () =>
+        Effect.succeed({
+          articles: [
+            {
+              id: "10",
+              url: "https://dest.example/updated",
+              givenUrl: "https://new-given.example/entry",
+              title: "Tracked Redirect",
+              created_at: "2026-01-03",
+            },
+          ],
+          mode: "update",
+          metadata: {
+            totalFetched: 1,
+            totalProcessed: 1,
+            lastSyncTimestamp: "2026-01-04T00:00:00Z",
+          },
+        }),
+    }) as never,
+  );
+  await runOperation(syncRepo.syncWithAPI({ mode: "update" }));
+  expect(
+    await runOperation(syncRepo.findSaved("https://cache.test/old-given?track=1&keep=1")),
+  ).toBeUndefined();
+  expect(
+    (await runOperation(syncRepo.findSaved("https://new-given.example/entry")))?.id,
+  ).toBe("10");
 });

@@ -79,7 +79,10 @@ export class BrowserFailure extends OperationError {
 }
 export class CredentialsFailure extends OperationError {
   readonly _tag = "CredentialsFailure";
-  constructor(readonly operation: string) {
+  constructor(
+    readonly operation: string,
+    readonly recoverable = true,
+  ) {
     super("The server did not accept your login details. Check them in Pouch settings.");
   }
 }
@@ -125,6 +128,7 @@ export class RateLimitFailure extends OperationError {
   constructor(
     readonly operation: string,
     readonly retryAfterMs: number,
+    readonly serverDirected = false,
   ) {
     super("The server rate limit is reached. Wait and try again later.");
   }

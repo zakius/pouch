@@ -26,7 +26,9 @@ interface FakeElement {
   setAttribute(name: string, value: string): void;
   getAttribute(name: string): string | undefined;
   appendChild(child: FakeElement): FakeElement;
-  addEventListener(): void;
+  addEventListener(type: string, handler: (...args: unknown[]) => void): void;
+  listeners: Record<string, ((...args: unknown[]) => void)[]>;
+  value: string;
   closest(): null;
   focus(): void;
   querySelectorAll(selector: string): FakeElement[];
@@ -57,6 +59,8 @@ function makeElement(id = ""): FakeElement {
     dataset: {},
     attributes: {},
     children: [],
+    listeners: {},
+    value: "",
     classList: {
       add: (...names: string[]) => {
         const set = elementClasses.get(el);
@@ -78,7 +82,9 @@ function makeElement(id = ""): FakeElement {
       el.children.push(child);
       return child;
     },
-    addEventListener() {},
+    addEventListener(type: string, handler: (...args: unknown[]) => void) {
+      el.listeners[type] = [handler];
+    },
     closest: () => null,
     focus() {
       focusedElement = el;
@@ -135,11 +141,11 @@ const fakeDocument = {
   },
 };
 
+let activeTab: AnyRecord = { id: 1, url: "https://example.com/", title: "Example" };
+
 const fakeBrowser = {
   tabs: {
-    query: async (_options: AnyRecord): Promise<AnyRecord[]> => [
-      { id: 1, url: "https://example.com/", title: "Example" },
-    ],
+    query: async (_options: AnyRecord): Promise<AnyRecord[]> => [activeTab],
   },
   runtime: {
     onMessage: { addListener: () => {} },
@@ -214,6 +220,7 @@ function makeDeleteButton(articleId: number | string): FakeElement {
 }
 
 beforeEach(() => {
+  activeTab = { id: 1, url: "https://example.com/", title: "Example" };
   focusedElement = undefined;
   for (const element of elements.values()) {
     element.title = "";
@@ -225,6 +232,7 @@ beforeEach(() => {
     element.dataset = {};
     element.attributes = {};
     element.children = [];
+    element.value = "";
     element.classList.remove(...(elementClasses.get(element) ?? []));
   }
   handleMessage = async (message) => {
@@ -362,7 +370,7 @@ test("slow status refresh keeps the save button busy and consecutive clicks are 
   expect(saveButton.getAttribute("aria-label")).toBe("Remove current page");
 });
 
-test("initialization failure surfaces error content even when the list was empty", async () => {
+test("initialization failure surfaces structured error content with settings link", async () => {
   handleMessage = async (message) => {
     if (message.type === "getArticles") return { error: "storage unavailable" };
     if (message.type === "checkArticle") return undefined;
@@ -370,7 +378,141 @@ test("initialization failure surfaces error content even when the list was empty
   };
   await initializePopup();
   await until(() => errorMessageText() !== "", "error shown after empty list");
+  expect(errorMessageText()).toBe("storage unavailable Check Settings");
   expect(el("articles").style.display).toBe("block");
+});
+
+test("save button stays disabled while checkArticle is pending so premature clicks cannot duplicate-save", async () => {
+  let resolveCheck!: (value: Article | undefined) => void;
+  let saveCalls = 0;
+  const startedMessages: string[] = [];
+  handleMessage = async (message) => {
+    startedMessages.push(String(message.type));
+    if (message.type === "getArticles") return listResponse([exampleArticle]);
+    if (message.type === "checkArticle") {
+      return new Promise<Article | undefined>((resolve) => {
+        resolveCheck = resolve;
+      });
+    }
+    if (message.type === "saveArticle") {
+      saveCalls++;
+      return exampleArticle;
+    }
+    return {};
+  };
+
+  const initPromise = initializePopup();
+  await until(() => startedMessages.includes("checkArticle"), "checkArticle started");
+  // Both startup queries should have been dispatched in parallel.
+  expect(startedMessages).toContain("getArticles");
+  expect(el("save-page-button").disabled).toBe(true);
+
+  // Clicking while checkArticle is still in flight must be ignored.
+  click(el("save-page-button"));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(saveCalls).toBe(0);
+
+  resolveCheck(exampleArticle);
+  await initPromise;
+  expect(el("save-page-button").disabled).toBe(false);
+  expect(el("save-page-button").classList.contains("saved")).toBe(true);
+  expect(el("save-page-button").textContent).toBe("✓");
+  expect(saveCalls).toBe(0);
+});
+
+test("fire-and-forget list reloads preserve structured errors and emit no unhandled rejections", async () => {
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    let mode: "ok" | "structured" | "disconnect" = "ok";
+    handleMessage = async (message) => {
+      if (message.type === "checkArticle") return undefined;
+      if (message.type === "getArticles") {
+        if (mode === "structured") {
+          return { error: "Backend auth expired. Check settings." };
+        }
+        if (mode === "disconnect") {
+          throw new Error("Receiving end does not exist.");
+        }
+        return { items: [exampleArticle], page: 1, pages: 2, total: 12 };
+      }
+      return {};
+    };
+    await initializePopup();
+    await until(() => !el("next-page").disabled, "next page enabled");
+
+    // Structured error on changePage
+    mode = "structured";
+    click(el("next-page"));
+    await until(
+      () => errorMessageText().includes("Backend auth expired"),
+      "structured error shown on pagination",
+    );
+    expect(errorMessageText()).toBe("Backend auth expired. Check settings. Check Settings");
+
+    // Disconnect error on page-select change
+    mode = "disconnect";
+    el("page-select").value = "1";
+    el("page-select").listeners.change?.[0]?.({ target: el("page-select") });
+    await until(
+      () => errorMessageText() === "Could not connect to the background service.",
+      "disconnect error shown on page select",
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(unhandled).toEqual([]);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
+test("save or delete success followed by list-reload error does not misreport Failed to save or delete", async () => {
+  let failReload = false;
+  let saved: Article | undefined;
+  handleMessage = async (message) => {
+    if (message.type === "checkArticle") return saved;
+    if (message.type === "saveArticle") {
+      saved = exampleArticle;
+      failReload = true;
+      return exampleArticle;
+    }
+    if (message.type === "deleteArticle") {
+      saved = undefined;
+      failReload = true;
+      return { success: true };
+    }
+    if (message.type === "getArticles") {
+      if (failReload) return { error: "Cache reload failed after mutation" };
+      return listResponse(saved ? [saved] : []);
+    }
+    return {};
+  };
+
+  await initializePopup();
+  await until(() => !el("save-page-button").disabled, "save button ready");
+
+  click(el("save-page-button"));
+  await until(() => !el("save-page-button").disabled, "save finished");
+  expect(errorMessageText()).toBe("Cache reload failed after mutation Check Settings");
+  expect(errorMessageText()).not.toContain("Failed to save");
+  expect(el("save-page-button").classList.contains("saved")).toBe(true);
+  expect(el("sr-live").textContent).not.toBe("Page saved.");
+
+  // Now delete succeeds and subsequent list reload rejects with a runtime error.
+  handleMessage = async (message) => {
+    if (message.type === "checkArticle") return undefined;
+    if (message.type === "deleteArticle") return { success: true };
+    if (message.type === "getArticles") throw new Error("Receiving end does not exist.");
+    return {};
+  };
+  click(el("save-page-button"));
+  await until(() => !el("save-page-button").disabled, "delete finished");
+  expect(errorMessageText()).toBe("Could not connect to the background service.");
+  expect(errorMessageText()).not.toContain("Failed to delete");
+  expect(el("sr-live").textContent).not.toBe("Page removed.");
 });
 
 const stringIdArticle: Article = {
@@ -453,6 +595,35 @@ test("deleting a row moves keyboard focus to the next row, then to search when t
   el("sr-live").textContent = "";
   await deleteRow(0, 0);
   expect(focusedElement).toBe(el("search"));
+});
+
+test("save button is hidden and disabled on non-HTTP(S) pages and ignores clicks", async () => {
+  const sentTypes: string[] = [];
+  handleMessage = async (message) => {
+    sentTypes.push(String(message.type));
+    if (message.type === "getArticles") return listResponse([]);
+    if (message.type === "checkArticle") return undefined;
+    return {};
+  };
+
+  for (const url of [
+    "chrome://extensions",
+    "about:newtab",
+    "javascript:alert(1)",
+    "mailto:test@example.com",
+    "data:text/html,hi",
+    "file:///tmp/index.html",
+  ]) {
+    sentTypes.length = 0;
+    activeTab = { id: 2, url, title: "Restricted" };
+    await initializePopup();
+    expect(el("save-page-button").style.display).toBe("none");
+    expect(el("save-page-button").disabled).toBe(true);
+    click(el("save-page-button"));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(sentTypes).not.toContain("checkArticle");
+    expect(sentTypes).not.toContain("saveArticle");
+  }
 });
 
 test("fatal storage response shows confirmed remote success and blocks another save", async () => {

@@ -7,11 +7,13 @@ import { logger } from "../../../utils/logger";
 import { requestJson, validate } from "../effect-api-client";
 import {
   ConfigurationFailure,
+  FatalStorageFailure,
   IncompleteSnapshotFailure,
   ProviderFailure,
   storageHealthy,
   type AcquisitionError,
   type EffectAdapter,
+  type TransportError,
 } from "../effect-adapter";
 import type { SavingArticle, SyncOptions } from "../read-it-later-adapter";
 
@@ -34,6 +36,12 @@ const linkaceLinkSchema = v.object({
   thumbnail: v.optional(v.nullable(v.string())),
 });
 const linkaceErrorSchema = v.object({ message: v.string() });
+const linkaceUrlValidationErrorSchema = v.object({
+  message: v.optional(v.string()),
+  errors: v.object({
+    url: v.pipe(v.array(v.string()), v.minLength(1)),
+  }),
+});
 /** LinkAce answers a created link either wrapped in `data` or as the bare link. */
 const linkaceSaveResponseSchema = v.union([
   v.object({ data: linkaceLinkSchema }),
@@ -42,15 +50,31 @@ const linkaceSaveResponseSchema = v.union([
 /** Page totals come from `meta`, from Laravel's flat paginator fields, or not at all. */
 const linkacePageSchema = v.object({
   data: v.array(linkaceLinkSchema),
+  current_page: v.optional(v.number()),
   last_page: v.optional(v.number()),
-  meta: v.optional(v.object({ last_page: v.number() })),
+  meta: v.optional(
+    v.object({
+      current_page: v.optional(v.number()),
+      last_page: v.number(),
+    }),
+  ),
 });
+/** LinkAce trash listings return either a bare array or a paginated `{ data }` envelope. */
+const linkaceTrashLinksSchema = v.union([v.array(linkaceLinkSchema), linkacePageSchema]);
+const LINKACE_SYNC_PER_PAGE = 200;
+const MAX_TRASH_PAGES = 10;
 
 type LinkaceLink = v.InferOutput<typeof linkaceLinkSchema>;
 
 /** A `message` envelope without `data` is a definitive rejection; the message may echo request data. */
 const providerFailure = (operation: string) => (data: unknown) =>
   v.is(linkaceErrorSchema, data) && !("data" in data) ? new ProviderFailure(operation) : undefined;
+
+/** Restore responses may return a 200 `{ message }` confirmation; only error statuses reject. */
+const restoreProviderFailure = (operation: string) => (data: unknown, status: number) =>
+  status >= 400 && v.is(linkaceErrorSchema, data) && !("data" in data)
+    ? new ProviderFailure(operation)
+    : undefined;
 
 const toArticle = (item: LinkaceLink): Article => ({
   id: item.id,
@@ -68,7 +92,10 @@ export const createLinkaceAdapter = Effect.fn("linkace.acquire")(function* (
   // A missing token must not degrade into an unauthenticated request.
   if (!parsed.success || !token || /[\r\n]/.test(token))
     return yield* Effect.fail(new ConfigurationFailure("linkace.acquire"));
-  const apiUrl = parsed.output.apiConfig.url.replace(/\/+$/, "");
+  const apiUrl = parsed.output.apiConfig.url
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/\/api\/v2$/i, "");
   const authorization = Effect.succeed(`Bearer ${token}`);
 
   const request = (
@@ -79,45 +106,114 @@ export const createLinkaceAdapter = Effect.fn("linkace.acquire")(function* (
       mutation?: "save" | "delete";
       timeoutMs?: number;
       confirms?: v.GenericSchema;
+      providerFailure?: (data: unknown, status: number) => ProviderFailure | undefined;
     } = {},
   ) => {
     const { confirms } = options;
+    const method = (options.init?.method ?? "GET").toUpperCase();
+    const needsContentType = method !== "GET" || options.init?.body !== undefined;
     return requestJson({
       operation,
       url: `${apiUrl}${endpoint}`,
-      // Without it Laravel answers rejected authentication with a login redirect, not 401.
+      // Without Accept, Laravel answers rejected authentication with a login redirect, not 401.
+      // LinkAce >= 2.1.4 rejects any non-GET request without Content-Type: application/json with 415.
       init: {
         ...options.init,
         headers: {
           Accept: "application/json",
-          ...(options.init?.body === undefined ? {} : { "Content-Type": "application/json" }),
+          ...(needsContentType ? { "Content-Type": "application/json" } : {}),
         },
       },
       mutation: options.mutation,
       timeoutMs: options.timeoutMs,
       authorization,
-      providerFailure: providerFailure(operation),
+      providerFailure: options.providerFailure ?? providerFailure(operation),
       confirms: confirms && ((data) => v.is(confirms, data)),
     });
   };
 
+  const findTrashedLink = (url: string) =>
+    Effect.gen(function* () {
+      const perPage = 30;
+      const seen = new Set<number>();
+      for (let page = 1; page <= MAX_TRASH_PAGES; page++) {
+        const query = new URLSearchParams({
+          per_page: String(perPage),
+          page: String(page),
+        });
+        const data = yield* request("linkace.save", `/api/v2/trash/links?${query.toString()}`);
+        const result = yield* validate(linkaceTrashLinksSchema, data, "linkace.save");
+        if (Array.isArray(result)) return result.find((item) => item.url === url);
+        const match = result.data.find((item) => item.url === url);
+        if (match) return match;
+        if (result.data.length === 0 || result.data.every((item) => seen.has(item.id))) break;
+        for (const item of result.data) seen.add(item.id);
+        const lastPage = result.meta?.last_page ?? result.last_page;
+        if (lastPage === undefined ? result.data.length < perPage : page >= lastPage) break;
+      }
+      return undefined;
+    });
+
   const adapter: EffectAdapter = {
     saveArticle: Effect.fn("linkace.save")(function* (article: SavingArticle) {
-      const data = yield* request("linkace.save", "/api/v2/links", {
+      let urlConflict = false;
+      const payload = article.title.trim()
+        ? { url: article.url, title: article.title }
+        : { url: article.url };
+      return yield* request("linkace.save", "/api/v2/links", {
         mutation: "save",
         confirms: linkaceSaveResponseSchema,
+        providerFailure: (data, status) => {
+          if (status === 422 && v.is(linkaceUrlValidationErrorSchema, data)) {
+            urlConflict = true;
+            return new ProviderFailure("linkace.save");
+          }
+          urlConflict = false;
+          return providerFailure("linkace.save")(data);
+        },
         init: {
           method: "POST",
-          body: JSON.stringify({
-            url: article.url,
-            title: article.title,
-            visibility: 1, // 1 = public, 2 = internal, 3 = private
-            check_disabled: false,
-          }),
+          body: JSON.stringify(payload),
         },
-      });
-      const saved = yield* validate(linkaceSaveResponseSchema, data, "linkace.save");
-      return toArticle("data" in saved ? saved.data : saved);
+      }).pipe(
+        Effect.flatMap((data) => validate(linkaceSaveResponseSchema, data, "linkace.save")),
+        Effect.map((saved) => toArticle("data" in saved ? saved.data : saved)),
+        Effect.catchIf(
+          (error): error is ProviderFailure => urlConflict && error instanceof ProviderFailure,
+          (error) =>
+            Effect.gen(function* () {
+              const trashed = yield* findTrashedLink(article.url).pipe(
+                Effect.catchIf(
+                  (lookupError): lookupError is Exclude<TransportError, FatalStorageFailure> =>
+                    !(lookupError instanceof FatalStorageFailure),
+                  (lookupError) => {
+                    logger.debug("LinkAce trash lookup after 422 failed", {
+                      code: lookupError._tag,
+                    });
+                    return Effect.void;
+                  },
+                ),
+              );
+              if (!trashed) return yield* Effect.fail(error);
+              const restored = yield* request("linkace.save", "/api/v2/trash/restore", {
+                mutation: "save",
+                providerFailure: restoreProviderFailure("linkace.save"),
+                init: {
+                  method: "PATCH",
+                  body: JSON.stringify({ model: "link", id: trashed.id }),
+                },
+              });
+              const parsed = v.safeParse(linkaceSaveResponseSchema, restored);
+              return toArticle(
+                parsed.success
+                  ? "data" in parsed.output
+                    ? parsed.output.data
+                    : parsed.output
+                  : trashed,
+              );
+            }),
+        ),
+      );
     }),
     deleteArticle: Effect.fn("linkace.delete")(function* (id: number | string) {
       yield* request("linkace.delete", `/api/v2/links/${encodeURIComponent(String(id))}`, {
@@ -126,39 +222,47 @@ export const createLinkaceAdapter = Effect.fn("linkace.acquire")(function* (
       });
     }),
     /**
-     * Update sync sends `created_after`, but LinkAce's link list does not honour it and
-     * returns every link; the repository merges the full listing either way.
+     * LinkAce v2's `GET /api/v2/links` has no `created_after` or `modified_since` filter, so every
+     * sync walks the full listing ordered by ascending ID and returns `"overwrite"` mode regardless
+     * of the requested mode so callers always reconcile deletions.
      *
-     * Without a page total, a short page ends the listing. A non-empty page of only
-     * already-seen links means the server ignored `page`, so sync fails instead of looping.
+     * Without a page total, a short page ends the listing. A mismatched `current_page` or a
+     * non-empty page of only already-seen links means the server ignored `page`, so sync fails
+     * instead of looping.
      */
-    sync: Effect.fn("linkace.sync")(function* (options?: SyncOptions) {
-      const perPage = 30;
-      const query = new URLSearchParams({ per_page: String(perPage) });
-      if (options?.lastSyncTimestamp && options.mode === "update") {
-        query.set("created_after", options.lastSyncTimestamp);
-        logger.debug("Sending LinkAce created_after (not honoured by the list endpoint)", {
-          lastSyncTimestamp: options.lastSyncTimestamp,
-        });
-      }
+    sync: Effect.fn("linkace.sync")(function* (_options?: SyncOptions) {
+      const perPage = LINKACE_SYNC_PER_PAGE;
+      const query = new URLSearchParams({
+        per_page: String(perPage),
+        order_by: "id",
+        order_dir: "asc",
+      });
       const articles: Article[] = [];
       const seen = new Set<number>();
       for (let page = 1; ; page++) {
-        // Keeps the one-request-per-second pacing of the shared client this replaces.
+        // Keeps the one-request-per-second pacing for LinkAce's default 60 req/min rate limit.
         if (page > 1) yield* Effect.sleep(1000);
         query.set("page", String(page));
         const data = yield* request("linkace.sync", `/api/v2/links?${query.toString()}`);
         const result = yield* validate(linkacePageSchema, data, "linkace.sync");
-        if (result.data.length > 0 && result.data.every((item) => seen.has(item.id)))
+        const currentPage = result.meta?.current_page ?? result.current_page;
+        if (currentPage !== undefined && currentPage !== page)
           return yield* Effect.fail(new IncompleteSnapshotFailure("linkace.sync"));
-        for (const item of result.data) seen.add(item.id);
-        articles.push(...result.data.map(toArticle));
+        let added = 0;
+        for (const item of result.data) {
+          if (seen.has(item.id)) continue;
+          seen.add(item.id);
+          articles.push(toArticle(item));
+          added++;
+        }
+        if (result.data.length > 0 && added === 0)
+          return yield* Effect.fail(new IncompleteSnapshotFailure("linkace.sync"));
         const lastPage = result.meta?.last_page ?? result.last_page;
         if (lastPage === undefined ? result.data.length !== perPage : page >= lastPage) break;
       }
       return {
         articles,
-        mode: options?.mode ?? "overwrite",
+        mode: "overwrite" as const,
         metadata: {
           totalFetched: articles.length,
           totalProcessed: articles.length,

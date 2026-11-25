@@ -37,21 +37,38 @@ export function validate<S extends v.GenericSchema>(schema: S, data: unknown, op
     : Effect.fail(new InvalidResponseFailure(operation));
 }
 
-export function retryAfterDelay(headers: Headers, fallback: number, now = Date.now()): number {
+export const MAX_AUTO_RETRY_MS = 60_000;
+const MILLISECOND_EPOCH_THRESHOLD = 1e12;
+
+function parseRetryAfterHeader(headers: Headers, now = Date.now()): number | undefined {
   const value = headers.get("Retry-After");
   if (value !== null) {
-    if (/^\d+(?:\.\d+)?$/.test(value.trim())) {
-      const delay = Number(value) * 1000;
-      return Number.isFinite(delay) ? delay : fallback;
+    const trimmed = value.trim();
+    if (/^\d+(?:\.\d+)?$/.test(trimmed)) {
+      const delay = Number(trimmed) * 1000;
+      return Number.isFinite(delay) ? delay : undefined;
     }
-    if (!/[a-zA-Z]/.test(value)) return fallback;
-    const date = Date.parse(value);
-    if (Number.isFinite(date)) return Math.max(0, date - now);
-  } else {
-    const reset = Number(headers.get("X-RateLimit-Reset"));
-    if (reset > 0 && Number.isFinite(reset)) return Math.max(0, reset * 1000 - now);
+    if (!/[a-zA-Z]/.test(trimmed)) return undefined;
+    const date = Date.parse(trimmed);
+    if (Number.isFinite(date)) {
+      const delay = date - now;
+      return delay > 0 ? delay : undefined;
+    }
+    return undefined;
   }
-  return fallback;
+  const resetHeader = headers.get("X-RateLimit-Reset");
+  if (resetHeader === null || resetHeader.trim() === "") return undefined;
+  const reset = Number(resetHeader);
+  if (reset > 0 && Number.isFinite(reset)) {
+    const resetMs = reset > MILLISECOND_EPOCH_THRESHOLD ? reset : reset * 1000;
+    const delay = resetMs - now;
+    return delay > 0 ? delay : undefined;
+  }
+  return undefined;
+}
+
+export function retryAfterDelay(headers: Headers, fallback: number, now = Date.now()): number {
+  return parseRetryAfterHeader(headers, now) ?? fallback;
 }
 
 export function checkHostPermission(url: string, operation: string) {
@@ -86,7 +103,15 @@ export interface EffectRequest {
   /** Returns the raw body instead of parsing JSON. */
   readonly format?: "text";
   /** Maps a provider error envelope in any parsed body to a definitive rejection. */
-  readonly providerFailure?: (data: unknown) => ProviderFailure | RateLimitFailure | undefined;
+  readonly providerFailure?: (
+    data: unknown,
+    status: number,
+  ) => ProviderFailure | RateLimitFailure | undefined;
+  /**
+   * Optional classifier for HTTP 401 JSON responses when a provider reuses 401 for a
+   * non-credential rejection. Returning a failure bypasses `onAuthRejected` and `CredentialsFailure`.
+   */
+  readonly classifyUnauthorized?: (data: unknown) => TransportError | undefined;
   /**
    * A parsed body this rejects is an invalid response; a mutation's outcome stays unknown.
    * A body it accepts is a confirmed success, even if it carries an `error` key.
@@ -144,17 +169,30 @@ export const requestJson = Effect.fn("transport.request")(function* (request: Ef
       });
       if (mutation && !response.ok && response.status < 500) yield* recordMutationOutcome();
       if (!response.ok) yield* storageHealthy;
-      if (response.status === 401 || response.status === 403) {
+      if (response.status === 401) {
+        if (request.classifyUnauthorized) {
+          const data = yield* Effect.tryPromise(
+            async (): Promise<unknown> => JSON.parse(await response.text()),
+          ).pipe(Effect.orElseSucceed(() => undefined));
+          const classified = request.classifyUnauthorized(data);
+          if (classified) return yield* Effect.fail(classified);
+        }
         if (request.onAuthRejected) yield* request.onAuthRejected(authorization);
-        return yield* Effect.fail(new CredentialsFailure(operation));
+        return yield* Effect.fail(new CredentialsFailure(operation, true));
       }
-      if (response.status === 429)
+      if (response.status === 403) {
+        return yield* Effect.fail(new CredentialsFailure(operation, false));
+      }
+      if (response.status === 429) {
+        const headerDelay = parseRetryAfterHeader(response.headers);
         return yield* Effect.fail(
           new RateLimitFailure(
             operation,
-            retryAfterDelay(response.headers, request.rateDelayMs ?? 1000),
+            headerDelay ?? request.rateDelayMs ?? 1000,
+            headerDelay !== undefined,
           ),
         );
+      }
       if (!response.ok) {
         if (request.responseKind === "token" && response.status === 400) {
           const text = yield* Effect.tryPromise({
@@ -172,7 +210,7 @@ export const requestJson = Effect.fn("transport.request")(function* (request: Ef
           const data = yield* Effect.tryPromise(
             async (): Promise<unknown> => JSON.parse(await response.text()),
           ).pipe(Effect.orElseSucceed(() => undefined));
-          const provider = request.providerFailure(data);
+          const provider = request.providerFailure(data, response.status);
           if (provider?._tag === "ProviderFailure" && response.status >= 500)
             return yield* Effect.fail(unknownOutcome(provider));
           if (provider) {
@@ -187,7 +225,7 @@ export const requestJson = Effect.fn("transport.request")(function* (request: Ef
             : new HttpFailure(operation, response.status),
         );
       }
-      if (response.status === 204 || response.status === 205) {
+      const finishEmptySuccess = Effect.gen(function* () {
         if (mutation) {
           confirmed = true;
           reportRemoteOutcome(mutation, "succeeded");
@@ -195,16 +233,22 @@ export const requestJson = Effect.fn("transport.request")(function* (request: Ef
         }
         yield* storageHealthy;
         return undefined;
+      });
+      if (response.status === 204 || response.status === 205) {
+        return yield* finishEmptySuccess;
       }
       const text = yield* Effect.tryPromise({
         try: () => response.text(),
         catch: () => unknownOutcome(new NetworkFailure(operation)),
       });
+      if (request.format !== "text" && mutation && !request.confirms && text.trim() === "") {
+        return yield* finishEmptySuccess;
+      }
       const data = yield* Effect.try({
         try: (): unknown => (request.format === "text" ? text : JSON.parse(text)),
         catch: () => unknownOutcome(new InvalidResponseFailure(operation, request.responseKind)),
       });
-      const provider = request.providerFailure?.(data);
+      const provider = request.providerFailure?.(data, response.status);
       if (provider) {
         if (mutation) yield* recordMutationOutcome();
         yield* storageHealthy;
@@ -246,18 +290,28 @@ export const requestJson = Effect.fn("transport.request")(function* (request: Ef
 
   let authRetries = request.authRetries ?? 0;
   let rateRetries = request.rateRetries ?? 3;
+  let backoffAttempt = 0;
   return yield* attempt.pipe(
     Effect.retry({
       while: (error) =>
         Effect.gen(function* () {
-          if (error instanceof CredentialsFailure && request.recoverAuth && authRetries > 0) {
+          if (
+            error instanceof CredentialsFailure &&
+            error.recoverable &&
+            request.recoverAuth &&
+            authRetries > 0
+          ) {
             authRetries--;
             yield* request.recoverAuth;
             return true;
           }
           if (error instanceof RateLimitFailure && rateRetries > 0) {
+            if (error.retryAfterMs > MAX_AUTO_RETRY_MS) return false;
+            const delayMs = error.serverDirected
+              ? error.retryAfterMs
+              : Math.min(MAX_AUTO_RETRY_MS, error.retryAfterMs * 2 ** backoffAttempt++);
             rateRetries--;
-            yield* Effect.sleep(error.retryAfterMs);
+            yield* Effect.sleep(delayMs);
             return true;
           }
           return false;

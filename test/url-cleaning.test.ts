@@ -1,8 +1,27 @@
-import { test, expect, describe } from "bun:test";
-import { 
-	cleanUrl, 
-	initializeWithRawFilterLists
+import { test, expect, describe, afterEach, mock, spyOn } from "bun:test";
+import * as filterListCleaner from "../src/utils/filter-list-url-cleaner";
+import {
+	cleanUrl,
+	filterRuleCount,
+	initializeWithFilterRules,
+	initializeWithRawFilterLists,
 } from "../src/utils/filter-list-url-cleaner";
+import {
+	initializeUrlCleanerWithRemoteLists,
+	loadCachedFilterLists,
+	loadFilterLists,
+	refreshFilterLists,
+	resetFilterListSources,
+	saveCachedFilterLists,
+	setFilterListSources,
+} from "../src/utils/filter-list-manager";
+import * as filterListParser from "../src/utils/filter-list-parser";
+import { matchesPattern, parseCompleteFilterList } from "../src/utils/filter-list-parser";
+import {
+	CANONICAL_CACHE_LIMIT,
+	canonicalizeUrl,
+	clearCanonicalUrlCache,
+} from "../src/utils/url-helpers";
 import testFilterContent from "./test-data/test-filters.txt";
 
 await initializeWithRawFilterLists([
@@ -174,5 +193,458 @@ describe("Filter List URL Cleaning", () => {
 		const input2 = "https://wildcard.test/page?wc=abc&keep=this";
 		const output2 = await cleanUrl(input2);
 		expect(output2).toBe("https://wildcard.test/page?wc=abc&keep=this");
+	});
+});
+
+describe("Filter List Resilience & Cold Start", () => {
+	const originalBrowser = Object.getOwnPropertyDescriptor(globalThis, "browser");
+	const originalFetch = globalThis.fetch;
+
+	function withLocalStorage(initial: Record<string, unknown> = {}) {
+		const storage: Record<string, unknown> = { ...initial };
+		let removeCalls = 0;
+		Object.assign(globalThis, {
+			browser: {
+				storage: {
+					local: {
+						get: async (keys?: string | string[] | null) => {
+							if (!keys) return { ...storage };
+							const names = typeof keys === "string" ? [keys] : keys;
+							return Object.fromEntries(
+								names.filter((k) => k in storage).map((k) => [k, storage[k]]),
+							);
+						},
+						set: async (values: Record<string, unknown>) => {
+							Object.assign(storage, values);
+						},
+						remove: async (keys: string | string[]) => {
+							removeCalls++;
+							for (const key of typeof keys === "string" ? [keys] : keys) delete storage[key];
+						},
+					},
+				},
+			},
+		});
+		return {
+			storage,
+			getRemoveCalls: () => removeCalls,
+		};
+	}
+
+	afterEach(async () => {
+		globalThis.fetch = originalFetch;
+		if (originalBrowser) Object.defineProperty(globalThis, "browser", originalBrowser);
+		else Reflect.deleteProperty(globalThis, "browser");
+		resetFilterListSources();
+		await initializeWithRawFilterLists([{ name: "TestFilters", content: testFilterContent }]);
+	});
+
+	test("offline/failing refreshFilterLists preserves cached and in-memory rules and keeps cleaning URLs", async () => {
+		const { storage, getRemoveCalls } = withLocalStorage();
+		setFilterListSources([
+			{ name: "ListA", url: "https://filters.example/a.txt" },
+			{ name: "ListB", url: "https://filters.example/b.txt" },
+		]);
+		globalThis.fetch = (async (input: RequestInfo | URL) => {
+			if (String(input).endsWith("/a.txt")) return new Response("$removeparam=utm_a", { status: 200 });
+			return new Response("$removeparam=utm_b", { status: 200 });
+		}) as typeof fetch;
+
+		await initializeUrlCleanerWithRemoteLists();
+		const cachedBefore = structuredClone(storage);
+		const countBefore = filterRuleCount();
+		expect(countBefore).toBe(2);
+		expect(await cleanUrl("https://example.com/page?utm_a=1&utm_b=2&keep=3")).toBe(
+			"https://example.com/page?keep=3",
+		);
+
+		globalThis.fetch = (async () => {
+			throw new TypeError("Network offline");
+		}) as typeof fetch;
+
+		await refreshFilterLists();
+
+		expect(getRemoveCalls()).toBe(0);
+		expect(storage).toEqual(cachedBefore);
+		expect(filterRuleCount()).toBe(countBefore);
+		expect(await cleanUrl("https://example.com/page?utm_a=1&utm_b=2&keep=3")).toBe(
+			"https://example.com/page?keep=3",
+		);
+	});
+
+	test("partial failure (1 of 2 filter lists fails) does not overwrite cache or drop the other list's rules", async () => {
+		const { storage, getRemoveCalls } = withLocalStorage();
+		setFilterListSources([
+			{ name: "ListA", url: "https://filters.example/a.txt" },
+			{ name: "ListB", url: "https://filters.example/b.txt" },
+		]);
+		globalThis.fetch = (async (input: RequestInfo | URL) => {
+			if (String(input).endsWith("/a.txt")) return new Response("$removeparam=utm_a", { status: 200 });
+			return new Response("$removeparam=utm_b", { status: 200 });
+		}) as typeof fetch;
+
+		await initializeUrlCleanerWithRemoteLists();
+		const cachedBefore = structuredClone(storage);
+		expect(await cleanUrl("https://example.com/page?utm_a=1&utm_b=2&utm_new=3&keep=4")).toBe(
+			"https://example.com/page?utm_new=3&keep=4",
+		);
+
+		// Verify parallel fetching and AbortSignal wiring while 1 of 2 sources fails.
+		let started = 0;
+		let bothStarted!: () => void;
+		const parallelGate = new Promise<void>((resolve) => {
+			bothStarted = resolve;
+		});
+		const signals: Array<AbortSignal | undefined> = [];
+
+		globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+			signals.push(init?.signal ?? undefined);
+			started++;
+			if (started === 2) bothStarted();
+			await parallelGate;
+			if (String(input).endsWith("/a.txt")) {
+				return new Response("$removeparam=utm_a\n$removeparam=utm_new", { status: 200 });
+			}
+			return new Response("Service Unavailable", { status: 503 });
+		}) as typeof fetch;
+
+		await refreshFilterLists();
+
+		expect(started).toBe(2);
+		expect(signals.every((signal) => signal instanceof AbortSignal)).toBe(true);
+		expect(getRemoveCalls()).toBe(0);
+		expect(storage).toEqual(cachedBefore);
+		expect(filterRuleCount()).toBe(2);
+		// List B's rule is preserved and partial List A update was not applied.
+		expect(await cleanUrl("https://example.com/page?utm_a=1&utm_b=2&utm_new=3&keep=4")).toBe(
+			"https://example.com/page?utm_new=3&keep=4",
+		);
+
+		const loaded = await loadFilterLists();
+		expect(loaded.allSucceeded).toBe(false);
+	});
+
+	test("expired cache on offline startup still hydrates stale rules instead of wiping URL cleaning", async () => {
+		const { storage } = withLocalStorage();
+		await saveCachedFilterLists(parseCompleteFilterList("$removeparam=utm_stale").rules);
+		storage.filter_list_cache_expiry = Date.now() - 60_000;
+		const expiredCacheBefore = structuredClone(storage);
+
+		initializeWithFilterRules([]);
+		expect(filterRuleCount()).toBe(0);
+
+		setFilterListSources([
+			{ name: "ListA", url: "https://filters.example/a.txt" },
+			{ name: "ListB", url: "https://filters.example/b.txt" },
+		]);
+		globalThis.fetch = (async () => {
+			throw new TypeError("Network offline");
+		}) as typeof fetch;
+
+		await initializeUrlCleanerWithRemoteLists();
+
+		expect(filterRuleCount()).toBe(1);
+		expect(storage).toEqual(expiredCacheBefore);
+		expect(await cleanUrl("https://example.com/page?utm_stale=1&keep=2")).toBe(
+			"https://example.com/page?keep=2",
+		);
+	});
+
+	for (const scenario of [
+		"fresh-cache-race",
+		"expired-cache-slow-remote",
+		"missing-cache-offline-cooldown",
+	]) {
+		test(`cold-start url canonizer: ${scenario}`, () => {
+			const result = Bun.spawnSync(
+				[process.execPath, `${import.meta.dir}/fixtures/url-canonizer-cold-start.ts`, scenario],
+				{ timeout: 10_000 },
+			);
+			expect({
+				status: result.exitCode,
+				error: result.exitCode === 0 ? "" : result.stderr.toString(),
+			}).toEqual({ status: 0, error: "" });
+		});
+	}
+});
+
+describe("Issue #111: $removeparam modifiers, regexes, path tails, and post-unwrap cleaning", () => {
+	const originalBrowser = Object.getOwnPropertyDescriptor(globalThis, "browser");
+
+	function withLocalStorage(initial: Record<string, unknown> = {}) {
+		const storage: Record<string, unknown> = { ...initial };
+		Object.assign(globalThis, {
+			browser: {
+				storage: {
+					local: {
+						get: async (keys?: string | string[] | null) => {
+							if (!keys) return { ...storage };
+							const names = typeof keys === "string" ? [keys] : keys;
+							return Object.fromEntries(
+								names.filter((k) => k in storage).map((k) => [k, storage[k]]),
+							);
+						},
+						set: async (values: Record<string, unknown>) => {
+							Object.assign(storage, values);
+						},
+						remove: async (keys: string | string[]) => {
+							for (const key of typeof keys === "string" ? [keys] : keys) delete storage[key];
+						},
+					},
+				},
+			},
+		});
+		return storage;
+	}
+
+	afterEach(async () => {
+		if (originalBrowser) Object.defineProperty(globalThis, "browser", originalBrowser);
+		else Reflect.deleteProperty(globalThis, "browser");
+		resetFilterListSources();
+		clearCanonicalUrlCache();
+		await initializeWithRawFilterLists([{ name: "TestFilters", content: testFilterContent }]);
+	});
+
+	test("$removeparam=gclsrc,doc removes gclsrc and preserves doc", async () => {
+		const parsed = parseCompleteFilterList("$removeparam=gclsrc,doc");
+		expect(parsed.rules).toHaveLength(1);
+		expect(parsed.rules[0]?.params).toEqual(["gclsrc"]);
+
+		initializeWithFilterRules(parsed.rules);
+		expect(await cleanUrl("https://example.com/page?gclsrc=aw.ds&doc=123")).toBe(
+			"https://example.com/page?doc=123",
+		);
+	});
+
+	test("$removeparam=foo,document,important removes foo and preserves modifier names", async () => {
+		const parsed = parseCompleteFilterList(
+			"$removeparam=foo,document,important\n$doc,removeparam=bar",
+		);
+		expect(parsed.rules).toHaveLength(1);
+		expect(parsed.rules[0]?.params).toEqual(["foo", "bar"]);
+
+		initializeWithFilterRules(parsed.rules);
+		expect(
+			await cleanUrl("https://example.com/page?foo=0&bar=9&document=1&important=2&doc=3"),
+		).toBe("https://example.com/page?document=1&important=2&doc=3");
+	});
+
+	test("rules with non-document or scoping modifiers are skipped without leaking modifier names", async () => {
+		const raw = [
+			"$removeparam=foo,third-party",
+			"$removeparam=foo,image",
+			"$removeparam=foo,xmlhttprequest",
+			"$removeparam=foo,xhr",
+			"$removeparam=foo,script",
+			"$removeparam=foo,subdocument",
+			"$removeparam=foo,~doc",
+			"$removeparam=foo,~document",
+			"$removeparam=foo,badfilter",
+			"$removeparam=foo,doc,third-party",
+			"$removeparam=~keep",
+			"$removeparam=~/^keep_/",
+		].join("\n");
+
+		const parsed = parseCompleteFilterList(raw);
+		expect(parsed.rules).toHaveLength(0);
+
+		initializeWithFilterRules(parsed.rules);
+		const url =
+			"https://example.com/page?foo=1&third-party=2&image=3&xmlhttprequest=4&keep=5&keep_id=6";
+		expect(await cleanUrl(url)).toBe(url);
+	});
+
+	test("regex $removeparam rules (including commas inside /.../) strip matching params and survive JSON/cache round-trip", async () => {
+		const storage = withLocalStorage();
+		const raw = [
+			"$removeparam=/^utm_/",
+			"$removeparam=/^utm_[a-z]{1,10}/,doc",
+			"$removeparam=/^fbclid=/i,important",
+			"$removeparam=/^ref=home$/",
+			"@@||keep-utm.example^$removeparam=utm_source",
+			"$removeparam=/[unclosed",
+			"$removeparam=/^bad/g",
+		].join("\n");
+
+		const parsed = parseCompleteFilterList(raw);
+		expect(parsed.rules).toHaveLength(2);
+
+		// Verify JSON serialization round-trip and storage.local cache round-trip.
+		const jsonRoundTripped = JSON.parse(JSON.stringify(parsed.rules));
+		await saveCachedFilterLists(jsonRoundTripped);
+		const cached = await loadCachedFilterLists();
+		expect(cached).not.toBeNull();
+		expect(Object.keys(storage).length).toBeGreaterThan(0);
+
+		initializeWithFilterRules(cached ?? []);
+
+		expect(
+			await cleanUrl(
+				"https://example.com/article?utm_source=news&utm_medium=email&FBCLID=abc&ref=home&keep=1",
+			),
+		).toBe("https://example.com/article?keep=1");
+
+		expect(
+			await cleanUrl("https://example.com/article?ref=other&my_utm_source=keep&doc=42"),
+		).toBe("https://example.com/article?ref=other&my_utm_source=keep&doc=42");
+
+		// Literal exception rule overrides regex removal for that specific param.
+		expect(
+			await cleanUrl(
+				"https://keep-utm.example/article?utm_source=keep&utm_medium=drop&keep=1",
+			),
+		).toBe("https://keep-utm.example/article?utm_source=keep&keep=1");
+	});
+
+	test("||domain/path prefix matching and separator/end anchors", async () => {
+		await initializeWithRawFilterLists([
+			{
+				name: "PathRules",
+				content: "||example.com/foo$removeparam=bar\n||sep.example/foo^$removeparam=baz",
+			},
+		]);
+
+		expect(await cleanUrl("https://example.com/foo?bar=1&keep=2")).toBe(
+			"https://example.com/foo?keep=2",
+		);
+		expect(await cleanUrl("https://example.com/foo/baz?bar=1&keep=2")).toBe(
+			"https://example.com/foo/baz?keep=2",
+		);
+		expect(await cleanUrl("https://example.com/other?bar=1&keep=2")).toBe(
+			"https://example.com/other?bar=1&keep=2",
+		);
+
+		expect(await cleanUrl("https://sep.example/foo?baz=1&keep=2")).toBe(
+			"https://sep.example/foo?keep=2",
+		);
+		expect(await cleanUrl("https://sep.example/foo/child?baz=1&keep=2")).toBe(
+			"https://sep.example/foo/child?keep=2",
+		);
+		expect(await cleanUrl("https://sep.example/foobar?baz=1&keep=2")).toBe(
+			"https://sep.example/foobar?baz=1&keep=2",
+		);
+
+		expect(matchesPattern("example.com", "||example.com/foo$", "https://example.com/foo")).toBe(
+			true,
+		);
+		expect(
+			matchesPattern("example.com", "||example.com/foo$", "https://example.com/foo/baz"),
+		).toBe(false);
+	});
+
+	test("canonicalizeUrl strips tracking params after unwrapping Google redirects and AMP URLs", async () => {
+		withLocalStorage();
+		await initializeWithRawFilterLists([
+			{
+				name: "UnwrapClean",
+				content: "$removeparam=/^utm_/\n||example.com^$removeparam=ref,doc",
+			},
+		]);
+		clearCanonicalUrlCache();
+
+		expect(
+			await canonicalizeUrl(
+				"https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Farticle%3Futm_source%3Dtest%26ref%3Dg%26keep%3D1&sa=D",
+			),
+		).toBe("https://example.com/article?keep=1");
+
+		expect(
+			await canonicalizeUrl(
+				"https://www.google.com/amp/s/example.com/article?utm_medium=amp&ref=top&keep=1",
+			),
+		).toBe("https://example.com/article?keep=1");
+	});
+});
+
+describe("Issue #112: filter short-circuit and canonicalUrlCache LRU eviction", () => {
+	const originalBrowser = Object.getOwnPropertyDescriptor(globalThis, "browser");
+
+	function withLocalStorage() {
+		const storage: Record<string, unknown> = {};
+		Object.assign(globalThis, {
+			browser: {
+				storage: {
+					local: {
+						get: async (keys?: string | string[] | null) => {
+							if (!keys) return { ...storage };
+							const names = typeof keys === "string" ? [keys] : keys;
+							return Object.fromEntries(
+								names.filter((k) => k in storage).map((k) => [k, storage[k]]),
+							);
+						},
+						set: async (values: Record<string, unknown>) => {
+							Object.assign(storage, values);
+						},
+						remove: async (keys: string | string[]) => {
+							for (const key of typeof keys === "string" ? [keys] : keys) delete storage[key];
+						},
+					},
+				},
+			},
+		});
+		return storage;
+	}
+
+	afterEach(async () => {
+		mock.restore();
+		if (originalBrowser) Object.defineProperty(globalThis, "browser", originalBrowser);
+		else Reflect.deleteProperty(globalThis, "browser");
+		resetFilterListSources();
+		clearCanonicalUrlCache();
+		await initializeWithRawFilterLists([{ name: "TestFilters", content: testFilterContent }]);
+	});
+
+	test("applyFilterRules short-circuits on query-less URLs without scanning filter rules", async () => {
+		await initializeWithRawFilterLists([{ name: "TestFilters", content: testFilterContent }]);
+		expect(filterRuleCount()).toBeGreaterThan(0);
+
+		const matchSpy = spyOn(filterListParser, "matchesPattern");
+
+		for (const url of [
+			"https://example.com/article",
+			"https://example.com/article#section?utm_source=1",
+			"https://example.com/article?",
+		]) {
+			expect(await cleanUrl(url)).toBe(url);
+		}
+		expect(matchSpy).toHaveBeenCalledTimes(0);
+
+		expect(await cleanUrl("https://example.com/article?utm_source=feed&keep=1")).toBe(
+			"https://example.com/article?keep=1",
+		);
+		expect(matchSpy).toHaveBeenCalled();
+	});
+
+	test("canonicalUrlCache uses bounded LRU eviction instead of wiping all entries past capacity", async () => {
+		withLocalStorage();
+		await initializeWithRawFilterLists([
+			{ name: "SimpleRules", content: "$removeparam=utm_source" },
+		]);
+		clearCanonicalUrlCache();
+
+		const cleanSpy = spyOn(filterListCleaner, "cleanUrl");
+
+		// Fill cache to capacity.
+		for (let i = 0; i < CANONICAL_CACHE_LIMIT; i++) {
+			await canonicalizeUrl(`https://example.com/item-${i}`);
+		}
+		expect(cleanSpy).toHaveBeenCalledTimes(CANONICAL_CACHE_LIMIT);
+
+		// Touch the oldest entry so it becomes most-recently-used.
+		await canonicalizeUrl("https://example.com/item-0");
+		expect(cleanSpy).toHaveBeenCalledTimes(CANONICAL_CACHE_LIMIT);
+
+		// Insert one more entry beyond capacity: only the least-recently-used entry (item-1) is evicted.
+		await canonicalizeUrl(`https://example.com/item-${CANONICAL_CACHE_LIMIT}`);
+		expect(cleanSpy).toHaveBeenCalledTimes(CANONICAL_CACHE_LIMIT + 1);
+
+		// Hot entry (item-0) and recent entry (item-{LIMIT-1}) must still be cached.
+		await canonicalizeUrl("https://example.com/item-0");
+		await canonicalizeUrl(`https://example.com/item-${CANONICAL_CACHE_LIMIT - 1}`);
+		expect(cleanSpy).toHaveBeenCalledTimes(CANONICAL_CACHE_LIMIT + 1);
+
+		// Evicted LRU entry (item-1) must miss and recompute.
+		await canonicalizeUrl("https://example.com/item-1");
+		expect(cleanSpy).toHaveBeenCalledTimes(CANONICAL_CACHE_LIMIT + 2);
 	});
 });

@@ -216,7 +216,7 @@ test("concurrent cache mutations commit in order without losing writes", async (
   expect(storage[keys.articles]).toEqual(await runOperation(repository.getAllArticles));
 });
 
-test("merge collapses duplicate canonical URLs instead of keeping both", async () => {
+test("merge collapses duplicate canonical URLs and replaces stale deleted IDs with the new server ID", async () => {
   const { storage } = makeBrowserMock();
   storage[keys.articles] = [article("a1", "https://example.com/a")];
   const repository = new ArticlesRepository();
@@ -235,7 +235,69 @@ test("merge collapses duplicate canonical URLs instead of keeping both", async (
 
   const articles = await runOperation(repository.getAllArticles);
   expect(articles).toHaveLength(1);
-  expect(articles[0]?.id).toBe("a1");
+  expect(articles[0]?.id).toBe("a3");
+});
+
+test("merge normalizes numeric and string IDs without duplicating entries", async () => {
+  const { storage } = makeBrowserMock();
+  storage[keys.articles] = [article(42, "https://example.com/old", "Old Title")];
+  const repository = await makeRepository();
+  spyOn(bookmarks, "sync").mockResolvedValue({
+    articles: [article("42", "https://example.com/updated", "Updated Title")],
+    mode: "update",
+  });
+
+  await runOperation(repository.syncWithAPI({ mode: "update" }));
+
+  const articles = await runOperation(repository.getAllArticles);
+  expect(articles).toHaveLength(1);
+  expect(articles[0]?.id).toBe("42");
+  expect(articles[0]?.title).toBe("Updated Title");
+  expect(articles[0]?.url).toBe("https://example.com/updated");
+});
+
+test("merge replaces stale entry when an article is deleted remotely and re-created with a new ID", async () => {
+  const { storage } = makeBrowserMock();
+  storage[keys.articles] = [
+    { ...article("stale-id", "https://example.com/recreated", "Old"), canonicalUrl: "https://example.com/recreated" },
+    article("other-id", "https://example.com/other", "Other"),
+  ];
+  const repository = new ArticlesRepository();
+  repository.initialize({
+    ...DEFAULT_SETTINGS,
+    backend: "bookmarks",
+    apiConfig: {},
+    normalizeOnCompare: true,
+  } as Parameters<ArticlesRepository["initialize"]>[0]);
+  spyOn(bookmarks, "sync").mockResolvedValue({
+    articles: [article("fresh-id", "https://example.com/recreated", "Fresh")],
+    mode: "update",
+  });
+
+  await runOperation(repository.syncWithAPI({ mode: "update" }));
+
+  const articles = await runOperation(repository.getAllArticles);
+  expect(articles.map((a) => a.id).sort()).toEqual(["fresh-id", "other-id"]);
+  expect(articles.find((a) => a.id === "fresh-id")?.title).toBe("Fresh");
+});
+
+test("getRecentArticles does not mutate cached articles and handles equal created_at deterministically", async () => {
+  const { storage } = makeBrowserMock();
+  const cached: Article[] = [
+    { id: "older", url: "https://example.com/1", title: "Older", created_at: "2026-01-01T00:00:00.000Z" },
+    { id: "tie-1", url: "https://example.com/2", title: "Tie 1", created_at: "2026-01-02T00:00:00.000Z" },
+    { id: "tie-2", url: "https://example.com/3", title: "Tie 2", created_at: "2026-01-02T00:00:00.000Z" },
+    { id: "newest", url: "https://example.com/4", title: "Newest", created_at: "2026-01-03T00:00:00.000Z" },
+  ];
+  storage[keys.articles] = cached;
+  const repository = await makeRepository();
+
+  const page1 = await runOperation(repository.getRecentArticles(1, 10));
+  expect(page1.items.map((a) => a.id)).toEqual(["newest", "tie-1", "tie-2", "older"]);
+
+  // Cached order must remain untouched (no in-place sort mutation).
+  const rawCached = await runOperation(repository.getAllArticles);
+  expect(rawCached.map((a) => a.id)).toEqual(["older", "tie-1", "tie-2", "newest"]);
 });
 
 test("concurrent sync callers share one fetch and both see the final cache", async () => {

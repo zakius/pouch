@@ -1,4 +1,4 @@
-import { Effect } from "effect";
+import { Effect, Semaphore } from "effect";
 import {
   parseRuntimeMessage,
   errorResponse,
@@ -29,7 +29,7 @@ import {
 import { refreshFilterLists } from "../utils/filter-list-manager";
 import { logger } from "../utils/logger";
 import { getMissingOrigins, messageForOrigins } from "../utils/backend-permissions";
-import { getSettings, saveSettings } from "../utils/settings";
+import { DEFAULT_SETTINGS, getSettings, saveSettings, type Settings } from "../utils/settings";
 import { clearCanonicalUrlCache, initializeUrlCanonizer } from "../utils/url-helpers";
 import { ArticlesRepository, getAccountIdentity } from "./articles-repository";
 import { TOKEN_CHECK_ALARM_NAME, TokenManager, tokenManager } from "./token-manager";
@@ -66,6 +66,8 @@ interface Tab {
   id?: number;
   url?: string;
   title?: string;
+  active?: boolean;
+  windowId?: number;
 }
 const REFRESH_INTERVAL = 30;
 
@@ -97,7 +99,22 @@ function run<A, E extends Error>(
 
 // The worker owns one repository: an account change retires the old account's work.
 const articlesRepository = new ArticlesRepository();
-let repositoryInitialized = false;
+const settingsSaveLock = Semaphore.makeUnsafe(1);
+const SETTINGS_KEYS = new Set(Object.keys(DEFAULT_SETTINGS));
+let initializedSettings: Settings | undefined;
+let pendingLocalSettingsWrites = 0;
+
+const readSettings = browserCall("read settings", () => getSettings());
+
+function settingsEqual(a: Settings, b: Settings): boolean {
+  return (
+    a.backend === b.backend &&
+    a.logLevel === b.logLevel &&
+    a.normalizeOnSave === b.normalizeOnSave &&
+    a.normalizeOnCompare === b.normalizeOnCompare &&
+    getAccountIdentity(a) === getAccountIdentity(b)
+  );
+}
 
 // Filter lists may download, so requests don't wait for them; initialize does.
 const urlCanonizer = Effect.runSync(
@@ -139,11 +156,13 @@ const getArticlesRepository = Effect.gen(function* () {
   yield* storageHealthy;
   yield* startup;
   yield* storageHealthy;
-  if (!repositoryInitialized) {
-    const settings = yield* Effect.promise(() => getSettings());
-    // saveSettings may have initialized it with newer settings meanwhile.
-    if (!repositoryInitialized) articlesRepository.initialize(settings);
-    repositoryInitialized = true;
+  if (!initializedSettings) {
+    const settings = yield* readSettings;
+    // saveSettings or storage.onChanged may have initialized it with newer settings meanwhile.
+    if (!initializedSettings) {
+      articlesRepository.initialize(settings);
+      initializedSettings = settings;
+    }
   }
   return articlesRepository;
 });
@@ -165,26 +184,89 @@ const syncInBackground = (reason: string) =>
 const saveSettingsMessage = Effect.fn("background.saveSettings")(function* (
   settings: Parameters<typeof saveSettings>[0],
 ) {
-  const oldSettings = yield* Effect.promise(() => getSettings());
-  if (getAccountIdentity(oldSettings) !== getAccountIdentity(settings))
-    yield* tokenManager.clearToken(oldSettings.backend);
-  yield* storageHealthy;
-  yield* browserCall("save settings", () => saveSettings(settings));
-  yield* storageHealthy;
-  // Retire a replaced account before cleanup: its late writes must not recreate removed keys.
-  // The same account keeps its in-flight work and only takes the new settings.
-  articlesRepository.initialize(settings);
-  repositoryInitialized = true;
-  yield* articlesRepository.removeStaleKeys(settings);
-  clearCanonicalUrlCache();
-  yield* Effect.promise(() => logger.initialize());
-  yield* forkDetachLogged(
-    "Sync after settings change",
-    syncInBackground("Sync after settings change"),
+  return yield* Semaphore.withPermit(
+    settingsSaveLock,
+    Effect.gen(function* () {
+      const oldSettings = initializedSettings ?? (yield* readSettings);
+      const accountChanged = getAccountIdentity(oldSettings) !== getAccountIdentity(settings);
+      const normalizationChanged =
+        oldSettings.normalizeOnSave !== settings.normalizeOnSave ||
+        oldSettings.normalizeOnCompare !== settings.normalizeOnCompare;
+      yield* storageHealthy;
+      yield* Effect.sync(() => {
+        pendingLocalSettingsWrites++;
+      }).pipe(
+        Effect.andThen(browserCall("save settings", () => saveSettings(settings))),
+        Effect.andThen(storageHealthy),
+        Effect.andThen(accountChanged ? tokenManager.clearToken(oldSettings.backend) : Effect.void),
+        Effect.andThen(storageHealthy),
+        Effect.tap(() =>
+          Effect.sync(() => {
+            // Retire a replaced account before cleanup: its late writes must not recreate removed keys.
+            // The same account keeps its in-flight work and only takes the new settings.
+            articlesRepository.initialize(settings);
+            initializedSettings = settings;
+          }),
+        ),
+        Effect.ensuring(
+          Effect.sync(() => {
+            pendingLocalSettingsWrites--;
+          }),
+        ),
+      );
+      if (accountChanged) yield* articlesRepository.removeStaleKeys(settings);
+      if (accountChanged || normalizationChanged) clearCanonicalUrlCache();
+      logger.setLevel(settings.logLevel);
+      yield* refreshActiveTabUi;
+      if (accountChanged || normalizationChanged) {
+        yield* forkDetachLogged(
+          "Sync after settings change",
+          syncInBackground("Sync after settings change"),
+        );
+      }
+      logger.info("Settings saved and API re-initialized.");
+      return { success: true };
+    }),
   );
-  logger.info("Settings saved and API re-initialized.");
-  return { success: true };
 });
+
+const handleSyncSettingsChange = (changes: Record<string, browser.storage.StorageChange>) =>
+  Semaphore.withPermit(
+    settingsSaveLock,
+    Effect.gen(function* () {
+      yield* storageHealthy;
+      yield* startup;
+      yield* storageHealthy;
+      if (pendingLocalSettingsWrites > 0) return;
+      const settings = yield* readSettings;
+      yield* storageHealthy;
+      if (pendingLocalSettingsWrites > 0) return;
+      if (initializedSettings && settingsEqual(initializedSettings, settings)) return;
+      const accountChanged = initializedSettings
+        ? getAccountIdentity(initializedSettings) !== getAccountIdentity(settings)
+        : "backend" in changes || "apiConfig" in changes;
+      const normalizationChanged = initializedSettings
+        ? initializedSettings.normalizeOnSave !== settings.normalizeOnSave ||
+          initializedSettings.normalizeOnCompare !== settings.normalizeOnCompare
+        : "normalizeOnSave" in changes || "normalizeOnCompare" in changes;
+      if (accountChanged) {
+        const oldBackend =
+          initializedSettings?.backend ??
+          (typeof changes.backend?.oldValue === "string"
+            ? changes.backend.oldValue
+            : settings.backend);
+        yield* tokenManager.clearToken(oldBackend);
+      }
+      yield* storageHealthy;
+      articlesRepository.initialize(settings);
+      initializedSettings = settings;
+      if (accountChanged) yield* articlesRepository.removeStaleKeys(settings);
+      if (accountChanged || normalizationChanged) clearCanonicalUrlCache();
+      logger.setLevel(settings.logLevel);
+      yield* refreshActiveTabUi;
+      logger.info("Applied out-of-band synced settings change.");
+    }),
+  );
 
 const handleMessage = Effect.fn("background.message")(function* (rawMessage: unknown) {
   const message = yield* Effect.try({
@@ -203,6 +285,7 @@ const handleMessage = Effect.fn("background.message")(function* (rawMessage: unk
       const title = (message.payload.title || "").trim();
       if (!url) return invalidRequest("URL is required");
       if (!isValidUrl(url)) return invalidRequest("Invalid URL format");
+      if (!isValidHttpUrl(url)) return invalidRequest("Only HTTP and HTTPS URLs can be saved");
       const repository = yield* getArticlesRepository;
       const savedArticle = yield* repository.saveArticle({ url, title });
       yield* refreshActiveTabUi;
@@ -210,7 +293,7 @@ const handleMessage = Effect.fn("background.message")(function* (rawMessage: unk
     }
     case "checkArticle": {
       const url = message.payload.url?.trim();
-      if (!url || !isValidUrl(url)) return undefined;
+      if (!url || !isValidHttpUrl(url)) return undefined;
       const repository = yield* getArticlesRepository;
       return yield* repository.findSaved(url);
     }
@@ -278,13 +361,17 @@ browser.contextMenus.onClicked.addListener((info: OnClickData, tab?: Tab) =>
   run(
     "Context menu",
     Effect.gen(function* () {
-      const repository = yield* getArticlesRepository;
       if (info.menuItemId === "save-link" && info.linkUrl) {
-        yield* repository.saveArticle({ url: info.linkUrl, title: "" });
+        const linkUrl = info.linkUrl.trim();
+        if (!isValidHttpUrl(linkUrl)) {
+          logger.warn("Ignoring link with invalid URL:", info.linkUrl);
+          return;
+        }
+        const repository = yield* getArticlesRepository;
+        yield* repository.saveArticle({ url: linkUrl, title: "", resolveFinalUrl: true });
         if (tab?.id !== undefined) yield* updateUiForTab(tab.id);
-      } else if (info.menuItemId === "save-page" && tab?.url) {
-        yield* toggle(repository, tab.url, tab.title ?? "");
-        if (tab.id) yield* updateUiForTab(tab.id);
+      } else if (info.menuItemId === "save-page" && tab) {
+        yield* togglePageSave(tab);
       }
     }),
     (error) => notifyError(info.menuItemId === "save-page" ? "toggle page" : "save link", error),
@@ -319,24 +406,26 @@ async function showFatalUi(): Promise<void> {
   await browser.contextMenus
     .update("save-link", { title: "Pouch stopped: local storage failed", enabled: false })
     .catch(() => {});
-  if (!IS_CHROMIUM) {
-    await browser.tabs
-      .query({})
-      .then(async (tabs) => {
-        for (const tab of tabs) {
-          if (tab.id === undefined) continue;
-          await browser.pageAction.setIcon({
-            tabId: tab.id,
-            path: browser.runtime.getURL("icons/icon.svg"),
-          });
-          await Promise.resolve(
-            browser.pageAction.setTitle({
-              tabId: tab.id,
-              title: "Pouch stopped: local storage failed",
-            }),
-          );
-        }
-      })
+  if (IS_CHROMIUM) return;
+  const tabs = await browser.tabs.query({}).catch(() => []);
+  for (const tab of tabs) {
+    if (tab.id === undefined) continue;
+    const tabId = tab.id;
+    await Promise.resolve()
+      .then(() =>
+        browser.pageAction.setIcon({
+          tabId,
+          path: browser.runtime.getURL("icons/icon.svg"),
+        }),
+      )
+      .catch(() => {});
+    await Promise.resolve()
+      .then(() =>
+        browser.pageAction.setTitle({
+          tabId,
+          title: "Pouch stopped: local storage failed",
+        }),
+      )
       .catch(() => {});
   }
 }
@@ -354,7 +443,13 @@ const notifyToggleFailure = (error: Error) => notifyError("toggle page", error);
 const PERMISSIONS_NOTIFICATION_ID = "pouch-permissions";
 async function warnIfPermissionsMissing(): Promise<void> {
   if (getStorageDiagnostic()) return;
-  const settings = await getSettings();
+  let settings: Settings;
+  try {
+    settings = await getSettings();
+  } catch (error) {
+    logger.warn("Failed to read settings while checking permissions:", error);
+    return;
+  }
   const missing = await getMissingOrigins(settings);
   if (missing.length === 0) {
     return;
@@ -389,46 +484,81 @@ const toggle = (repository: ArticlesRepository, url: string, title: string) =>
       yield* repository.saveArticle({ url, title });
     }
   });
+const inFlightToggles = new Set<string>();
 const togglePageSave = (tab: Tab) =>
   Effect.gen(function* () {
-    if (!tab.url || !isValidHttpUrl(tab.url)) {
+    const url = tab.url?.trim();
+    if (!url || !isValidHttpUrl(url)) {
       logger.warn("Ignoring page with invalid URL:", tab.url);
       return;
     }
-    const repository = yield* getArticlesRepository;
-    yield* toggle(repository, tab.url, tab.title || "Untitled");
-    if (tab.id) yield* updateUiForTab(tab.id);
-  });
-if (IS_CHROMIUM) {
-  browser.runtime.onMessageExternal.addListener((message: QuickActionMessage, sender) => {
-    if (sender.id !== QUICK_ACTIONS_ID) return undefined;
-    // After shutdown the diagnostic is answered without the stopped runtime.
-    const diagnostic = getStorageDiagnostic();
-    if (message?.type === "getStorageDiagnostic")
-      return runOperation(readStorageDiagnostic).catch(
-        () => getStorageDiagnostic() ?? { error: "Storage initialization failed" },
-      );
-    if (diagnostic)
-      return browser.runtime
-        .sendMessage(QUICK_ACTIONS_ID, { type: "fatalStorage", error: diagnostic.error })
-        .then(
-          () => undefined,
-          () => undefined,
-        );
-    return run(
-      "Quick Actions",
-      Effect.gen(function* () {
-        if (message?.type === "togglePage") {
-          const tab = yield* browserCall("read tab", () => browser.tabs.get(message.tabId));
-          yield* togglePageSave(tab);
-        } else if (message?.type === "refreshUi") {
-          yield* refreshActiveTabUi;
+    const keys = tab.id !== undefined ? [`tab:${tab.id}`, `url:${url}`] : [`url:${url}`];
+    yield* Effect.acquireUseRelease(
+      Effect.sync(() => {
+        if (keys.some((key) => inFlightToggles.has(key))) {
+          logger.debug("Ignoring concurrent toggle already in flight:", { tabId: tab.id, url });
+          return false;
         }
-        return undefined;
+        for (const key of keys) inFlightToggles.add(key);
+        return true;
       }),
-      notifyToggleFailure,
+      (acquired) =>
+        acquired
+          ? Effect.gen(function* () {
+              const repository = yield* getArticlesRepository;
+              yield* toggle(repository, url, tab.title || "Untitled");
+              if (tab.id !== undefined) yield* updateUiForTab(tab.id);
+            })
+          : Effect.void,
+      (acquired) =>
+        acquired
+          ? Effect.sync(() => {
+              for (const key of keys) inFlightToggles.delete(key);
+            })
+          : Effect.void,
     );
   });
+if (IS_CHROMIUM) {
+  browser.runtime.onMessageExternal.addListener(
+    (
+      message: QuickActionMessage,
+      sender: browser.runtime.MessageSender,
+      sendResponse: (response?: unknown) => void,
+    ): boolean | undefined => {
+      if (sender.id !== QUICK_ACTIONS_ID) return undefined;
+      // After shutdown the diagnostic is answered without the stopped runtime.
+      const diagnostic = getStorageDiagnostic();
+      if (message?.type === "getStorageDiagnostic") {
+        void runOperation(readStorageDiagnostic)
+          .catch(() => getStorageDiagnostic() ?? { error: "Storage initialization failed" })
+          .then((result) => sendResponse(result));
+        return true;
+      }
+      if (diagnostic) {
+        void browser.runtime
+          .sendMessage(QUICK_ACTIONS_ID, { type: "fatalStorage", error: diagnostic.error })
+          .then(
+            () => sendResponse(undefined),
+            () => sendResponse(undefined),
+          );
+        return true;
+      }
+      void run(
+        "Quick Actions",
+        Effect.gen(function* () {
+          if (message?.type === "togglePage") {
+            const tab = yield* browserCall("read tab", () => browser.tabs.get(message.tabId));
+            yield* togglePageSave(tab);
+          } else if (message?.type === "refreshUi") {
+            yield* refreshActiveTabUi;
+          }
+          return undefined;
+        }),
+        notifyToggleFailure,
+      ).then(() => sendResponse(undefined));
+      return true;
+    },
+  );
 } else {
   browser.pageAction.onClicked.addListener((tab) => {
     void run("Page action", togglePageSave(tab), notifyToggleFailure);
@@ -451,15 +581,36 @@ browser.commands.onCommand.addListener((command) =>
 function getIconPath(isSaved: boolean): string {
   return browser.runtime.getURL(`icons/page-action-${isSaved ? "saved" : "unsaved"}.svg`);
 }
+const isWindowFocused = (windowId?: number): Effect.Effect<boolean> =>
+  windowId === undefined || typeof browser.windows?.get !== "function"
+    ? Effect.succeed(true)
+    : browserCall("read window", () => browser.windows.get(windowId)).pipe(
+        Effect.map((win) => win.focused !== false),
+        Effect.orElseSucceed(() => false),
+      );
 /** Never fails: an unknown page state shows as such, and a fatal stop shows the stopped UI. */
-const updateUiForTab = (tabId: number) =>
-  Effect.gen(function* () {
+const updateUiForTab = (tabId: number, knownTab?: Tab) => {
+  let shouldUpdateContextMenu = false;
+  return Effect.gen(function* () {
     yield* storageHealthy;
-    const tab = yield* browserCall("read tab", () => browser.tabs.get(tabId));
+    const tab: Tab = knownTab ?? (yield* browserCall("read tab", () => browser.tabs.get(tabId)));
     yield* storageHealthy;
-    if (!tab.url || !isValidHttpUrl(tab.url)) return;
+    shouldUpdateContextMenu = tab.active !== false && (yield* isWindowFocused(tab.windowId));
+    const url = tab.url?.trim();
+    if (!url || !isValidHttpUrl(url)) {
+      if (shouldUpdateContextMenu) {
+        yield* browserCall("update menu", () =>
+          browser.contextMenus.update("save-page", {
+            title: "Save page",
+            enabled: false,
+          }),
+        );
+        yield* storageHealthy;
+      }
+      return;
+    }
     const repository = yield* getArticlesRepository;
-    const isSaved = !!(yield* repository.findSaved(tab.url));
+    const isSaved = !!(yield* repository.findSaved(url));
     yield* storageHealthy;
     if (IS_CHROMIUM) {
       const state: PageStateMessage = { type: "pageState", tabId, saved: isSaved };
@@ -484,21 +635,25 @@ const updateUiForTab = (tabId: number) =>
       yield* browserCall("show page action", () => browser.pageAction.show(tabId));
     }
     yield* storageHealthy;
-    yield* browserCall("update menu", () =>
-      browser.contextMenus.update("save-page", {
-        title: isSaved ? "Remove page" : "Save page",
-        enabled: true,
-      }),
-    );
-    yield* storageHealthy;
+    if (shouldUpdateContextMenu) {
+      yield* browserCall("update menu", () =>
+        browser.contextMenus.update("save-page", {
+          title: isSaved ? "Remove page" : "Save page",
+          enabled: true,
+        }),
+      );
+      yield* storageHealthy;
+    }
   }).pipe(
     Effect.catch((error) =>
       Effect.promise(async () => {
         if (!getStorageDiagnostic()) {
           logger.error("Error updating UI for tab:", error);
-          await browser.contextMenus
-            .update("save-page", { title: "Unable to determine page status", enabled: false })
-            .catch(() => {});
+          if (shouldUpdateContextMenu) {
+            await browser.contextMenus
+              .update("save-page", { title: "Unable to determine page status", enabled: false })
+              .catch(() => {});
+          }
         }
         if (getStorageDiagnostic()) await showFatalUi();
       }),
@@ -506,20 +661,23 @@ const updateUiForTab = (tabId: number) =>
     // Shutdown waits for dispatched browser calls, so the fatal UI is applied after them.
     Effect.uninterruptible,
   );
+};
 // Popup-initiated saves and deletes bypass the page-action toggle, so the
 // icon and the context-menu entry would go stale until the next navigation or
 // tab switch. Refresh the tab the popup is acting on.
-const refreshActiveTabUi = Effect.gen(function* () {
-  const tabs = yield* browserCall("query tabs", () =>
-    browser.tabs.query({ active: true, currentWindow: true }),
+const refreshActiveTabUiForWindow = (windowId?: number) =>
+  Effect.gen(function* () {
+    const queryInfo: browser.tabs._QueryQueryInfo =
+      windowId !== undefined ? { active: true, windowId } : { active: true, currentWindow: true };
+    const tabs = yield* browserCall("query tabs", () => browser.tabs.query(queryInfo));
+    const tab = tabs[0];
+    if (tab?.id !== undefined) yield* updateUiForTab(tab.id, tab);
+  }).pipe(
+    Effect.catchTag("BrowserFailure", (error) =>
+      Effect.sync(() => logger.error("Error refreshing active tab UI:", error)),
+    ),
   );
-  const tab = tabs[0];
-  if (tab?.id !== undefined) yield* updateUiForTab(tab.id);
-}).pipe(
-  Effect.catchTag("BrowserFailure", (error) =>
-    Effect.sync(() => logger.error("Error refreshing active tab UI:", error)),
-  ),
-);
+const refreshActiveTabUi = refreshActiveTabUiForWindow();
 function isValidHttpUrl(url: string) {
   try {
     const urlObj = new URL(url);
@@ -533,19 +691,25 @@ const onTabUpdated = (
   changeInfo: browser.tabs._OnUpdatedChangeInfo,
   tab: browser.tabs.Tab,
 ) => {
-  if (changeInfo.status === "complete" && tab.url && isValidHttpUrl(tab.url)) {
-    void run("Tab update", updateUiForTab(tabId));
+  if (changeInfo.status === "complete" || changeInfo.url !== undefined) {
+    const updatedTab: Tab = changeInfo.url !== undefined ? { ...tab, url: changeInfo.url } : tab;
+    void run("Tab update", updateUiForTab(tabId, updatedTab));
   }
 };
 // Chromium has no filter argument and rejects one.
 if (IS_CHROMIUM) {
   browser.tabs.onUpdated.addListener(onTabUpdated);
 } else {
-  browser.tabs.onUpdated.addListener(onTabUpdated, { properties: ["status"] });
+  browser.tabs.onUpdated.addListener(onTabUpdated, { properties: ["status", "url"] });
 }
 browser.tabs.onActivated.addListener((activeInfo) =>
   run("Tab activation", updateUiForTab(activeInfo.tabId)),
 );
+const WINDOW_ID_NONE = browser.windows?.WINDOW_ID_NONE ?? -1;
+browser.windows?.onFocusChanged?.addListener((windowId) => {
+  if (windowId === WINDOW_ID_NONE || windowId === -1) return;
+  void run("Window focus", refreshActiveTabUiForWindow(windowId));
+});
 
 // A menu or alarm created while shutdown starts is disabled or cleared before shutdown completes.
 const createMenu = (properties: browser.menus._CreateCreateProperties) =>
@@ -601,9 +765,9 @@ browser.alarms.onAlarm.addListener((alarm) =>
       yield* startup;
       yield* storageHealthy;
       if (alarm.name === TOKEN_CHECK_ALARM_NAME) {
-        // Refreshes the tokens of the backends in use since the background
-        // started. A Chromium service worker that this alarm woke has none: its
-        // adapter logs in or refreshes when the backend is next used.
+        // Clear any legacy repeating alarm from earlier versions; checkAndRefreshTokens
+        // stays safe (no password login, no token drop) if invoked before cleanup.
+        yield* tokenManager.clearLegacyAlarm;
         yield* tokenManager.checkAndRefreshTokens;
       } else if (alarm.name === "refresh") {
         const repository = yield* getArticlesRepository;
@@ -623,6 +787,12 @@ browser.alarms.onAlarm.addListener((alarm) =>
     }),
   ),
 );
+browser.storage.onChanged?.addListener((changes, areaName) => {
+  if (areaName !== "sync" || pendingLocalSettingsWrites > 0) return;
+  if (!Object.keys(changes).some((key) => SETTINGS_KEYS.has(key))) return;
+  void run("Sync settings change", handleSyncSettingsChange(changes));
+});
+
 browser.runtime.onInstalled.addListener(async (details) => {
   if (details.reason === "install" || details.reason === "update") {
     await run("Initialization", initialize);

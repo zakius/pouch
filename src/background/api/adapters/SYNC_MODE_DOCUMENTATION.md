@@ -2,47 +2,42 @@
 
 ## Summary Table
 
-| Backend    | Incremental Support       | Deletion Tracking | Strategy                   |
-| ---------- | ------------------------- | ----------------- | -------------------------- |
-| Instapaper | ✅ Yes                    | ✅ Yes            | Incremental only           |
-| Wallabag   | ✅ Yes (since)            | ❌ No             | Periodic full syncs (24h)  |
-| Raindrop   | ⚠️ Partial (search)       | ❌ No             | Periodic full syncs (48h)  |
-| LinkAce    | ⚠️ Likely (created_after) | ❓ Unknown        | Periodic full syncs (48h)  |
-| Linkwarden | ❓ Uncertain              | ❓ Unknown        | Needs testing/verification |
-| KaraKeep   | ❌ No                     | N/A               | Full sync only             |
-| Bookmarks  | ❌ No                     | N/A               | Full sync only             |
+| Backend    | Incremental Support                     | Deletion Tracking                   | Strategy                                                         |
+| ---------- | --------------------------------------- | ----------------------------------- | ---------------------------------------------------------------- |
+| Instapaper | ✅ Yes (API v2 `since`)                 | ✅ Yes (`deleted_ids` + `archived`) | True incremental sync + periodic full syncs (24h idle / 48h max) |
+| Wallabag   | ✅ Yes (since)                          | ❌ No                               | Periodic full syncs (24h)                                        |
+| Raindrop   | ⚠️ Partial (`sort=-created` early-stop) | ❌ No                               | Periodic full syncs (24h idle / 48h max)                         |
+| LinkAce    | ❌ No                                   | N/A                                 | Full sync only                                                   |
+| Linkwarden | ⚠️ Partial (`sort=0` ID early-stop)     | ❌ No                               | Periodic full syncs (24h idle / 48h max)                         |
+| KaraKeep   | ❌ No                                   | N/A                                 | Full sync only                                                   |
+| Bookmarks  | ❌ No                                   | N/A                                 | Full sync only                                                   |
 
 ## Detailed Backend Analysis
 
-### 1. Instapaper ✅ FULL INCREMENTAL SUPPORT
+### 1. Instapaper ✅ FULL INCREMENTAL SUPPORT WITH DELETIONS (API v2)
 
-- **API:** https://www.instapaper.com/api
-- **Method:** `have` parameter with hash-based change detection
-- **Deletions:** ✅ Yes - returns `delete_ids` array
-- **Strategy:** Use incremental sync exclusively (no full syncs needed)
-- **Implementation:** `instapaper-adapter.ts:239-307`
+- **API:** https://www.instapaper.com/developers/v2 (`GET /api/2/bookmarks`, OpenAPI: `https://www.instapaper.com/api/2/openapi.json`)
+- **Authentication:** OAuth 2 / personal Bearer token (`Authorization: Bearer <token>`); legacy v1 `oauth_token` persisted in `TokenManager` is automatically reused as a v2 Bearer token during migration
+- **Method:** `offset`/`total` pagination (`limit=500`) for full snapshots (`section=home`), and `since` (Unix seconds with 120s clock-skew overlap) for incremental syncs
+- **Deletions:** ✅ Yes — `since` responses include `deleted_ids` for permanently deleted bookmarks and return archived bookmarks with `archived: true`; both are surfaced in `SyncResult.deletedIds` and purged from `ArticlesRepository` cache during `"update"` merges
+- **Strategy:** Hybrid incremental sync (`since`) + periodic full syncs (24h when idle, forced at 48h) as a reconciliation safety net
+- **Implementation:** `instapaper-adapter.ts`
 
 **How it works:**
 
-1. Send comma-separated list of bookmark IDs we already have
-2. Server returns only NEW or UPDATED bookmarks (based on hash changes)
-3. Server also returns `delete_ids[]` array with deleted bookmark IDs
-4. Hash-based change detection ensures efficient transfers
+1. Full (`"overwrite"`) sync paginates `GET /api/2/bookmarks?section=home&limit=500&offset=<n>` until `offset >= total`, removing API v1's 500-bookmark cap
+2. Incremental (`"update"`) sync requests `GET /api/2/bookmarks?limit=500&offset=<n>&since=<unix>` with `since = Math.floor(lastSyncMs / 1000) - 120`
+3. Per the API v2 OpenAPI spec, changed bookmarks and `deleted_ids` share each page in `since` mode; `offset` advances by `bookmarks.length + deleted_ids.length` and stops when a page returns fewer than `limit` combined items or `offset >= total`
+4. Bookmarks returned with `archived: true` in `since` mode are added to `deletedIds` so they are removed from the local unread cache; un-archived bookmarks (`archived: false`) are merged back in
+5. Bookmarks with `url: null` (private content without a URL) are skipped cleanly without stalling pagination
+6. Deduplicates bookmark IDs across pages and fails with `IncompleteSnapshotFailure` if a page makes no progress (`newItemsOnPage === 0`) or returns empty while `offset < total`
 
-**Benefits:**
+**Hybrid Strategy:**
 
-- Efficient: Only transfers changed data
-- Complete: Tracks additions, updates, AND deletions
-- Fast: Can use incremental sync exclusively
-
-**Example usage:**
-
-```typescript
-// have parameter format: "12345:OjMuzFp6,12346:0n4ONgYs"
-// Each entry: ID:hash (hash detects content changes)
-const have = allArticles.map((a) => a.id).join(",");
-params.have = have;
-```
+- First sync or missing/invalid `lastSyncTimestamp` → FULL (`overwrite`)
+- Last full sync ≥ 48h ago → FULL (`overwrite`)
+- Last full sync ≥ 24h ago + browser idle → FULL (`overwrite`)
+- Otherwise → INCREMENTAL (`update` with `since` + `deleted_ids`)
 
 ---
 
@@ -82,112 +77,102 @@ params.set("since", unixTimestamp.toString());
 
 ---
 
-### 3. Raindrop ⚠️ INCREMENTAL VIA SEARCH SYNTAX
+### 3. Raindrop ⚠️ INCREMENTAL VIA `sort=-created` EARLY-STOP
 
 - **API:** https://developer.raindrop.io/
-- **Method:** Search parameter `created:>UNIX_TIMESTAMP`
-- **Deletions:** ❌ No - only filters by creation date
-- **Strategy:** Incremental sync + periodic full syncs every 48h
-- **Implementation:** `raindrop-adapter.ts:179-255`
+- **Method:** Paginate `GET /raindrops/0?page=<p>&perpage=50&sort=-created` and stop early client-side once `created < lastSyncTimestamp - 120s`
+- **Deletions:** ❌ No - incremental sync only captures newly created raindrops
+- **Strategy:** Hybrid incremental sync + periodic full syncs (24h when idle, forced at 48h)
+- **Implementation:** `raindrop-adapter.ts`
 
 **How it works:**
 
-1. Uses search syntax for incremental filtering
-2. Search syntax: `created:>UNIX_TIMESTAMP`
-3. Timestamp must be Unix timestamp in SECONDS
-4. Does NOT track deletions or updates to existing items
-
-**Search syntax example:**
-
-```typescript
-// Convert ISO string to Unix timestamp in seconds
-const unixTimestamp = Math.floor(new Date(lastSyncTimestamp).getTime() / 1000);
-queryParams.set("search", `created:>${unixTimestamp}`);
-```
+1. Requests pages ordered newest-first (`sort=-created`) without a `search` parameter (Raindrop's `created:` search operator only supports calendar dates `YYYY-MM-DD`, not Unix timestamps)
+2. In `"update"` mode, computes a cutoff `Date.parse(lastSyncTimestamp) - 120_000` (2-minute clock-skew overlap)
+3. Keeps items with unparseable `created` or `created >= cutoffMs`; once an item older than `cutoffMs` is seen, finishes the current page and stops paginating early
+4. Deduplicates items by `_id` across pages and fails with `IncompleteSnapshotFailure` if a full page yields no new IDs
+5. Falls back to `"overwrite"` when `lastSyncTimestamp` is missing/invalid, on first sync, after 24h when idle, or after 48h overdue
 
 **Limitations:**
 
-- Only filters by creation date
-- Does NOT track deletions
-- Does NOT track updates to existing raindrops
+- Only captures newly created raindrops during incremental sync
+- Does NOT track deletions (reconciled on periodic full syncs)
+- Does NOT track updates to older existing raindrops (reconciled on periodic full syncs)
 
-**Strategy:**
+**Hybrid Strategy:**
 
-- Use incremental sync for quick updates
-- Perform full sync every 24-48 hours to catch deletions
+- First sync or missing/invalid `lastSyncTimestamp` → FULL (`overwrite`)
+- Last full sync ≥ 48h ago → FULL (`overwrite`)
+- Last full sync ≥ 24h ago + browser idle → FULL (`overwrite`)
+- Otherwise → INCREMENTAL (`update`)
 
 ---
 
-### 4. LinkAce ⚠️ DOCUMENTED INCREMENTAL SUPPORT
+### 4. LinkAce ❌ NO INCREMENTAL SUPPORT
 
 - **API:** https://api-docs.linkace.org/
-- **Method:** `created_after` parameter (ISO 8601)
-- **Deletions:** ❓ Unknown - not documented
-- **Strategy:** Incremental sync + periodic full syncs every 48h
-- **Implementation:** `linkace-adapter.ts:194-267`
+- **Endpoint:** `GET /api/v2/links?per_page=200&order_by=id&order_dir=asc&page=<n>`
+- **Method:** Full sync only (`GET /api/v2/links` does not support `created_after` or `modified_since`)
+- **Deletions:** N/A (full sync only; always returns `mode: "overwrite"` so deletions are reconciled on every sync)
+- **Strategy:** Full sync only - fetch all links ordered by ascending ID with `per_page=200` and 1s inter-page pacing (for LinkAce's default 60 req/min rate limit)
+- **Implementation:** `linkace-adapter.ts`
 
 **How it works:**
 
-1. Uses `created_after` parameter
-2. Format: ISO 8601 timestamp string
-3. Filters links created after timestamp
+1. Requests `GET /api/v2/links` with `per_page=200`, `order_by=id`, `order_dir=asc`, and `page=<n>`
+2. Ascending ID ordering keeps newly inserted links at the tail so earlier pages do not shift during pagination
+3. Deduplicates links by `id` across pages and fails with `IncompleteSnapshotFailure` if `current_page` mismatches or a non-empty page yields no new IDs
+4. Always returns `mode: "overwrite"` even when a caller requests `"update"`, ensuring deletions are reconciled after every full fetch
 
-**Example usage:**
+**Limitations:**
 
-```typescript
-// LinkAce documents created_after parameter for incremental sync
-// Format: ISO 8601 timestamp string
-if (options?.lastSyncTimestamp && options.mode === "update") {
-  baseParams.set("created_after", options.lastSyncTimestamp);
-}
-```
-
-**Unknowns:**
-
-- Deletion tracking: Not documented
-- Update tracking: Not documented
-
-**Strategy:**
-
-- Use incremental sync for speed
-- Perform periodic full syncs to catch potential deletions
+- `GET /api/v2/links` in LinkAce v2 does not support `created_after` or any timestamp filter (verified against `API/LinkController::index` and the OpenAPI spec)
+- Must fetch all links on every sync
+- Default API rate limit is 60 requests/minute, so multi-page sync pauses 1s between pages
 
 ---
 
-### 5. Linkwarden ❌ UNCERTAIN - NEEDS TESTING
+### 5. Linkwarden ⚠️ INCREMENTAL VIA `sort=0` ID EARLY-STOP
 
 - **API:** https://docs.linkwarden.app/api/
-- **Method:** Unknown - docs incomplete
-- **Current code assumes:** `createdAfter` parameter
-- **Status:** ⚠️ UNVERIFIED - May not work as expected
-- **Action needed:** Test and document actual behavior
-- **Implementation:** `linkwarden-adapter.ts:187-225`
+- **Endpoint:** `GET /api/v1/search?sort=0` (cursor-paginated via `cursor=<nextCursor>`)
+- **Method:** Paginate `GET /api/v1/search?sort=0` (ordered strictly by `id desc`, without pinned-first ordering) and stop early client-side once any link on the page has `id <= maxKnownNumericId`
+- **Deletions:** ❌ No - incremental sync only captures newly created links
+- **Strategy:** Hybrid incremental sync + periodic full syncs (24h when idle, forced at 48h)
+- **Implementation:** `linkwarden-adapter.ts`
 
-**Problem:**
+**How it works:**
 
-- Old endpoint `/api/v1/links` is DEPRECATED
-- New endpoint `/api/v1/search` recommended
-- But documentation doesn't specify search query parameters
-- Current implementation assumes `createdAfter` parameter exists (UNVERIFIED!)
+1. Requests pages ordered strictly by descending numeric ID (`sort=0`) — `/api/v1/search` has no `createdAfter` or `modifiedSince` parameter
+2. `ArticlesRepository.syncAccount` computes `maxKnownNumericId` from cached articles so incremental sync survives Chromium MV3 service worker restarts
+3. In `"update"` mode, keeps only links with `link.id > maxKnownNumericId` and stops paginating early as soon as any link on the page has `link.id <= maxKnownNumericId`
+4. In `"overwrite"` mode, walks all pages, deduplicates links by `id`, and fails with `IncompleteSnapshotFailure` if `nextCursor` repeats
+5. Falls back to `"overwrite"` on first sync, when `maxKnownNumericId` is missing, after 24h when idle, or after 48h overdue
 
-**Recommended Action:**
+**Limitations:**
 
-1. Test if `/api/v1/links` or `/api/v1/search` accepts `createdAfter` parameter
-2. If yes: Use incremental sync with periodic full syncs
-3. If no: Fall back to full sync only
+- Only captures newly created links during incremental sync
+- Does NOT track deletions (reconciled on periodic full syncs)
+- Does NOT track updates to older existing links (reconciled on periodic full syncs)
+- Requires Linkwarden 2.10 or later (`/api/v1/search`; older `/api/v1/links` is deprecated)
 
-**WARNING:**
-The `createdAfter` parameter may not actually work as expected. If the parameter is ignored, the API will return all results every time.
+**Hybrid Strategy:**
+
+- First sync or missing `maxKnownNumericId` → FULL (`overwrite`)
+- Last full sync ≥ 48h ago → FULL (`overwrite`)
+- Last full sync ≥ 24h ago + browser idle → FULL (`overwrite`)
+- Otherwise → INCREMENTAL (`update`)
 
 ---
 
 ### 6. KaraKeep ❌ NO INCREMENTAL SUPPORT
 
 - **API:** https://docs.karakeep.app/api/get-all-bookmarks/
-- **Available params:** `archived`, `favourited`, `limit`, `cursor` only
-- **Deletions:** N/A (full sync only)
-- **Strategy:** Full sync only - must fetch all bookmarks every time
-- **Implementation:** `karakeep-adapter.ts:159-201`
+- **Endpoint:** `GET /api/v1/bookmarks?limit=100&includeContent=false&archived=false` (`archived` omitted when `includeArchived` is enabled; `cursor` on subsequent pages)
+- **Available params:** `archived`, `favourited`, `limit`, `cursor`, `includeContent`, `sortOrder`
+- **Deletions:** N/A (full sync only; always returns `mode: "overwrite"`)
+- **Strategy:** Full sync only - fetches active bookmarks by default (`archived=false`, configurable via `includeArchived`), unarchiving re-saved archived duplicates on pre-v0.33.1 servers via `PATCH /api/v1/bookmarks/:id`
+- **Implementation:** `karakeep-adapter.ts`
 
 **Limitations:**
 
@@ -198,16 +183,18 @@ The `createdAfter` parameter may not actually work as expected. If the parameter
 
 **Strategy:**
 
-- Always perform full sync (mode parameter is ignored)
+- Always perform full sync (`mode` parameter is ignored; always returns `"overwrite"`)
+- Passes `includeContent=false` to omit large crawled HTML/text payloads and deduplicates bookmark IDs across pages
 - Client-side diffing to detect changes
-- Consider implementing caching to reduce API calls if needed
 
 **Available query parameters:**
 
 - `archived` (boolean) - Filter by archived status
 - `favourited` (boolean) - Filter by favourite status
-- `limit` (number) - Limit number of results
+- `limit` (number) - Limit number of results (max 100)
 - `cursor` (string) - Pagination cursor
+- `includeContent` (boolean) - Include crawled HTML/text content (`false` keeps responses compact)
+- `sortOrder` (`asc` | `desc`) - Result sort order
 
 ---
 
@@ -233,13 +220,12 @@ The `createdAfter` parameter may not actually work as expected. If the parameter
 
 ## Sync Strategy Recommendations
 
-### For Backends with Full Incremental Support (Instapaper)
+### For Backends with Full Incremental Support (Instapaper v2)
 
-- Use incremental sync as default
-- Full sync only on first run or explicit user request
-- No periodic full syncs needed
+- Use `since` incremental sync with `deleted_ids` and `archived` removal handling for fast, accurate updates
+- Keep periodic full syncs (24h idle / 48h max) as a reconciliation safety net
 
-### For Backends with Partial Incremental Support (Wallabag, Raindrop, LinkAce)
+### For Backends with Partial Incremental Support (Wallabag, Raindrop, Linkwarden)
 
 - Use hybrid approach:
   - Incremental sync for speed (every 30 min - 2 hours)
@@ -249,14 +235,14 @@ The `createdAfter` parameter may not actually work as expected. If the parameter
 
 **Recommended intervals:**
 
+- **Instapaper:** Incremental `since` + `deleted_ids` sync; full sync every 24h when idle, or 48h max
 - **Wallabag:** Full sync every 24h (uses hybrid approach internally)
-- **Raindrop:** Full sync every 48h
-- **LinkAce:** Full sync every 48h
+- **Raindrop:** Full sync every 24h when idle, or 48h max (uses hybrid approach internally)
+- **Linkwarden:** Full sync every 24h when idle, or 48h max (uses hybrid ID-based early-stop internally)
 
-### For Backends with No/Uncertain Incremental Support (KaraKeep, Bookmarks, Linkwarden)
+### For Backends with No Incremental Support (LinkAce, KaraKeep, Bookmarks)
 
-- Always use full sync
-- For Linkwarden: Test and verify actual capabilities
+- Always use full sync (and return `mode: "overwrite"` so deletions are reconciled)
 - Consider client-side caching to reduce perceived latency
 
 ---
@@ -275,34 +261,28 @@ All adapters should:
 
 ## Testing Checklist
 
-For each backend with uncertain or partial incremental support:
+For each backend with partial incremental support:
 
-- [ ] Verify incremental sync parameters work as documented
+- [ ] Verify incremental sync parameters / early-stop conditions work as documented
 - [ ] Test if deletions are tracked in incremental mode
 - [ ] Test if updates to existing items are returned
-- [ ] Verify timestamp format (ISO 8601 vs Unix seconds)
+- [ ] Verify cursor / timestamp format (ID vs ISO 8601 vs Unix seconds)
 - [ ] Document actual vs expected behavior
 - [ ] Update implementation based on findings
-
-**Priority for testing:**
-
-1. **Linkwarden** - Uncertain if incremental sync works at all
-2. **LinkAce** - Deletion tracking unknown
-3. **Raindrop** - Verify search syntax works as expected
 
 ---
 
 ## Timestamp Formats Reference
 
-| Backend    | Format                   | Example                |
-| ---------- | ------------------------ | ---------------------- |
-| Instapaper | N/A (uses ID lists)      | `12345,12346,12347`    |
-| Wallabag   | Unix seconds             | `1704067200`           |
-| Raindrop   | Unix seconds (in search) | `created:>1704067200`  |
-| LinkAce    | ISO 8601                 | `2024-01-01T00:00:00Z` |
-| Linkwarden | ISO 8601 (unverified)    | `2024-01-01T00:00:00Z` |
-| KaraKeep   | N/A (full sync only)     | N/A                    |
-| Bookmarks  | N/A (full sync only)     | N/A                    |
+| Backend    | Format                            | Example                |
+| ---------- | --------------------------------- | ---------------------- |
+| Instapaper | Unix seconds (`since`)            | `1704067200`           |
+| Wallabag   | Unix seconds                      | `1704067200`           |
+| Raindrop   | ISO 8601 (client-side early-stop) | `2024-01-01T00:00:00Z` |
+| LinkAce    | N/A (full sync only)              | N/A                    |
+| Linkwarden | N/A (numeric ID early-stop)       | `12345`                |
+| KaraKeep   | N/A (full sync only)              | N/A                    |
+| Bookmarks  | N/A (full sync only)              | N/A                    |
 
 ---
 
@@ -310,7 +290,7 @@ For each backend with uncertain or partial incremental support:
 
 API Documentation:
 
-- [Instapaper Full API](https://www.instapaper.com/api)
+- [Instapaper API v2](https://www.instapaper.com/developers/v2) ([OpenAPI](https://www.instapaper.com/api/2/openapi.json))
 - [Raindrop.io API](https://developer.raindrop.io/)
 - [Wallabag API Documentation](https://doc.wallabag.org/developer/api/)
 - [LinkAce API Reference](https://api-docs.linkace.org/)

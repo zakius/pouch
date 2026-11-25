@@ -30,13 +30,22 @@ export const DEFAULT_SETTINGS: Settings = {
   normalizeOnCompare: false,
 };
 export async function getSettings(): Promise<Settings> {
+  let result: Record<string, unknown>;
   try {
-    const result = await browser.storage.sync.get(Object.keys(DEFAULT_SETTINGS));
-    logger.debug("Retrieved settings from storage:", result);
-    const mergedSettings = { ...DEFAULT_SETTINGS, ...result };
+    result = await browser.storage.sync.get(Object.keys(DEFAULT_SETTINGS));
+  } catch (error) {
+    logger.error("Error reading settings from storage:", error);
+    throw error;
+  }
+  logger.debug("Retrieved settings from storage:", result);
+  try {
+    const definedEntries = Object.fromEntries(
+      Object.entries(result ?? {}).filter(([, value]) => value !== undefined),
+    );
+    const mergedSettings = { ...DEFAULT_SETTINGS, ...definedEntries };
     return v.parse(settingsSchema, mergedSettings);
   } catch (error) {
-    logger.error("Error getting or validating settings:", error);
+    logger.error("Error validating settings:", error);
     return DEFAULT_SETTINGS;
   }
 }

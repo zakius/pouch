@@ -20,8 +20,8 @@ import type { Article } from "../types/common";
 import { getReadyAdapter } from "../utils/adapter-factory";
 import { logger } from "../utils/logger";
 import type { Settings } from "../utils/settings";
-import { canonicalizeUrl } from "../utils/url-helpers";
-import type { SyncOptions, SyncResult } from "./api/read-it-later-adapter";
+import { canonicalizeUrl, getCanonicalCacheGeneration } from "../utils/url-helpers";
+import type { SavingArticle, SyncOptions, SyncResult } from "./api/read-it-later-adapter";
 import type { TokenManager } from "./token-manager";
 
 type Mutation = { type: "save"; article: Article } | { type: "delete"; id: number | string };
@@ -75,6 +75,22 @@ class Shared<A, E> {
   }
 }
 
+type CanonicalIndex = {
+  readonly articles: Article[];
+  readonly generation: number;
+  readonly byCanonical: Map<string, Article>;
+};
+
+type RawIndex = {
+  readonly articles: Article[];
+  readonly byUrl: Map<string, Article>;
+};
+
+type KnownArticleCanonicals = {
+  readonly url: string;
+  readonly givenUrl?: string;
+};
+
 /** One account's state. A different account identity retires it, so its late work never commits. */
 type Account = {
   /** Same-identity settings changes apply in place, so in-flight work still commits. */
@@ -84,6 +100,13 @@ type Account = {
   readonly adapter: Shared<EffectAdapter, AdapterError>;
   readonly sync: Shared<Synced, AdapterError>;
   articles?: Article[];
+  canonicalIndex?: CanonicalIndex;
+  rawIndex?: RawIndex;
+  /** Canonical URLs computed in-memory under a specific cache generation. */
+  knownCanonicals?: {
+    generation: number;
+    byArticle: WeakMap<Article, KnownArticleCanonicals>;
+  };
   timestamps?: { last: string | null; full: number | null };
   /** Mutations committed while a sync fetches; its commit replays them onto the snapshot. */
   pending: Mutation[];
@@ -177,19 +200,66 @@ export class ArticlesRepository {
 
   readonly saveArticle = Effect.fn("repository.save")(function* (
     this: ArticlesRepository,
-    article: Pick<Article, "url" | "title">,
+    article: SavingArticle,
   ) {
     const account = yield* this.active();
+    const { existing, canonicalUrl: precomputedCanonical } = yield* this.findSavedInAccount(
+      account,
+      article.url,
+    ).pipe(
+      Effect.catchTag("BrowserFailure", (error) => {
+        logger.warn("Skipping pre-save duplicate check because local cache read failed:", error);
+        return Effect.succeed({ existing: undefined, canonicalUrl: undefined });
+      }),
+    );
+    if (existing) {
+      logger.debug("Article already saved in cache, skipping remote save:", article.url);
+      return existing;
+    }
+    const canonicalUrl = precomputedCanonical ?? (yield* canonical(article.url));
+    if (
+      !account.settings.normalizeOnCompare &&
+      account.settings.normalizeOnSave &&
+      canonicalUrl !== article.url &&
+      account.articles &&
+      account.articles.length > 0
+    ) {
+      const existingNormalized = this.getRawIndex(account, account.articles).get(canonicalUrl);
+      if (existingNormalized) {
+        logger.debug(
+          "Normalized article already saved in cache, skipping remote save:",
+          canonicalUrl,
+        );
+        return existingNormalized;
+      }
+    }
     const api = yield* this.adapter(account);
-    const canonicalUrl = yield* canonical(article.url);
     // Browser mutations cannot be cancelled after submission; commit and bookkeeping must finish together.
     return yield* Effect.gen({ self: this }, function* () {
       const savedArticle = yield* api.saveArticle({
         url: account.settings.normalizeOnSave ? canonicalUrl : article.url,
         title: article.title,
+        ...(article.resolveFinalUrl !== undefined
+          ? { resolveFinalUrl: article.resolveFinalUrl }
+          : {}),
       });
       reportRemoteOutcome("save", "succeeded");
-      const saved = { ...savedArticle, canonicalUrl };
+      const savedCanonicalUrl =
+        savedArticle.url === article.url || savedArticle.url === canonicalUrl
+          ? canonicalUrl
+          : yield* canonical(savedArticle.url);
+      const savedCanonicalGivenUrl = savedArticle.givenUrl
+        ? savedArticle.givenUrl === article.url || savedArticle.givenUrl === canonicalUrl
+          ? canonicalUrl
+          : yield* canonical(savedArticle.givenUrl)
+        : undefined;
+      const saved: Article = {
+        ...savedArticle,
+        canonicalUrl: savedCanonicalUrl,
+        ...(savedCanonicalGivenUrl && savedCanonicalGivenUrl !== savedCanonicalUrl
+          ? { canonicalGivenUrl: savedCanonicalGivenUrl }
+          : {}),
+      };
       yield* this.commit(account, ["succeeded", "save"], { type: "save", article: saved });
       return saved;
     }).pipe(Effect.uninterruptible);
@@ -259,7 +329,7 @@ export class ArticlesRepository {
         typeof change === "function"
           ? yield* change(articles)
           : yield* this.apply(account, articles, change);
-      if (next !== articles) {
+      if (!articlesEqual(articles, next)) {
         yield* storagePromise(() =>
           setLocal("persist articles", { [account.keys.articles]: next }, outcome, operation),
         );
@@ -284,12 +354,50 @@ export class ArticlesRepository {
         const target = String(mutation.id);
         return articles.filter((a) => String(a.id) !== target);
       }
-      for (const a of articles) {
-        if (yield* this.sameUrl(account, a.url, mutation.article.url)) {
+      if (articles.length === 0) {
+        return [mutation.article];
+      }
+      if (!account.settings.normalizeOnCompare) {
+        const existing =
+          articles === account.articles
+            ? this.getRawIndex(account, articles).get(mutation.article.url)
+            : articles.find(
+                (a) => a.url === mutation.article.url || a.givenUrl === mutation.article.url,
+              );
+        if (existing) {
+          if (
+            String(existing.id) === String(mutation.article.id) &&
+            mutation.article.givenUrl &&
+            existing.givenUrl !== mutation.article.givenUrl
+          ) {
+            return articles.map((a) => (a === existing ? mutation.article : a));
+          }
           logger.debug("Article already exists in cache, skipping add:", mutation.article.url);
           return articles;
         }
+        return [mutation.article, ...articles];
       }
+      let targetCanonicals = yield* this.resolveArticleCanonicals(mutation.article);
+      let genAfterTarget = getCanonicalCacheGeneration();
+      const byCanonical = yield* this.getCanonicalIndex(account, articles);
+      if (getCanonicalCacheGeneration() !== genAfterTarget) {
+        targetCanonicals = yield* this.resolveArticleCanonicals(mutation.article);
+        genAfterTarget = getCanonicalCacheGeneration();
+      }
+      const existing = byCanonical.get(targetCanonicals.url);
+      if (existing) {
+        if (
+          String(existing.id) === String(mutation.article.id) &&
+          mutation.article.givenUrl &&
+          existing.givenUrl !== mutation.article.givenUrl
+        ) {
+          this.getKnownCanonicals(account, genAfterTarget).set(mutation.article, targetCanonicals);
+          return articles.map((a) => (a === existing ? mutation.article : a));
+        }
+        logger.debug("Article already exists in cache, skipping add:", mutation.article.url);
+        return articles;
+      }
+      this.getKnownCanonicals(account, genAfterTarget).set(mutation.article, targetCanonicals);
       return [mutation.article, ...articles];
     });
   }
@@ -302,17 +410,20 @@ export class ArticlesRepository {
       account.pending = [];
       const api = yield* this.adapter(account);
       const timestamps = yield* this.timestamps(account);
+      const cachedArticles = yield* this.articles(account);
       const syncOptions: SyncOptions = {
         ...options,
         lastSyncTimestamp: timestamps.last ?? undefined,
         lastFullSyncTimestamp: timestamps.full ?? undefined,
         isBrowserIdle: options?.isBrowserIdle ?? (yield* Effect.promise(() => isBrowserIdle())),
+        maxKnownNumericId: options?.maxKnownNumericId ?? maxNumericIdOf(cachedArticles),
       };
       logger.info("Starting cache sync with API", {
         providedMode: options?.mode,
         lastSync: timestamps.last,
         lastFullSync: timestamps.full ? new Date(timestamps.full).toISOString() : null,
         isBrowserIdle: syncOptions.isBrowserIdle,
+        maxKnownNumericId: syncOptions.maxKnownNumericId,
       });
 
       const fetchStartedAt = new Date().toISOString();
@@ -323,15 +434,41 @@ export class ArticlesRepository {
         `Synced ${syncResult.articles.length} articles from API using ${syncResult.mode} mode`,
         { metadata: syncResult.metadata },
       );
-      const fetched = yield* Effect.forEach(syncResult.articles, (article) =>
-        canonical(article.url).pipe(
-          Effect.map((canonicalUrl) =>
-            account.settings.normalizeOnSave
-              ? { ...article, canonicalUrl, url: canonicalUrl }
-              : { ...article, canonicalUrl },
-          ),
-        ),
+      const fetchedWithGen = yield* Effect.forEach(syncResult.articles, (article) =>
+        Effect.gen(function* () {
+          const canonicalUrl = yield* canonical(article.url);
+          const canonicalGivenUrl =
+            article.givenUrl && article.givenUrl !== article.url
+              ? yield* canonical(article.givenUrl)
+              : undefined;
+          const generation = getCanonicalCacheGeneration();
+          const url = account.settings.normalizeOnSave ? canonicalUrl : article.url;
+          const hasDistinctGivenUrl = Boolean(article.givenUrl && article.givenUrl !== url);
+          const hasDistinctCanonicalGivenUrl = Boolean(
+            canonicalGivenUrl && canonicalGivenUrl !== canonicalUrl,
+          );
+          const normalized: Article = {
+            ...article,
+            url,
+            canonicalUrl,
+            ...(hasDistinctCanonicalGivenUrl ? { canonicalGivenUrl } : {}),
+          };
+          if (!hasDistinctGivenUrl) delete normalized.givenUrl;
+          if (!hasDistinctCanonicalGivenUrl) delete normalized.canonicalGivenUrl;
+          const canonicals: KnownArticleCanonicals = hasDistinctCanonicalGivenUrl
+            ? { url: canonicalUrl, givenUrl: canonicalGivenUrl }
+            : { url: canonicalUrl };
+          return { article: normalized, canonicals, generation };
+        }),
       );
+      const finalGeneration = getCanonicalCacheGeneration();
+      const known = this.getKnownCanonicals(account, finalGeneration);
+      const fetched = fetchedWithGen.map(({ article, canonicals, generation }) => {
+        if (generation === finalGeneration) {
+          known.set(article, canonicals);
+        }
+        return article;
+      });
 
       yield* this.commit(
         account,
@@ -341,7 +478,7 @@ export class ArticlesRepository {
             let next =
               syncResult.mode === "overwrite"
                 ? fetched
-                : merge(account.settings, articles, fetched);
+                : merge(account.settings, articles, fetched, syncResult.deletedIds);
             // Mutations committed after the fetch started may be missing from the snapshot.
             if (account.pending.length > 0)
               logger.info(`Re-applying ${account.pending.length} pending operations after sync`);
@@ -364,13 +501,137 @@ export class ArticlesRepository {
     );
   }
 
-  private sameUrl(
+  private getRawIndex(account: Account, articles: Article[]): Map<string, Article> {
+    if (account.rawIndex && account.rawIndex.articles === articles) {
+      return account.rawIndex.byUrl;
+    }
+    const byUrl = new Map<string, Article>();
+    for (const article of articles) {
+      if (!byUrl.has(article.url)) {
+        byUrl.set(article.url, article);
+      }
+    }
+    for (const article of articles) {
+      if (article.givenUrl && !byUrl.has(article.givenUrl)) {
+        byUrl.set(article.givenUrl, article);
+      }
+    }
+    if (articles === account.articles) {
+      account.rawIndex = { articles, byUrl };
+    }
+    return byUrl;
+  }
+
+  private getKnownCanonicals(
     account: Account,
-    a: string,
-    b: string,
-  ): Effect.Effect<boolean, FatalStorageFailure> {
-    if (!account.settings.normalizeOnCompare) return Effect.succeed(a === b);
-    return Effect.zipWith(canonical(a), canonical(b), (x, y) => x === y);
+    generation: number,
+  ): WeakMap<Article, KnownArticleCanonicals> {
+    if (!account.knownCanonicals || account.knownCanonicals.generation !== generation) {
+      account.knownCanonicals = { generation, byArticle: new WeakMap() };
+    }
+    return account.knownCanonicals.byArticle;
+  }
+
+  private resolveArticleCanonicals(
+    article: Article,
+    known?: WeakMap<Article, KnownArticleCanonicals>,
+    buildGen?: number,
+  ): Effect.Effect<KnownArticleCanonicals, FatalStorageFailure> {
+    return Effect.gen(function* () {
+      const cached = known?.get(article);
+      if (cached !== undefined) return cached;
+      const url = yield* canonical(article.url);
+      const givenUrl =
+        article.givenUrl && article.givenUrl !== article.url
+          ? yield* canonical(article.givenUrl)
+          : undefined;
+      const entry: KnownArticleCanonicals =
+        givenUrl && givenUrl !== url ? { url, givenUrl } : { url };
+      if (known && buildGen !== undefined && getCanonicalCacheGeneration() === buildGen) {
+        known.set(article, entry);
+      }
+      return entry;
+    });
+  }
+
+  private getCanonicalIndex(
+    account: Account,
+    articles: Article[],
+  ): Effect.Effect<Map<string, Article>, FatalStorageFailure> {
+    return Effect.gen({ self: this }, function* () {
+      const currentGen = getCanonicalCacheGeneration();
+      if (
+        account.canonicalIndex &&
+        account.canonicalIndex.articles === articles &&
+        account.canonicalIndex.generation === currentGen
+      ) {
+        return account.canonicalIndex.byCanonical;
+      }
+
+      // Retry once if a concurrent filter-list refresh bumps the generation mid-build.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const buildGen = getCanonicalCacheGeneration();
+        const known = this.getKnownCanonicals(account, buildGen);
+        const byCanonical = new Map<string, Article>();
+        const resolved: { article: Article; canonicals: KnownArticleCanonicals }[] = [];
+
+        for (const article of articles) {
+          const canonicals = yield* this.resolveArticleCanonicals(article, known, buildGen);
+          resolved.push({ article, canonicals });
+          if (!byCanonical.has(canonicals.url)) {
+            byCanonical.set(canonicals.url, article);
+          }
+        }
+        for (const { article, canonicals } of resolved) {
+          if (canonicals.givenUrl && !byCanonical.has(canonicals.givenUrl)) {
+            byCanonical.set(canonicals.givenUrl, article);
+          }
+        }
+
+        if (getCanonicalCacheGeneration() === buildGen) {
+          if (articles === account.articles) {
+            account.canonicalIndex = { articles, generation: buildGen, byCanonical };
+          }
+          return byCanonical;
+        }
+      }
+
+      const byCanonical = new Map<string, Article>();
+      const resolved: { article: Article; canonicals: KnownArticleCanonicals }[] = [];
+      for (const article of articles) {
+        const canonicals = yield* this.resolveArticleCanonicals(article);
+        resolved.push({ article, canonicals });
+        if (!byCanonical.has(canonicals.url)) {
+          byCanonical.set(canonicals.url, article);
+        }
+      }
+      for (const { article, canonicals } of resolved) {
+        if (canonicals.givenUrl && !byCanonical.has(canonicals.givenUrl)) {
+          byCanonical.set(canonicals.givenUrl, article);
+        }
+      }
+      return byCanonical;
+    });
+  }
+
+  private findSavedInAccount(
+    account: Account,
+    url: string,
+  ): Effect.Effect<{ existing: Article | undefined; canonicalUrl?: string }, LocalError> {
+    return Effect.gen({ self: this }, function* () {
+      const articles = yield* this.articles(account);
+      if (articles.length === 0) return { existing: undefined };
+      if (!account.settings.normalizeOnCompare) {
+        return { existing: this.getRawIndex(account, articles).get(url) };
+      }
+      let targetCanonical = yield* canonical(url);
+      const genAfterTarget = getCanonicalCacheGeneration();
+      const byCanonical = yield* this.getCanonicalIndex(account, articles);
+      if (getCanonicalCacheGeneration() !== genAfterTarget) {
+        targetCanonical = yield* canonical(url);
+      }
+      return { existing: byCanonical.get(targetCanonical), canonicalUrl: targetCanonical };
+    });
   }
 
   readonly findSaved = Effect.fn("repository.findSaved")(function* (
@@ -378,10 +639,7 @@ export class ArticlesRepository {
     url: string,
   ) {
     const account = yield* this.active();
-    for (const article of yield* this.articles(account)) {
-      if (yield* this.sameUrl(account, article.url, url)) return article;
-    }
-    return undefined;
+    return (yield* this.findSavedInAccount(account, url)).existing;
   });
 
   private filterBySearch(articles: Article[], search?: string): Article[] {
@@ -393,7 +651,10 @@ export class ArticlesRepository {
     return articles.filter((article) => {
       const title = article.title?.toLowerCase() || "";
       const url = article.url?.toLowerCase() || "";
-      return searchWords.every((word) => title.includes(word) || url.includes(word));
+      const givenUrl = article.givenUrl?.toLowerCase() || "";
+      return searchWords.every(
+        (word) => title.includes(word) || url.includes(word) || givenUrl.includes(word),
+      );
     });
   }
 
@@ -403,9 +664,12 @@ export class ArticlesRepository {
     perPage: number = 30,
     search?: string,
   ) {
-    const articles = this.filterBySearch(yield* this.getAllArticles, search).sort((a, b) =>
-      b.created_at > a.created_at ? 1 : -1,
-    );
+    const filtered = this.filterBySearch(yield* this.getAllArticles, search);
+    const articles = [...filtered].sort((a, b) => {
+      if (b.created_at > a.created_at) return 1;
+      if (b.created_at < a.created_at) return -1;
+      return 0;
+    });
     const articlesNumber = articles.length;
     const pages = Math.ceil(articlesNumber / perPage);
     // Clamp page into [1, pages]; an empty result set has no pages, so report page 1
@@ -459,26 +723,88 @@ export class ArticlesRepository {
   }
 }
 
-function merge(settings: Settings, existingArticles: Article[], newArticles: Article[]): Article[] {
-  const existingMap = new Map(existingArticles.map((article) => [article.id, article]));
+function articlesEqual(a: readonly Article[], b: readonly Article[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i];
+    const y = b[i];
+    if (
+      x.id !== y.id ||
+      x.url !== y.url ||
+      x.givenUrl !== y.givenUrl ||
+      x.canonicalUrl !== y.canonicalUrl ||
+      x.canonicalGivenUrl !== y.canonicalGivenUrl ||
+      x.title !== y.title ||
+      x.created_at !== y.created_at
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function maxNumericIdOf(articles: readonly Article[]): number | undefined {
+  let max: number | undefined;
+  for (const article of articles) {
+    let numeric: number | undefined;
+    if (typeof article.id === "number") {
+      numeric = article.id;
+    } else if (/^\d+$/.test(article.id)) {
+      numeric = Number(article.id);
+    }
+    if (numeric !== undefined && Number.isSafeInteger(numeric) && numeric > 0) {
+      if (max === undefined || numeric > max) max = numeric;
+    }
+  }
+  return max;
+}
+
+function merge(
+  settings: Settings,
+  existingArticles: Article[],
+  newArticles: Article[],
+  deletedIds?: readonly (number | string)[],
+): Article[] {
+  const deleted = deletedIds && deletedIds.length > 0 ? new Set(deletedIds.map(String)) : undefined;
   const compareKeyOf = (article: Article): string =>
     settings.normalizeOnCompare ? article.canonicalUrl || article.url : article.url;
-  const existingCanonicalMap = new Map(
-    existingArticles.map((article) => [compareKeyOf(article), article]),
-  );
+  const existingMap = new Map<string, Article>();
+  const existingCanonicalMap = new Map<string, Article>();
+
+  for (const article of existingArticles) {
+    const id = String(article.id);
+    if (deleted?.has(id)) continue;
+    const compareKey = compareKeyOf(article);
+    const existingByCanonical = existingCanonicalMap.get(compareKey);
+    if (existingByCanonical && String(existingByCanonical.id) !== id) {
+      existingMap.delete(String(existingByCanonical.id));
+    }
+    existingMap.set(id, article);
+    existingCanonicalMap.set(compareKey, article);
+  }
 
   for (const newArticle of newArticles) {
+    const newId = String(newArticle.id);
     const compareKey = compareKeyOf(newArticle);
-    const existingByCanonical = existingCanonicalMap.get(compareKey);
 
-    if (existingByCanonical && existingByCanonical.id !== newArticle.id) {
-      const existingById = existingMap.get(existingByCanonical.id);
-      if (existingById && existingById.id === existingByCanonical.id) {
-        continue;
+    const existingById = existingMap.get(newId);
+    if (existingById) {
+      const oldCompareKey = compareKeyOf(existingById);
+      if (
+        oldCompareKey !== compareKey &&
+        existingCanonicalMap.get(oldCompareKey) === existingById
+      ) {
+        existingCanonicalMap.delete(oldCompareKey);
       }
     }
 
-    existingMap.set(newArticle.id, newArticle);
+    const existingByCanonical = existingCanonicalMap.get(compareKey);
+    if (existingByCanonical && String(existingByCanonical.id) !== newId) {
+      existingMap.delete(String(existingByCanonical.id));
+    }
+
+    existingMap.set(newId, newArticle);
     existingCanonicalMap.set(compareKey, newArticle);
   }
 

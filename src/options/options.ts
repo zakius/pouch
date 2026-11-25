@@ -53,7 +53,7 @@ function assertDom(d: DomElementsNullable): asserts d is DomElements {
 const configCache: {
   [key in Settings["backend"]]?: Partial<Settings["apiConfig"]>;
 } = {};
-const configDrafts: Record<string, Record<string, string>> = {};
+const configDrafts: Record<string, Record<string, string | boolean>> = {};
 async function initialize(): Promise<void> {
   try {
     assertDom(dom);
@@ -86,6 +86,9 @@ async function initialize(): Promise<void> {
   } catch (error) {
     logger.error("Error initializing options:", error);
     if (isStorageStopped()) return;
+    if (dom.backendSelect) dom.backendSelect.disabled = true;
+    if (dom.saveButton) dom.saveButton.disabled = true;
+    if (dom.testConnectionButton) dom.testConnectionButton.disabled = true;
     showStatus(`Error initializing options: ${(error as Error).message}`, "error");
   }
 }
@@ -98,10 +101,10 @@ async function loadBackend(backend: Settings["backend"]): Promise<void> {
       (candidate) => `${candidate}-config` === previousForm.id,
     );
     if (previousBackend) {
-      const draft: Record<string, string> = {};
+      const draft: Record<string, string | boolean> = {};
       for (const input of Array.from(previousForm.querySelectorAll("input"))) {
         if (input.name) {
-          draft[input.name] = input.value;
+          draft[input.name] = input.type === "checkbox" ? input.checked : input.value;
         }
       }
       configDrafts[previousBackend] = draft;
@@ -112,21 +115,40 @@ async function loadBackend(backend: Settings["backend"]): Promise<void> {
   dom.configContainer.innerHTML = "";
   const form = document.createElement("form");
   form.id = `${backend}-config`;
+  form.method = "post";
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!dom.saveButton.disabled) {
+      void handleSaveSettings();
+    }
+  });
   for (const field of formConfig) {
     const fieldContainer = document.createElement("div");
-    fieldContainer.className = "form-group";
     const label = document.createElement("label");
     label.htmlFor = field.name;
     label.textContent = field.label;
     const input = document.createElement("input");
-    input.type = field.name.toLowerCase().includes("password") ? "password" : "text";
+    input.type =
+      field.type ?? (field.name.toLowerCase().includes("password") ? "password" : "text");
     input.id = field.name;
     input.name = field.name;
-    input.className = "form-control";
-    const config = configDrafts[backend] || configCache[backend] || {};
-    input.value = config[field.name] || "";
-    fieldContainer.appendChild(label);
-    fieldContainer.appendChild(input);
+    const config = (configDrafts[backend] || configCache[backend] || {}) as Record<
+      string,
+      string | boolean | undefined
+    >;
+    if (field.type === "checkbox") {
+      fieldContainer.className = "form-group-checkbox";
+      input.checked = config[field.name] === true;
+      fieldContainer.appendChild(input);
+      fieldContainer.appendChild(label);
+    } else {
+      fieldContainer.className = "form-group";
+      input.className = "form-control";
+      const storedValue = config[field.name];
+      input.value = typeof storedValue === "string" ? storedValue : "";
+      fieldContainer.appendChild(label);
+      fieldContainer.appendChild(input);
+    }
     form.appendChild(fieldContainer);
   }
   dom.configContainer.appendChild(form);
@@ -234,18 +256,54 @@ async function handleTestConnection(): Promise<void> {
     dom.testConnectionButton.disabled = isStorageStopped();
   }
 }
+const OPTIONAL_FORM_FIELDS = new Set(["password"]);
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 function getSettingsFromForm(): Settings | null {
   assertDom(dom);
-  const getInputValue = (id: string): string => {
-    const input = document.getElementById(id) as HTMLInputElement | null;
-    return input?.value || "";
-  };
-  const apiConfig: Record<string, string> = {};
-  for (const field of backendForms[dom.backendSelect.value as Settings["backend"]].formConfig) {
-    apiConfig[field.name] = getInputValue(field.name);
+  const backend = dom.backendSelect.value as Settings["backend"];
+  const backendForm = backendForms[backend];
+  if (!backendForm) {
+    showStatus("Invalid settings: Unsupported backend selected", "error");
+    logger.error("Invalid settings provided: unsupported backend", backend);
+    return null;
+  }
+  const getInputElement = (id: string): HTMLInputElement | null =>
+    document.getElementById(id) as HTMLInputElement | null;
+  const apiConfig: Record<string, string | boolean> = {};
+  const validationErrors: string[] = [];
+  for (const field of backendForm.formConfig) {
+    const input = getInputElement(field.name);
+    if (field.type === "checkbox") {
+      apiConfig[field.name] = Boolean(input?.checked);
+      continue;
+    }
+    const rawValue = input?.value || "";
+    const isOptional = OPTIONAL_FORM_FIELDS.has(field.name);
+    const value = isOptional ? rawValue : rawValue.trim();
+    if (!isOptional && value.length === 0) {
+      validationErrors.push(`${field.label} is required`);
+    } else if (field.name === "url" && !isHttpUrl(value)) {
+      validationErrors.push(`${field.label} must be a valid http:// or https:// URL`);
+    }
+    apiConfig[field.name] = value;
+  }
+  if (validationErrors.length > 0) {
+    const errorMessage = validationErrors.join(", ");
+    showStatus(`Invalid settings: ${errorMessage}`, "error");
+    logger.error("Invalid settings provided:", errorMessage);
+    return null;
   }
   const rawSettings = {
-    backend: dom.backendSelect.value,
+    backend,
     logLevel:
       dom.enableVerboseLoggingCheckbox instanceof HTMLInputElement &&
       dom.enableVerboseLoggingCheckbox.checked
@@ -271,22 +329,32 @@ function getSettingsFromForm(): Settings | null {
   return result.output;
 }
 type StatusType = "info" | "success" | "error";
+let statusShowTimer: ReturnType<typeof setTimeout> | undefined;
 let statusHideTimer: ReturnType<typeof setTimeout> | undefined;
+let statusClearTimer: ReturnType<typeof setTimeout> | undefined;
 function showStatus(message: string, type: StatusType = "info"): void {
   if (isStorageStopped() && !message.startsWith("Pouch stopped:")) return;
   assertDom(dom);
+  clearTimeout(statusShowTimer);
   clearTimeout(statusHideTimer);
+  clearTimeout(statusClearTimer);
+  statusShowTimer = undefined;
+  statusHideTimer = undefined;
+  statusClearTimer = undefined;
   dom.statusDiv.textContent = message;
   dom.statusDiv.className = `status ${type}`;
-  setTimeout(() => {
+  statusShowTimer = setTimeout(() => {
+    statusShowTimer = undefined;
     dom.statusDiv.classList.add("show");
   }, 10);
   // Errors stay until the next status so they can be read at any pace.
   if (isStorageStopped() || type === "error") return;
   statusHideTimer = setTimeout(() => {
+    statusHideTimer = undefined;
     if (isStorageStopped()) return;
     dom.statusDiv.classList.remove("show");
-    setTimeout(() => {
+    statusClearTimer = setTimeout(() => {
+      statusClearTimer = undefined;
       if (isStorageStopped()) return;
       dom.statusDiv.textContent = "";
     }, 300);

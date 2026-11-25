@@ -9,9 +9,10 @@ export const bookmarksSettingsSchema = v.object({
 export type BookmarksSettings = v.InferInput<typeof bookmarksSettingsSchema>;
 
 export const instapaperConfigSchema = v.object({
-  consumerKey: v.string(),
-  consumerSecret: v.string(),
-  username: v.string(),
+  token: v.optional(v.string()),
+  consumerKey: v.optional(v.string()),
+  consumerSecret: v.optional(v.string()),
+  username: v.optional(v.string()),
   password: v.optional(v.string()),
 });
 export const instapaperSettingsSchema = v.object({
@@ -24,6 +25,7 @@ export type InstapaperSettings = v.InferInput<typeof instapaperSettingsSchema>;
 export const karakeepConfigSchema = v.object({
   url: v.pipe(v.string(), v.url()),
   token: v.string(),
+  includeArchived: v.optional(v.boolean()),
 });
 export const karakeepSettingsSchema = v.object({
   ...baseSettingsSchema.entries,
@@ -78,7 +80,7 @@ export const wallabagSettingsSchema = v.object({
 });
 export type WallabagSettings = v.InferInput<typeof wallabagSettingsSchema>;
 
-type FormField = { name: string; label: string };
+type FormField = { name: string; label: string; type?: "text" | "password" | "checkbox" };
 /** What the options page shows per backend, kept apart from the adapters so it needs no Effect code. */
 export const backendForms: Record<
   "bookmarks" | "wallabag" | "instapaper" | "raindrop" | "karakeep" | "linkace" | "linkwarden",
@@ -88,7 +90,7 @@ export const backendForms: Record<
   wallabag: {
     displayName: "Wallabag",
     formConfig: [
-      { name: "url", label: "API URL" },
+      { name: "url", label: "Server URL" },
       { name: "clientId", label: "Client ID" },
       { name: "clientSecret", label: "Client Secret" },
       { name: "username", label: "Username" },
@@ -97,12 +99,7 @@ export const backendForms: Record<
   },
   instapaper: {
     displayName: "Instapaper",
-    formConfig: [
-      { name: "consumerKey", label: "OAuth Consumer Key" },
-      { name: "consumerSecret", label: "OAuth Consumer Secret" },
-      { name: "username", label: "Instapaper Username" },
-      { name: "password", label: "Instapaper Password" },
-    ],
+    formConfig: [{ name: "token", label: "Access Token", type: "password" }],
   },
   raindrop: {
     displayName: "Raindrop.io",
@@ -111,14 +108,15 @@ export const backendForms: Record<
   karakeep: {
     displayName: "Karakeep",
     formConfig: [
-      { name: "url", label: "API URL" },
+      { name: "url", label: "Instance URL" },
       { name: "token", label: "API Token" },
+      { name: "includeArchived", label: "Include archived bookmarks", type: "checkbox" },
     ],
   },
   linkace: {
     displayName: "LinkAce",
     formConfig: [
-      { name: "url", label: "API URL" },
+      { name: "url", label: "Instance URL (LinkAce 2.x)" },
       { name: "token", label: "API Token" },
     ],
   },
@@ -126,7 +124,7 @@ export const backendForms: Record<
     displayName: "Linkwarden",
     formConfig: [
       // Sync uses /api/v1/search, which older servers answer with HTTP 404.
-      { name: "url", label: "API URL (needs Linkwarden 2.10 or later)" },
+      { name: "url", label: "Instance URL (needs Linkwarden 2.10 or later)" },
       { name: "token", label: "API Token" },
     ],
   },
