@@ -1,6 +1,6 @@
 {
   "name": "pouch-extension",
-  "version": "1.0.57",
+  "version": "1.0.58",
   "description": "Browser extension for Pouch",
   "license": "MIT",
   "type": "module",
