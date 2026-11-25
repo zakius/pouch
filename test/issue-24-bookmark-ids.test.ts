@@ -3,7 +3,12 @@ import { afterEach, beforeEach, expect, test, mock } from "bun:test";
 import type { Article } from "../src/types/common";
 import { createBookmarksAdapter } from "../src/background/api/adapters/bookmarks-adapter";
 import { ArticlesRepository } from "../src/background/articles-repository";
+import { resetFilterListSources, setFilterListSources } from "../src/utils/filter-list-manager";
 import { DEFAULT_SETTINGS } from "../src/utils/settings";
+
+beforeEach(() => {
+  setFilterListSources([{ name: "empty", url: "data:text/plain,! empty" }]);
+});
 
 const originalBrowser = Object.getOwnPropertyDescriptor(globalThis, "browser");
 
@@ -30,6 +35,7 @@ const stringIdBookmarks = [
 
 afterEach(async () => {
   mock.restore();
+  resetFilterListSources();
   if (originalBrowser) Object.defineProperty(globalThis, "browser", originalBrowser);
   else Reflect.deleteProperty(globalThis, "browser");
 });

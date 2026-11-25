@@ -8,10 +8,12 @@ import {
   removeStaleAccountKeys,
 } from "../src/background/articles-repository";
 import { TokenManager, tokenManager } from "../src/background/token-manager";
+import { resetFilterListSources, setFilterListSources } from "../src/utils/filter-list-manager";
 import { DEFAULT_SETTINGS } from "../src/utils/settings";
 
 beforeEach(() => {
   mockReadyAdapter();
+  setFilterListSources([{ name: "empty", url: "data:text/plain,! empty" }]);
 });
 
 const originalBrowser = Object.getOwnPropertyDescriptor(globalThis, "browser");
@@ -23,6 +25,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   mock.restore();
+  resetFilterListSources();
   if (originalBrowser) Object.defineProperty(globalThis, "browser", originalBrowser);
   else Reflect.deleteProperty(globalThis, "browser");
 });
