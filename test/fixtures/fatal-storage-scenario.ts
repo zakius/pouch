@@ -8,7 +8,6 @@ import {
 import { TokenManager } from "../../src/background/token-manager";
 import { requestJson } from "../../src/background/api/effect-api-client";
 import { createWallabagAdapter } from "../../src/background/api/adapters/wallabag-adapter";
-import { createInstapaperAdapter } from "../../src/background/api/adapters/instapaper-adapter";
 import { Effect } from "effect";
 import { DEFAULT_SETTINGS } from "../../src/utils/settings";
 import {
@@ -339,10 +338,7 @@ switch (scenario) {
           ...DEFAULT_SETTINGS,
           backend: "instapaper" as const,
           apiConfig: {
-            consumerKey: "client",
-            consumerSecret: "secret",
-            username: "user",
-            password: "password",
+            token: "instapaper-token",
           },
         }
       : {
@@ -376,24 +372,28 @@ switch (scenario) {
     await repo.initialize(wallabagSettings);
     await runOperation(repo.getAllArticles);
     const before = structuredClone(Reflect.get(repo, "account").articles);
-    const bookmark = { type: "bookmark", bookmark_id: 42, url: saved.url, title: saved.title };
-    globalThis.fetch = async (url, init) => {
+    const bookmark = {
+      id: 42,
+      url: saved.url,
+      title: saved.title,
+      time: 1767225600,
+      archived: false,
+    };
+    globalThis.fetch = async (_url, init) => {
       fetches++;
-      if (instapaper && String(url).endsWith("/access_token"))
-        return new Response("oauth_token=token&oauth_token_secret=secret");
-      if (init?.method === "DELETE" || String(url).endsWith("/delete")) {
+      if (init?.method === "DELETE") {
         remoteDeletes++;
-        return instapaper ? new Response("[]") : new Response(null, { status: 204 });
+        return instapaper ? new Response("", { status: 200 }) : new Response(null, { status: 204 });
       }
-      if (instapaper ? String(url).endsWith("/add") : init?.method === "POST") {
+      if (init?.method === "POST") {
         remoteSaves++;
-        return new Response(JSON.stringify(instapaper ? [bookmark] : saved));
+        return new Response(JSON.stringify(instapaper ? bookmark : saved));
       }
       remoteReads++;
       return new Response(
         JSON.stringify(
           instapaper
-            ? { user: { type: "user", user_id: 1, username: "user" }, bookmarks: [bookmark] }
+            ? { bookmarks: [bookmark], total: 1 }
             : { _embedded: { items: [saved] }, total: 1, limit: 30, pages: 1, page: 1 },
         ),
       );
@@ -1299,8 +1299,7 @@ switch (scenario) {
     );
     break;
   }
-  case "auth-outcome":
-  case "instapaper-auth-outcome": {
+  case "auth-outcome": {
     globalThis.fetch = async () =>
       new Response(
         JSON.stringify({
@@ -1312,45 +1311,24 @@ switch (scenario) {
         { status: 200 },
       );
     rejectSet = true;
-    if (scenario === "auth-outcome") {
-      await rejectsFatal(() =>
-        runOperation(
-          createWallabagAdapter(
-            {
-              ...settings,
-              backend: "wallabag",
-              apiConfig: {
-                url: "https://example.com",
-                clientId: "client",
-                clientSecret: "secret",
-                username: "user",
-                password: "password",
-              },
+    await rejectsFatal(() =>
+      runOperation(
+        createWallabagAdapter(
+          {
+            ...settings,
+            backend: "wallabag",
+            apiConfig: {
+              url: "https://example.com",
+              clientId: "client",
+              clientSecret: "secret",
+              username: "user",
+              password: "password",
             },
-            tokens,
-          ),
+          },
+          tokens,
         ),
-      );
-    } else {
-      globalThis.fetch = async () => new Response("oauth_token=token&oauth_token_secret=secret");
-      await rejectsFatal(() =>
-        runOperation(
-          createInstapaperAdapter(
-            {
-              ...settings,
-              backend: "instapaper",
-              apiConfig: {
-                consumerKey: "client",
-                consumerSecret: "secret",
-                username: "user",
-                password: "password",
-              },
-            },
-            tokens,
-          ),
-        ),
-      );
-    }
+      ),
+    );
     assert.equal(getStorageDiagnostic()?.remoteOperation, "authentication");
     assert.equal(tokens.getTokenMetadata("service"), null);
     assert.equal(

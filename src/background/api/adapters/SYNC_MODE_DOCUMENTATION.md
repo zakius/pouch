@@ -2,37 +2,42 @@
 
 ## Summary Table
 
-| Backend    | Incremental Support                     | Deletion Tracking | Strategy                                 |
-| ---------- | --------------------------------------- | ----------------- | ---------------------------------------- |
-| Instapaper | ❌ No (API v1)                          | N/A               | Full sync only (top 500 unread cap)      |
-| Wallabag   | ✅ Yes (since)                          | ❌ No             | Periodic full syncs (24h)                |
-| Raindrop   | ⚠️ Partial (`sort=-created` early-stop) | ❌ No             | Periodic full syncs (24h idle / 48h max) |
-| LinkAce    | ❌ No                                   | N/A               | Full sync only                           |
-| Linkwarden | ⚠️ Partial (`sort=0` ID early-stop)     | ❌ No             | Periodic full syncs (24h idle / 48h max) |
-| KaraKeep   | ❌ No                                   | N/A               | Full sync only                           |
-| Bookmarks  | ❌ No                                   | N/A               | Full sync only                           |
+| Backend    | Incremental Support                     | Deletion Tracking                   | Strategy                                                         |
+| ---------- | --------------------------------------- | ----------------------------------- | ---------------------------------------------------------------- |
+| Instapaper | ✅ Yes (API v2 `since`)                 | ✅ Yes (`deleted_ids` + `archived`) | True incremental sync + periodic full syncs (24h idle / 48h max) |
+| Wallabag   | ✅ Yes (since)                          | ❌ No                               | Periodic full syncs (24h)                                        |
+| Raindrop   | ⚠️ Partial (`sort=-created` early-stop) | ❌ No                               | Periodic full syncs (24h idle / 48h max)                         |
+| LinkAce    | ❌ No                                   | N/A                                 | Full sync only                                                   |
+| Linkwarden | ⚠️ Partial (`sort=0` ID early-stop)     | ❌ No                               | Periodic full syncs (24h idle / 48h max)                         |
+| KaraKeep   | ❌ No                                   | N/A                                 | Full sync only                                                   |
+| Bookmarks  | ❌ No                                   | N/A                                 | Full sync only                                                   |
 
 ## Detailed Backend Analysis
 
-### 1. Instapaper ❌ NO INCREMENTAL SUPPORT (API v1)
+### 1. Instapaper ✅ FULL INCREMENTAL SUPPORT WITH DELETIONS (API v2)
 
-- **API:** https://www.instapaper.com/api (`POST /api/1/bookmarks/list`)
-- **Method:** Full snapshot of the top `limit=500` unread bookmarks in a single request
-- **Deletions:** N/A (full sync only; always returns `mode: "overwrite"` so removed/archived bookmarks are reconciled on every sync)
-- **Strategy:** Full sync only — single `limit=500` request per sync; logs a warning when 500 unread bookmarks are returned
+- **API:** https://www.instapaper.com/developers/v2 (`GET /api/2/bookmarks`, OpenAPI: `https://www.instapaper.com/api/2/openapi.json`)
+- **Authentication:** OAuth 2 / personal Bearer token (`Authorization: Bearer <token>`); legacy v1 `oauth_token` persisted in `TokenManager` is automatically reused as a v2 Bearer token during migration
+- **Method:** `offset`/`total` pagination (`limit=500`) for full snapshots (`section=home`), and `since` (Unix seconds with 120s clock-skew overlap) for incremental syncs
+- **Deletions:** ✅ Yes — `since` responses include `deleted_ids` for permanently deleted bookmarks and return archived bookmarks with `archived: true`; both are surfaced in `SyncResult.deletedIds` and purged from `ArticlesRepository` cache during `"update"` merges
+- **Strategy:** Hybrid incremental sync (`since`) + periodic full syncs (24h when idle, forced at 48h) as a reconciliation safety net
 - **Implementation:** `instapaper-adapter.ts`
 
 **How it works:**
 
-1. Requests `POST /api/1/bookmarks/list` once with `limit=500`
-2. Per official Instapaper v1 documentation, `/api/1/bookmarks/list` always operates within the top `limit` (max 500) unread bookmarks; `have` is a delta exclusion filter within that window, not a cursor past 500
-3. Deduplicates returned bookmarks by `bookmark_id` and always returns `mode: "overwrite"` even when a caller requests `"update"`
-4. Logs a warning if 500 unread bookmarks are returned, noting API v1's 500-item unread listing cap
+1. Full (`"overwrite"`) sync paginates `GET /api/2/bookmarks?section=home&limit=500&offset=<n>` until `offset >= total`, removing API v1's 500-bookmark cap
+2. Incremental (`"update"`) sync requests `GET /api/2/bookmarks?limit=500&offset=<n>&since=<unix>` with `since = Math.floor(lastSyncMs / 1000) - 120`
+3. Per the API v2 OpenAPI spec, changed bookmarks and `deleted_ids` share each page in `since` mode; `offset` advances by `bookmarks.length + deleted_ids.length` and stops when a page returns fewer than `limit` combined items or `offset >= total`
+4. Bookmarks returned with `archived: true` in `since` mode are added to `deletedIds` so they are removed from the local unread cache; un-archived bookmarks (`archived: false`) are merged back in
+5. Bookmarks with `url: null` (private content without a URL) are skipped cleanly without stalling pagination
+6. Deduplicates bookmark IDs across pages and fails with `IncompleteSnapshotFailure` if a page makes no progress (`newItemsOnPage === 0`) or returns empty while `offset < total`
 
-**Limitations:**
+**Hybrid Strategy:**
 
-- API v1 cannot paginate past the top 500 unread bookmarks
-- Migrating to Instapaper API v2 (`offset` / `since` pagination and incremental sync) is tracked separately in issue #127
+- First sync or missing/invalid `lastSyncTimestamp` → FULL (`overwrite`)
+- Last full sync ≥ 48h ago → FULL (`overwrite`)
+- Last full sync ≥ 24h ago + browser idle → FULL (`overwrite`)
+- Otherwise → INCREMENTAL (`update` with `since` + `deleted_ids`)
 
 ---
 
@@ -215,6 +220,11 @@ params.set("since", unixTimestamp.toString());
 
 ## Sync Strategy Recommendations
 
+### For Backends with Full Incremental Support (Instapaper v2)
+
+- Use `since` incremental sync with `deleted_ids` and `archived` removal handling for fast, accurate updates
+- Keep periodic full syncs (24h idle / 48h max) as a reconciliation safety net
+
 ### For Backends with Partial Incremental Support (Wallabag, Raindrop, Linkwarden)
 
 - Use hybrid approach:
@@ -225,15 +235,15 @@ params.set("since", unixTimestamp.toString());
 
 **Recommended intervals:**
 
+- **Instapaper:** Incremental `since` + `deleted_ids` sync; full sync every 24h when idle, or 48h max
 - **Wallabag:** Full sync every 24h (uses hybrid approach internally)
 - **Raindrop:** Full sync every 24h when idle, or 48h max (uses hybrid approach internally)
 - **Linkwarden:** Full sync every 24h when idle, or 48h max (uses hybrid ID-based early-stop internally)
 
-### For Backends with No Incremental Support (Instapaper v1, LinkAce, KaraKeep, Bookmarks)
+### For Backends with No Incremental Support (LinkAce, KaraKeep, Bookmarks)
 
 - Always use full sync (and return `mode: "overwrite"` so deletions are reconciled)
 - Consider client-side caching to reduce perceived latency
-- Instapaper API v2 (`offset` / `since`) is tracked separately in issue #127
 
 ---
 
@@ -264,15 +274,15 @@ For each backend with partial incremental support:
 
 ## Timestamp Formats Reference
 
-| Backend    | Format                               | Example                |
-| ---------- | ------------------------------------ | ---------------------- |
-| Instapaper | N/A (API v1 full sync only, max 500) | N/A                    |
-| Wallabag   | Unix seconds                         | `1704067200`           |
-| Raindrop   | ISO 8601 (client-side early-stop)    | `2024-01-01T00:00:00Z` |
-| LinkAce    | N/A (full sync only)                 | N/A                    |
-| Linkwarden | N/A (numeric ID early-stop)          | `12345`                |
-| KaraKeep   | N/A (full sync only)                 | N/A                    |
-| Bookmarks  | N/A (full sync only)                 | N/A                    |
+| Backend    | Format                            | Example                |
+| ---------- | --------------------------------- | ---------------------- |
+| Instapaper | Unix seconds (`since`)            | `1704067200`           |
+| Wallabag   | Unix seconds                      | `1704067200`           |
+| Raindrop   | ISO 8601 (client-side early-stop) | `2024-01-01T00:00:00Z` |
+| LinkAce    | N/A (full sync only)              | N/A                    |
+| Linkwarden | N/A (numeric ID early-stop)       | `12345`                |
+| KaraKeep   | N/A (full sync only)              | N/A                    |
+| Bookmarks  | N/A (full sync only)              | N/A                    |
 
 ---
 
@@ -280,7 +290,7 @@ For each backend with partial incremental support:
 
 API Documentation:
 
-- [Instapaper Full API](https://www.instapaper.com/api)
+- [Instapaper API v2](https://www.instapaper.com/developers/v2) ([OpenAPI](https://www.instapaper.com/api/2/openapi.json))
 - [Raindrop.io API](https://developer.raindrop.io/)
 - [Wallabag API Documentation](https://doc.wallabag.org/developer/api/)
 - [LinkAce API Reference](https://api-docs.linkace.org/)

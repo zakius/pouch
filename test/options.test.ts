@@ -297,24 +297,33 @@ test("options form rejects empty required credentials and non-HTTP URLs before S
   expect(sentMessages).toEqual([]);
   expect(el("status").textContent).toContain("API Token is required");
 
-  // Instapaper allows an empty password (passwordless accounts) while requiring other fields.
+  // Instapaper API v2 uses a single required Access Token password field (no user password stored).
   await selectBackend("instapaper");
-  el("consumerKey").value = "ck";
-  el("consumerSecret").value = "cs";
-  el("username").value = "user@example.com";
-  el("password").value = "";
+  const instapaperInputs = el("config-container").querySelectorAll("input");
+  expect(instapaperInputs).toHaveLength(1);
+  expect(instapaperInputs[0].name).toBe("token");
+  expect(instapaperInputs[0].type).toBe("password");
+  expect(el("config-container").querySelector("label")?.textContent).toBe("Access Token");
+
+  el("token").value = "   ";
   clickButton("save");
-  await waitUntil(() => sentMessages.length === 1, "passwordless Instapaper saved");
+  expect(sentMessages).toEqual([]);
+  expect(el("status").textContent).toContain("Access Token is required");
+
+  clickButton("test-connection");
+  expect(sentMessages).toEqual([]);
+  expect(el("status").textContent).toContain("Access Token is required");
+
+  el("token").value = "  instapaper-v2-token  ";
+  clickButton("save");
+  await waitUntil(() => sentMessages.length === 1, "Instapaper v2 token saved");
   expect(sentMessages[0]).toMatchObject({
     type: "saveSettings",
     payload: {
       settings: {
         backend: "instapaper",
         apiConfig: {
-          consumerKey: "ck",
-          consumerSecret: "cs",
-          username: "user@example.com",
-          password: "",
+          token: "instapaper-v2-token",
         },
       },
     },

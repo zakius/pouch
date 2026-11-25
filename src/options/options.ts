@@ -129,7 +129,8 @@ async function loadBackend(backend: Settings["backend"]): Promise<void> {
     label.htmlFor = field.name;
     label.textContent = field.label;
     const input = document.createElement("input");
-    input.type = field.name.toLowerCase().includes("password") ? "password" : "text";
+    input.type =
+      field.type ?? (field.name.toLowerCase().includes("password") ? "password" : "text");
     input.id = field.name;
     input.name = field.name;
     input.className = "form-control";

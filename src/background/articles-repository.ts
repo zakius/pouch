@@ -478,7 +478,7 @@ export class ArticlesRepository {
             let next =
               syncResult.mode === "overwrite"
                 ? fetched
-                : merge(account.settings, articles, fetched);
+                : merge(account.settings, articles, fetched, syncResult.deletedIds);
             // Mutations committed after the fetch started may be missing from the snapshot.
             if (account.pending.length > 0)
               logger.info(`Re-applying ${account.pending.length} pending operations after sync`);
@@ -760,7 +760,13 @@ function maxNumericIdOf(articles: readonly Article[]): number | undefined {
   return max;
 }
 
-function merge(settings: Settings, existingArticles: Article[], newArticles: Article[]): Article[] {
+function merge(
+  settings: Settings,
+  existingArticles: Article[],
+  newArticles: Article[],
+  deletedIds?: readonly (number | string)[],
+): Article[] {
+  const deleted = deletedIds && deletedIds.length > 0 ? new Set(deletedIds.map(String)) : undefined;
   const compareKeyOf = (article: Article): string =>
     settings.normalizeOnCompare ? article.canonicalUrl || article.url : article.url;
   const existingMap = new Map<string, Article>();
@@ -768,6 +774,7 @@ function merge(settings: Settings, existingArticles: Article[], newArticles: Art
 
   for (const article of existingArticles) {
     const id = String(article.id);
+    if (deleted?.has(id)) continue;
     const compareKey = compareKeyOf(article);
     const existingByCanonical = existingCanonicalMap.get(compareKey);
     if (existingByCanonical && String(existingByCanonical.id) !== id) {

@@ -33,7 +33,6 @@ for (const scenario of [
   "external-health",
   "external-fatal",
   "auth-outcome",
-  "instapaper-auth-outcome",
   "sync-articles",
   "timestamps",
   "tokens",
