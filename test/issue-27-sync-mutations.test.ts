@@ -8,6 +8,7 @@ import {
 } from "../src/background/api/effect-adapter";
 import type { Article } from "../src/types/common";
 import { ArticlesRepository, getAccountStorageKeys } from "../src/background/articles-repository";
+import { resetFilterListSources, setFilterListSources } from "../src/utils/filter-list-manager";
 import { DEFAULT_SETTINGS } from "../src/utils/settings";
 
 const keys = getAccountStorageKeys({ ...DEFAULT_SETTINGS, backend: "bookmarks" } as Parameters<
@@ -16,12 +17,14 @@ const keys = getAccountStorageKeys({ ...DEFAULT_SETTINGS, backend: "bookmarks" }
 
 beforeEach(() => {
   mockReadyAdapter();
+  setFilterListSources([{ name: "empty", url: "data:text/plain,! empty" }]);
 });
 
 const originalBrowser = Object.getOwnPropertyDescriptor(globalThis, "browser");
 
 afterEach(async () => {
   mock.restore();
+  resetFilterListSources();
   if (originalBrowser) Object.defineProperty(globalThis, "browser", originalBrowser);
   else Reflect.deleteProperty(globalThis, "browser");
 });
