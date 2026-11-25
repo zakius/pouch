@@ -168,10 +168,10 @@ params.set("since", unixTimestamp.toString());
 ### 6. KaraKeep ❌ NO INCREMENTAL SUPPORT
 
 - **API:** https://docs.karakeep.app/api/get-all-bookmarks/
-- **Endpoint:** `GET /api/v1/bookmarks?limit=100&includeContent=false` (with `cursor` on subsequent pages)
+- **Endpoint:** `GET /api/v1/bookmarks?limit=100&includeContent=false&archived=false` (`archived` omitted when `includeArchived` is enabled; `cursor` on subsequent pages)
 - **Available params:** `archived`, `favourited`, `limit`, `cursor`, `includeContent`, `sortOrder`
 - **Deletions:** N/A (full sync only; always returns `mode: "overwrite"`)
-- **Strategy:** Full sync only - must fetch all bookmarks every time
+- **Strategy:** Full sync only - fetches active bookmarks by default (`archived=false`, configurable via `includeArchived`), unarchiving re-saved archived duplicates on pre-v0.33.1 servers via `PATCH /api/v1/bookmarks/:id`
 - **Implementation:** `karakeep-adapter.ts`
 
 **Limitations:**

@@ -474,7 +474,55 @@ test("sync follows nextCursor through every page without inter-page sleep and pr
     expect(url.pathname).toBe("/api/v1/bookmarks");
     expect(url.searchParams.get("limit")).toBe("100");
     expect(url.searchParams.get("includeContent")).toBe("false");
+    expect(url.searchParams.get("archived")).toBe("false");
   }
+});
+
+test("sync excludes archived bookmarks by default and includes them when includeArchived is true", async () => {
+  const fetchMock = api(() => json(page([1])));
+  const defaultAdapter = await acquire();
+  await runOperation(defaultAdapter.sync());
+  const includeAdapter = await acquire({
+    ...settings,
+    apiConfig: { ...settings.apiConfig, includeArchived: true },
+  });
+  await runOperation(includeAdapter.sync());
+
+  const [defaultUrl, includeUrl] = fetchMock.mock.calls.map(urlOf);
+  expect(defaultUrl.searchParams.get("archived")).toBe("false");
+  expect(includeUrl.searchParams.has("archived")).toBe(false);
+});
+
+test("save unarchives a 200 archived duplicate when includeArchived is false, and skips PATCH when includeArchived is true", async () => {
+  const archivedBookmark = { ...bookmark(1), archived: true };
+  const fetchMock = api((_url, init) => {
+    if (init?.method === "POST") return json(archivedBookmark, 200);
+    if (init?.method === "PATCH") return json({ id: "bm1", archived: false }, 200);
+    return json(page([]));
+  });
+
+  const defaultAdapter = await acquire();
+  const savedDefault = await runOperation(
+    defaultAdapter.saveArticle({ url: "https://example.com/1", title: "Bookmark 1" }),
+  );
+  expect(savedDefault.id).toBe("bm1");
+  expect(fetchMock.mock.calls).toHaveLength(2);
+  const [, patchCall] = fetchMock.mock.calls;
+  expect(String(patchCall[0])).toBe(`${base}/bm1`);
+  expect(patchCall[1]?.method).toBe("PATCH");
+  expect(JSON.parse(String(patchCall[1]?.body))).toEqual({ archived: false });
+
+  fetchMock.mockClear();
+  const includeAdapter = await acquire({
+    ...settings,
+    apiConfig: { ...settings.apiConfig, includeArchived: true },
+  });
+  const savedIncluded = await runOperation(
+    includeAdapter.saveArticle({ url: "https://example.com/1", title: "Bookmark 1" }),
+  );
+  expect(savedIncluded.id).toBe("bm1");
+  expect(fetchMock.mock.calls).toHaveLength(1);
+  expect(fetchMock.mock.calls[0]?.[1]?.method).toBe("POST");
 });
 
 test("sync deduplicates bookmark IDs appearing across pages", async () => {
@@ -546,8 +594,8 @@ test("update sync is still a complete overwrite listing without filters", async 
   expect(update.mode).toBe("overwrite");
   expect(full.mode).toBe("overwrite");
   const [incremental, overwrite] = fetchMock.mock.calls.map(urlOf);
-  expect(incremental.search).toBe("?limit=100&includeContent=false");
-  expect(overwrite.search).toBe("?limit=100&includeContent=false");
+  expect(incremental.search).toBe("?limit=100&includeContent=false&archived=false");
+  expect(overwrite.search).toBe("?limit=100&includeContent=false&archived=false");
 });
 
 test("a repeated cursor fails as an incomplete snapshot instead of looping", async () => {

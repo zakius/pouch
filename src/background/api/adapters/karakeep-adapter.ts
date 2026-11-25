@@ -22,6 +22,7 @@ const karakeepBookmarkSchema = v.object({
   id: v.string(),
   createdAt: v.string(),
   title: v.optional(v.nullable(v.string())),
+  archived: v.optional(v.boolean()),
   content: v.object({
     type: v.string(),
     url: v.optional(v.string()),
@@ -76,6 +77,7 @@ export const createKarakeepAdapter = Effect.fn("karakeep.acquire")(function* (
   const parsed = v.safeParse(karakeepSettingsSchema, settings);
   const token = parsed.success ? parsed.output.apiConfig.token.trim() : "";
   const apiUrl = parsed.success ? normalizeApiUrl(parsed.output.apiConfig.url) : undefined;
+  const includeArchived = parsed.success && parsed.output.apiConfig.includeArchived === true;
   // A missing token or non-HTTP(S) URL must not degrade into an unauthenticated or unsafe request.
   if (!parsed.success || !token || /[\r\n]/.test(token) || !apiUrl)
     return yield* Effect.fail(new ConfigurationFailure("karakeep.acquire"));
@@ -123,6 +125,18 @@ export const createKarakeepAdapter = Effect.fn("karakeep.acquire")(function* (
         },
       });
       const saved = yield* validate(karakeepBookmarkSchema, data, "karakeep.save");
+      // Pre-v0.33.1 Karakeep returns a 200 duplicate still marked archived: true; unarchive it when
+      // archived bookmarks are excluded from sync so the re-saved item does not vanish on next sync.
+      if (!includeArchived && saved.archived === true) {
+        yield* request("karakeep.save", `/bookmarks/${encodeURIComponent(saved.id)}`, {
+          mutation: "save",
+          init: {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ archived: false }),
+          },
+        });
+      }
       return toArticle(saved, saved.content.url || article.url);
     }),
     deleteArticle: Effect.fn("karakeep.delete")(function* (id: number | string) {
@@ -134,10 +148,12 @@ export const createKarakeepAdapter = Effect.fn("karakeep.acquire")(function* (
     /**
      * Karakeep's GET /bookmarks has no created-since or modified-since filter, so every sync
      * walks the whole cursor-paginated listing and returns overwrite mode regardless of the
-     * requested mode. Bookmarks without a URL (plain notes) are not articles.
+     * requested mode. Excludes archived bookmarks (`archived=false`) unless `includeArchived` is
+     * enabled. Bookmarks without a URL (plain notes) are not articles.
      */
     sync: Effect.fn("karakeep.sync")(function* (_options?: SyncOptions) {
       const query = new URLSearchParams({ limit: "100", includeContent: "false" });
+      if (!includeArchived) query.set("archived", "false");
       const seen = new Set<string>();
       const articlesById = new Map<string, Article>();
       for (;;) {

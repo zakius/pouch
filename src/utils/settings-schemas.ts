@@ -25,6 +25,7 @@ export type InstapaperSettings = v.InferInput<typeof instapaperSettingsSchema>;
 export const karakeepConfigSchema = v.object({
   url: v.pipe(v.string(), v.url()),
   token: v.string(),
+  includeArchived: v.optional(v.boolean()),
 });
 export const karakeepSettingsSchema = v.object({
   ...baseSettingsSchema.entries,
@@ -79,7 +80,7 @@ export const wallabagSettingsSchema = v.object({
 });
 export type WallabagSettings = v.InferInput<typeof wallabagSettingsSchema>;
 
-type FormField = { name: string; label: string; type?: "text" | "password" };
+type FormField = { name: string; label: string; type?: "text" | "password" | "checkbox" };
 /** What the options page shows per backend, kept apart from the adapters so it needs no Effect code. */
 export const backendForms: Record<
   "bookmarks" | "wallabag" | "instapaper" | "raindrop" | "karakeep" | "linkace" | "linkwarden",
@@ -109,6 +110,7 @@ export const backendForms: Record<
     formConfig: [
       { name: "url", label: "Instance URL" },
       { name: "token", label: "API Token" },
+      { name: "includeArchived", label: "Include archived bookmarks", type: "checkbox" },
     ],
   },
   linkace: {

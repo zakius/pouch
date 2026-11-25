@@ -443,13 +443,18 @@ test("LinkAce options form labels the URL field as Instance URL (LinkAce 2.x)", 
   );
 });
 
-test("Karakeep options form labels the URL field as Instance URL", async () => {
+test("Karakeep options form labels the URL field as Instance URL and persists includeArchived checkbox", async () => {
   await domReadyHandler?.();
   await selectBackend("karakeep");
 
   const labels = el("config-container").querySelectorAll("label");
   const urlLabel = labels.find((label) => label.htmlFor === "url");
   expect(urlLabel?.textContent).toBe("Instance URL");
+  const archivedLabel = labels.find((label) => label.htmlFor === "includeArchived");
+  expect(archivedLabel?.textContent).toBe("Include archived bookmarks");
+  const archivedInput = el("includeArchived");
+  expect(archivedInput.type).toBe("checkbox");
+  expect(archivedInput.checked).toBe(false);
 
   el("url").value = "not-a-url";
   el("token").value = "token";
@@ -458,6 +463,30 @@ test("Karakeep options form labels the URL field as Instance URL", async () => {
   expect(el("status").textContent).toContain(
     "Instance URL must be a valid http:// or https:// URL",
   );
+
+  // Toggling includeArchived survives backend switches (drafts) and is saved as a boolean.
+  el("url").value = "https://keep.example.com";
+  archivedInput.checked = true;
+  await selectBackend("raindrop");
+  await selectBackend("karakeep");
+  expect(el("includeArchived").checked).toBe(true);
+
+  clickButton("save");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(sentMessages).toHaveLength(1);
+  expect(sentMessages[0]).toMatchObject({
+    type: "saveSettings",
+    payload: {
+      settings: {
+        backend: "karakeep",
+        apiConfig: {
+          url: "https://keep.example.com",
+          token: "token",
+          includeArchived: true,
+        },
+      },
+    },
+  });
 });
 
 test("Linkwarden options form labels the URL field as Instance URL (needs Linkwarden 2.10 or later)", async () => {

@@ -53,7 +53,7 @@ function assertDom(d: DomElementsNullable): asserts d is DomElements {
 const configCache: {
   [key in Settings["backend"]]?: Partial<Settings["apiConfig"]>;
 } = {};
-const configDrafts: Record<string, Record<string, string>> = {};
+const configDrafts: Record<string, Record<string, string | boolean>> = {};
 async function initialize(): Promise<void> {
   try {
     assertDom(dom);
@@ -101,10 +101,10 @@ async function loadBackend(backend: Settings["backend"]): Promise<void> {
       (candidate) => `${candidate}-config` === previousForm.id,
     );
     if (previousBackend) {
-      const draft: Record<string, string> = {};
+      const draft: Record<string, string | boolean> = {};
       for (const input of Array.from(previousForm.querySelectorAll("input"))) {
         if (input.name) {
-          draft[input.name] = input.value;
+          draft[input.name] = input.type === "checkbox" ? input.checked : input.value;
         }
       }
       configDrafts[previousBackend] = draft;
@@ -124,7 +124,6 @@ async function loadBackend(backend: Settings["backend"]): Promise<void> {
   });
   for (const field of formConfig) {
     const fieldContainer = document.createElement("div");
-    fieldContainer.className = "form-group";
     const label = document.createElement("label");
     label.htmlFor = field.name;
     label.textContent = field.label;
@@ -133,11 +132,23 @@ async function loadBackend(backend: Settings["backend"]): Promise<void> {
       field.type ?? (field.name.toLowerCase().includes("password") ? "password" : "text");
     input.id = field.name;
     input.name = field.name;
-    input.className = "form-control";
-    const config = configDrafts[backend] || configCache[backend] || {};
-    input.value = config[field.name] || "";
-    fieldContainer.appendChild(label);
-    fieldContainer.appendChild(input);
+    const config = (configDrafts[backend] || configCache[backend] || {}) as Record<
+      string,
+      string | boolean | undefined
+    >;
+    if (field.type === "checkbox") {
+      fieldContainer.className = "form-group-checkbox";
+      input.checked = config[field.name] === true;
+      fieldContainer.appendChild(input);
+      fieldContainer.appendChild(label);
+    } else {
+      fieldContainer.className = "form-group";
+      input.className = "form-control";
+      const storedValue = config[field.name];
+      input.value = typeof storedValue === "string" ? storedValue : "";
+      fieldContainer.appendChild(label);
+      fieldContainer.appendChild(input);
+    }
     form.appendChild(fieldContainer);
   }
   dom.configContainer.appendChild(form);
@@ -265,14 +276,17 @@ function getSettingsFromForm(): Settings | null {
     logger.error("Invalid settings provided: unsupported backend", backend);
     return null;
   }
-  const getInputValue = (id: string): string => {
-    const input = document.getElementById(id) as HTMLInputElement | null;
-    return input?.value || "";
-  };
-  const apiConfig: Record<string, string> = {};
+  const getInputElement = (id: string): HTMLInputElement | null =>
+    document.getElementById(id) as HTMLInputElement | null;
+  const apiConfig: Record<string, string | boolean> = {};
   const validationErrors: string[] = [];
   for (const field of backendForm.formConfig) {
-    const rawValue = getInputValue(field.name);
+    const input = getInputElement(field.name);
+    if (field.type === "checkbox") {
+      apiConfig[field.name] = Boolean(input?.checked);
+      continue;
+    }
+    const rawValue = input?.value || "";
     const isOptional = OPTIONAL_FORM_FIELDS.has(field.name);
     const value = isOptional ? rawValue : rawValue.trim();
     if (!isOptional && value.length === 0) {
